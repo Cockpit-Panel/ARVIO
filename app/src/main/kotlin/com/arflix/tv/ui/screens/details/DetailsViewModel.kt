@@ -2240,7 +2240,9 @@ class DetailsViewModel @Inject constructor(
             comments.toFilteredCommunityReviews(requireReview = false)
         }
 
-        return reviews.takeIf { it.size >= MIN_COMMUNITY_REVIEW_COUNT } ?: emptyList()
+        if (reviews.size >= MIN_COMMUNITY_REVIEW_COUNT) return reviews
+
+        return loadFilteredTmdbReviews(mediaType, mediaId)
     }
 
     private suspend fun loadCommunityComments(mediaType: MediaType, traktId: String): List<TraktComment> {
@@ -2276,6 +2278,30 @@ class DetailsViewModel @Inject constructor(
             .distinctBy { review ->
                 "${review.authorUsername}:${review.content.lowercase(Locale.US).take(140)}"
             }
+            .take(8)
+            .toList()
+    }
+
+    private suspend fun loadFilteredTmdbReviews(mediaType: MediaType, mediaId: Int): List<Review> {
+        return mediaRepository.getReviews(mediaType, mediaId)
+            .asSequence()
+            .filterNot { isSpammyReviewText(it.content) }
+            .mapNotNull { review ->
+                val cleanedContent = cleanCommunityReviewText(review.content)
+                if (cleanedContent.length !in MIN_COMMUNITY_REVIEW_CHARS..MAX_COMMUNITY_REVIEW_CHARS) {
+                    return@mapNotNull null
+                }
+                val wordCount = cleanedContent.split(reviewWhitespaceRegex).count { it.length > 1 }
+                if (wordCount < MIN_COMMUNITY_REVIEW_WORDS) return@mapNotNull null
+                review.copy(content = cleanedContent)
+            }
+            .distinctBy { review ->
+                "${review.authorUsername.ifBlank { review.author }}:${review.content.lowercase(Locale.US).take(140)}"
+            }
+            .sortedWith(
+                compareByDescending<Review> { it.rating ?: 0f }
+                    .thenByDescending { it.createdAt }
+            )
             .take(8)
             .toList()
     }
