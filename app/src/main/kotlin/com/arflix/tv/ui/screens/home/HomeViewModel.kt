@@ -2528,6 +2528,54 @@ class HomeViewModel @Inject constructor(
         loadNextPageForCategory(categoryId)
     }
 
+    fun onMobileCategoryVisiblePosition(categoryId: String, lastVisibleItemIndex: Int) {
+        if (lastVisibleItemIndex < 0) return
+        maybeLoadNextPageForCategory(categoryId, lastVisibleItemIndex)
+        prefetchLogosAroundCategoryPosition(categoryId, lastVisibleItemIndex)
+    }
+
+    private fun prefetchLogosAroundCategoryPosition(categoryId: String, itemIndex: Int) {
+        val category = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return
+        if (category.id.startsWith("collection_row_") || category.items.isEmpty()) return
+
+        val startIndex = (itemIndex - 2).coerceAtLeast(0)
+        val endIndex = minOf(itemIndex + prioritizedLogoPrefetchItems, category.items.lastIndex)
+        if (startIndex > endIndex) return
+
+        val itemsToLoad = (startIndex..endIndex)
+            .mapNotNull { index -> category.items.getOrNull(index) }
+            .filter { item ->
+                if (!isActionableMediaItem(item) || isIptvItem(item)) return@filter false
+                val key = "${item.mediaType}_${item.id}"
+                !hasCachedLogo(key) && logoFetchInFlight.add(key)
+            }
+
+        if (itemsToLoad.isEmpty()) return
+
+        viewModelScope.launch(networkDispatcher) {
+            val logoJobs = itemsToLoad.map { item ->
+                async(networkDispatcher) {
+                    val key = "${item.mediaType}_${item.id}"
+                    try {
+                        val logoUrl = mediaRepository.getLogoUrl(item.mediaType, item.id)
+                        if (logoUrl != null) key to logoUrl else null
+                    } catch (_: Exception) {
+                        null
+                    } finally {
+                        logoFetchInFlight.remove(key)
+                    }
+                }
+            }
+            val newLogos = logoJobs.awaitAll().filterNotNull().toMap()
+            if (newLogos.isNotEmpty()) {
+                if (putCachedLogos(newLogos)) {
+                    scheduleLogoCachePublish(highPriority = true)
+                }
+                preloadLogoImages(newLogos.values.toList())
+            }
+        }
+    }
+
     private fun loadNextPageForCategory(categoryId: String) {
         if (isHardCappedTop10Catalog(categoryId)) return
         val pagination = categoryPaginationStates.getOrPut(categoryId) {

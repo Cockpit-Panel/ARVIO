@@ -1118,6 +1118,9 @@ fun HomeScreen(
             syncStatus = uiState.syncStatus,
             hasUpdateBadge = uiState.hasUpdateBadge,
             onItemFocusedPrefetch = {},
+            onMobileCategoryVisiblePosition = { categoryId, lastVisibleItemIndex ->
+                viewModel.onMobileCategoryVisiblePosition(categoryId, lastVisibleItemIndex)
+            },
             onNavigateToDetails = onNavigateToDetails,
             onNavigateToCollection = onNavigateToCollection,
             onNavigateToSearch = onNavigateToSearch,
@@ -2242,6 +2245,7 @@ private fun HomeInputLayer(
     syncStatus: com.arflix.tv.data.repository.CloudSyncStatus = com.arflix.tv.data.repository.CloudSyncStatus.NOT_SIGNED_IN,
     hasUpdateBadge: Boolean = false,
     onItemFocusedPrefetch: (MediaItem) -> Unit = {},
+    onMobileCategoryVisiblePosition: (String, Int) -> Unit = { _, _ -> },
     onNavigateToDetails: (MediaType, Int, Int?, Int?) -> Unit,
     onNavigateToCollection: (String) -> Unit,
     onNavigateToSearch: () -> Unit,
@@ -2596,6 +2600,7 @@ private fun HomeInputLayer(
             onPlay = onPlay,
             onDetails = onDetails,
             onNavigateToDetails = onNavigateToDetails,
+            onMobileCategoryVisiblePosition = onMobileCategoryVisiblePosition,
             onItemClick = { item ->
                 if (!isActionableHomeItem(item)) {
                     return@HomeRowsLayer
@@ -2631,6 +2636,7 @@ private fun HomeRowsLayer(
     onPlay: () -> Unit = {},
     onDetails: () -> Unit = {},
     onNavigateToDetails: (MediaType, Int, Int?, Int?) -> Unit = { _, _, _, _ -> },
+    onMobileCategoryVisiblePosition: (String, Int) -> Unit = { _, _ -> },
     onItemClick: (MediaItem) -> Unit,
     onItemLongClick: ((MediaItem, Boolean) -> Unit)? = null
 ) {
@@ -2642,7 +2648,16 @@ private fun HomeRowsLayer(
             usePosterCards = usePosterCards,
             onNavigateToDetails = onNavigateToDetails,
             onItemClick = onItemClick,
-            onItemLongClick = onItemLongClick
+            onItemLongClick = onItemLongClick,
+            onCategoryVisiblePosition = { categoryId, lastVisibleItemIndex ->
+                onMobileCategoryVisiblePosition(categoryId, lastVisibleItemIndex)
+                val rowIndex = categories.indexOfFirst { it.id == categoryId }
+                val visibleItem = categories
+                    .getOrNull(rowIndex)
+                    ?.items
+                    ?.getOrNull(lastVisibleItemIndex)
+                if (visibleItem != null) onItemFocusedPrefetch(visibleItem)
+            }
         )
     } else {
         TvHomeRowsLayer(
@@ -2668,7 +2683,8 @@ private fun MobileHomeRowsLayer(
     usePosterCards: Boolean,
     onNavigateToDetails: (MediaType, Int, Int?, Int?) -> Unit = { _, _, _, _ -> },
     onItemClick: (MediaItem) -> Unit,
-    onItemLongClick: ((MediaItem, Boolean) -> Unit)? = null
+    onItemLongClick: ((MediaItem, Boolean) -> Unit)? = null,
+    onCategoryVisiblePosition: (String, Int) -> Unit = { _, _ -> }
 ) {
     val mobileItemSpacing = 10.dp
 
@@ -2697,6 +2713,19 @@ private fun MobileHomeRowsLayer(
             val rowKey = remember(category.id) { "home:${category.id}" }
             val rowUsePosterCards = rememberCatalogueRowLayoutMode(rowKey) == CardLayoutMode.POSTER
             val rowMobileItemWidth = if (rowUsePosterCards) 124.dp else 200.dp
+            val rowState = rememberLazyListState()
+
+            LaunchedEffect(rowState, category.id) {
+                snapshotFlow {
+                    rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                }
+                    .distinctUntilChanged()
+                    .collectLatest { lastVisible ->
+                        if (lastVisible >= 0) {
+                            onCategoryVisiblePosition(category.id, lastVisible)
+                        }
+                    }
+            }
 
             Column(modifier = Modifier.padding(bottom = 8.dp)) {
                 // Section title
@@ -2720,6 +2749,7 @@ private fun MobileHomeRowsLayer(
 
                 // Horizontal card row with touch scrolling
                 LazyRow(
+                    state = rowState,
                     modifier = Modifier.arvioDpadFocusGroup(),
                     contentPadding = PaddingValues(
                         start = contentStartPadding,
