@@ -1124,7 +1124,7 @@ class IptvRepository @Inject constructor(
                     var bestCoverage = epgCoverageRatio(channels, resolvedNowNext)
                     val mergedXmlNowNext = ConcurrentHashMap(resolvedNowNext)
                     var firstSuccessfulXmlUrl: String? = null
-                    epgCandidatesToTry.forEachIndexed { index, epgUrl ->
+                    for ((index, epgUrl) in epgCandidatesToTry.withIndex()) {
                         val pct = (90 + ((index * 8) / epgCandidatesToTry.size.coerceAtLeast(1))).coerceIn(90, 98)
                         onProgress(IptvLoadProgress("Loading full EPG (${index + 1}/${epgCandidatesToTry.size})...", pct))
                         val attempt = runCatching {
@@ -1154,6 +1154,10 @@ class IptvRepository @Inject constructor(
                                 }
                                 resolved = true
                                 System.err.println("[EPG] XMLTV candidate ${index + 1} merged coverage=${(coverage * 100).toInt()}%")
+                                if (coverage >= completeEpgCoverageTarget) {
+                                    System.err.println("[EPG] XMLTV coverage target reached; skipping remaining EPG candidates")
+                                    break
+                                }
                             }
                         } else {
                             epgFailureMessage = attempt.exceptionOrNull()?.message
@@ -4111,11 +4115,11 @@ class IptvRepository @Inject constructor(
     private fun resolveEpgCandidates(config: IptvConfig): List<String> {
         val allLists = activePlaylists(config)
         return buildList {
+            preferredDerivedEpgUrl?.let { add(it) }
             allLists.forEach { list ->
                 list.allEpgUrls().forEach { add(it) }
                 val creds = resolveXtreamCredentials(list)
                 if (creds != null) {
-                    preferredDerivedEpgUrl?.takeIf { it.startsWith(creds.baseUrl) }?.let { add(it) }
                     add("${creds.baseUrl}/xmltv.php?username=${creds.username}&password=${creds.password}")
                     add("${creds.baseUrl}/get.php?username=${creds.username}&password=${creds.password}&type=xmltv")
                     add("${creds.baseUrl}/get.php?username=${creds.username}&password=${creds.password}&type=xml")
@@ -4936,6 +4940,7 @@ class IptvRepository @Inject constructor(
 
         val keyLookup = buildChannelKeyLookup(channels)
         val xmlChannelNameMap = mutableMapOf<String, MutableSet<String>>()
+        val xmlChannelResolveCache = mutableMapOf<String, IptvChannel>()
         val nowCandidates = mutableMapOf<String, IptvProgram?>()
         val upcomingCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
         val recentCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
@@ -5001,7 +5006,10 @@ class IptvRepository @Inject constructor(
                         }
                         parser.name.equals("programme", ignoreCase = true) -> {
                         val key = currentChannelKey
-                        val channel = key?.let { resolveXmlTvChannel(it, xmlChannelNameMap, keyLookup) }
+                        val channel = key?.let {
+                            xmlChannelResolveCache[it] ?: resolveXmlTvChannel(it, xmlChannelNameMap, keyLookup)
+                                ?.also { resolved -> xmlChannelResolveCache[it] = resolved }
+                        }
                         if (channel != null && currentStop > currentStart) {
                             val program = IptvProgram(
                                 title = currentTitle ?: "Unknown program",
@@ -5029,17 +5037,7 @@ class IptvRepository @Inject constructor(
             eventType = parser.next()
         }
 
-        return channels.associate { channel ->
-            val future = upcomingCandidates[channel.id].orEmpty()
-            val recent = recentCandidates[channel.id].orEmpty().sortedBy { it.startUtcMillis }
-            channel.id to IptvNowNext(
-                now = nowCandidates[channel.id],
-                next = future.getOrNull(0),
-                later = future.getOrNull(1),
-                upcoming = future,
-                recent = recent
-            )
-        }
+        return buildParsedNowNextResult(channels, nowCandidates, upcomingCandidates, recentCandidates)
     }
 
     private fun parseXmlTvNowNextWithSax(
@@ -5053,6 +5051,7 @@ class IptvRepository @Inject constructor(
 
         val keyLookup = buildChannelKeyLookup(channels)
         val xmlChannelNameMap = mutableMapOf<String, MutableSet<String>>()
+        val xmlChannelResolveCache = mutableMapOf<String, IptvChannel>()
         val nowCandidates = mutableMapOf<String, IptvProgram?>()
         val upcomingCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
         val recentCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
@@ -5152,7 +5151,10 @@ class IptvRepository @Inject constructor(
                     }
                     "programme" -> {
                         val key = currentChannelKey
-                        val channel = key?.let { resolveXmlTvChannel(it, xmlChannelNameMap, keyLookup) }
+                        val channel = key?.let {
+                            xmlChannelResolveCache[it] ?: resolveXmlTvChannel(it, xmlChannelNameMap, keyLookup)
+                                ?.also { resolved -> xmlChannelResolveCache[it] = resolved }
+                        }
                         if (channel != null && currentStop > currentStart) {
                             val program = IptvProgram(
                                 title = currentTitle ?: "Unknown program",
@@ -5184,18 +5186,27 @@ class IptvRepository @Inject constructor(
 
         parser.parse(input, handler)
 
-        val result = channels.associate { channel ->
+        return buildParsedNowNextResult(channels, nowCandidates, upcomingCandidates, recentCandidates)
+    }
+
+    private fun buildParsedNowNextResult(
+        channels: List<IptvChannel>,
+        nowCandidates: Map<String, IptvProgram?>,
+        upcomingCandidates: Map<String, List<IptvProgram>>,
+        recentCandidates: Map<String, List<IptvProgram>>
+    ): Map<String, IptvNowNext> {
+        return channels.mapNotNull { channel ->
             val future = upcomingCandidates[channel.id].orEmpty()
             val recent = recentCandidates[channel.id].orEmpty().sortedBy { it.startUtcMillis }
-            channel.id to IptvNowNext(
+            val nowNext = IptvNowNext(
                 now = nowCandidates[channel.id],
                 next = future.getOrNull(0),
                 later = future.getOrNull(1),
                 upcoming = future,
                 recent = recent
             )
-        }
-        return result
+            if (hasProgramData(nowNext)) channel.id to nowNext else null
+        }.toMap()
     }
 
     private fun pickNow(existing: IptvProgram?, candidate: IptvProgram, nowUtcMillis: Long): IptvProgram? {
