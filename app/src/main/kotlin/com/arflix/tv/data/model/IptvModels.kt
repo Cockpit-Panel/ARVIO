@@ -34,7 +34,7 @@ data class IptvNowNext(
     val next: IptvProgram? = null,
     val later: IptvProgram? = null,
     val upcoming: List<IptvProgram> = emptyList(),
-    val recent: List<IptvProgram> = emptyList()  // Programs that ended within the past ~60-90 min
+    val recent: List<IptvProgram> = emptyList()  // Past programs kept for replay/catchup when available
 )
 
 /**

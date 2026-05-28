@@ -42,7 +42,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import kotlinx.coroutines.delay
 
 /**
@@ -56,6 +56,7 @@ fun FullscreenHud(
     nowNext: IptvNowNext?,
     pokeSignal: Int,
     onBackClick: (() -> Unit)? = null,
+    onGuideClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var visible by remember { mutableStateOf(true) }
@@ -181,6 +182,9 @@ fun FullscreenHud(
                                 style = LiveType.TimeMono.copy(color = LiveColors.Accent),
                             )
                         }
+                        if (onGuideClick != null) {
+                            HudActionButton("GUIDE", onGuideClick)
+                        }
                     }
                     Text(
                         text = now?.title
@@ -258,7 +262,7 @@ fun FullscreenHud(
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ArrowBack,
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                         contentDescription = "Go Back",
                         tint = Color.White,
                         modifier = Modifier.size(24.dp),
@@ -279,5 +283,22 @@ private fun HudBadge(label: String, fg: Color, bg: Color) {
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
         Text(label, style = LiveType.Badge.copy(color = fg, fontSize = 10.sp))
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun HudActionButton(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(LiveColors.Accent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Text(
+            text = label,
+            style = LiveType.Badge.copy(color = LiveColors.Bg, fontSize = 10.sp),
+        )
     }
 }

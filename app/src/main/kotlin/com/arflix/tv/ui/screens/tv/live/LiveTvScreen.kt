@@ -477,6 +477,8 @@ fun LiveTvScreen(
     // Full-screen playback mode — pressing OK on an EPG row expands the
     // mini-player to cover the whole screen. Back collapses back to the grid.
     var isFullScreen by rememberSaveable { mutableStateOf(initialStreamUrl != null) }
+    var fullscreenGuideOpen by remember { mutableStateOf(false) }
+    var fullscreenGuideTab by remember { mutableStateOf(FullscreenGuideTab.Now) }
     var variantPickerChannel by remember { mutableStateOf<EnrichedChannel?>(null) }
     LaunchedEffect(isFullScreen) {
         onFullscreenChanged(isFullScreen)
@@ -493,6 +495,16 @@ fun LiveTvScreen(
     // Monotonic counter bumped on every DPAD key while in fullscreen —
     // the HUD observes this to re-show and reset its auto-hide timer.
     var hudPokeSignal by remember { mutableStateOf(0) }
+
+    fun openFullscreenGuide() {
+        fullscreenGuideTab = if (playingCatchupProgram != null) {
+            FullscreenGuideTab.Past
+        } else {
+            FullscreenGuideTab.Now
+        }
+        fullscreenGuideOpen = true
+        hudPokeSignal++
+    }
 
     DisposableEffect(activity, isFullScreen, isTouchDevice) {
         if (!isTouchDevice || !isFullScreen) {
@@ -534,6 +546,7 @@ fun LiveTvScreen(
         focusedChannelId = all[nextIdx].id
         rememberedChannelByCategory[selectedCategoryId] = all[nextIdx].id
         playingCatchupProgram = null
+        fullscreenGuideOpen = false
     }
 
     fun focusPlaylistSearch() {
@@ -570,6 +583,7 @@ fun LiveTvScreen(
     }
 
     fun exitFullScreenPlayback() {
+        fullscreenGuideOpen = false
         isFullScreen = false
         focusChannelList(playingChannelId ?: focusedChannelId)
     }
@@ -587,6 +601,7 @@ fun LiveTvScreen(
             // First tap or different channel → tune in mini-player
             playingChannelId = channel.id
             playingCatchupProgram = null
+            fullscreenGuideOpen = false
         }
     }
 
@@ -602,6 +617,7 @@ fun LiveTvScreen(
         focusedChannelId = displayId
         rememberedChannelByCategory[selectedCategoryId] = displayId
         playingCatchupProgram = null
+        fullscreenGuideOpen = false
         focusChannelList(displayId)
     }
 
@@ -610,7 +626,15 @@ fun LiveTvScreen(
         rememberedChannelByCategory[selectedCategoryId] = channel.id
         playingChannelId = channel.id
         playingCatchupProgram = program
+        fullscreenGuideOpen = false
         focusChannelList(channel.id)
+    }
+
+    fun playProgramInFullscreen(program: IptvProgram?) {
+        playingCatchupProgram = program
+        fullscreenGuideOpen = false
+        isFullScreen = true
+        hudPokeSignal++
     }
 
     // ExoPlayer lifecycle — mirrors the legacy screen's setup verbatim so live
@@ -622,6 +646,7 @@ fun LiveTvScreen(
         playingChannelId = channel.id
         focusedChannelId = channel.id
         playingCatchupProgram = null
+        fullscreenGuideOpen = false
         rememberedChannelByCategory[selectedCategoryId] = channel.id
         focusChannelList(channel.id)
         hudPokeSignal++
@@ -881,7 +906,10 @@ fun LiveTvScreen(
 
     BackHandler(enabled = searchOpen) { searchOpen = false }
     BackHandler(enabled = !searchOpen && variantPickerChannel != null) { variantPickerChannel = null }
-    BackHandler(enabled = !searchOpen && isFullScreen) {
+    BackHandler(enabled = !searchOpen && isFullScreen && fullscreenGuideOpen) {
+        fullscreenGuideOpen = false
+    }
+    BackHandler(enabled = !searchOpen && isFullScreen && !fullscreenGuideOpen) {
         exitFullScreenPlayback()
     }
     BackHandler(enabled = !searchOpen && variantPickerChannel == null && !isFullScreen) {
@@ -1237,6 +1265,26 @@ fun LiveTvScreen(
                     .focusable()
                     .onPreviewKeyEvent { ev ->
                         if (!isFullScreen || ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        if (fullscreenGuideOpen) {
+                            when (ev.key) {
+                                Key.Back, Key.Escape -> {
+                                    fullscreenGuideOpen = false
+                                    hudPokeSignal++
+                                    true
+                                }
+                                Key.DirectionLeft -> {
+                                    fullscreenGuideTab = fullscreenGuideTab.previous()
+                                    hudPokeSignal++
+                                    true
+                                }
+                                Key.DirectionRight -> {
+                                    fullscreenGuideTab = fullscreenGuideTab.next()
+                                    hudPokeSignal++
+                                    true
+                                }
+                                else -> false
+                            }
+                        } else {
                         if (ev.nativeKeyEvent.repeatCount == 0) {
                             digitForTvKeyCode(ev.nativeKeyEvent.keyCode)?.let { digit ->
                                 hudPokeSignal++
@@ -1247,9 +1295,10 @@ fun LiveTvScreen(
                             Key.Back, Key.Escape -> { exitFullScreenPlayback(); true }
                             Key.DirectionUp -> { zap(+1); hudPokeSignal++; true }
                             Key.DirectionDown -> { zap(-1); hudPokeSignal++; true }
-                            Key.DirectionCenter, Key.Enter -> { hudPokeSignal++; true }
+                            Key.DirectionCenter, Key.Enter -> { openFullscreenGuide(); true }
                             Key.DirectionLeft, Key.DirectionRight -> { hudPokeSignal++; false }
                             else -> false
+                        }
                         }
                     }
                     .then(
@@ -1276,15 +1325,31 @@ fun LiveTvScreen(
                     update = { it.player = exoPlayer },
                     modifier = Modifier.fillMaxSize(),
                 )
-                if (isFullScreen) {
+                if (isFullScreen && !fullscreenGuideOpen) {
                     FullscreenHud(
                         channel = playingChannel,
                         nowNext = currentNowNext,
                         pokeSignal = hudPokeSignal,
                         onBackClick = if (isTouchDevice) { { exitFullScreenPlayback() } } else null,
+                        onGuideClick = { openFullscreenGuide() },
                         modifier = Modifier,
                     )
                 }
+                FullscreenGuideOverlay(
+                    visible = isFullScreen && fullscreenGuideOpen,
+                    channel = playingChannel,
+                    guide = playingChannelId?.let { state.snapshot.nowNext[it] },
+                    selectedProgram = playingCatchupProgram,
+                    selectedTab = fullscreenGuideTab,
+                    isTouchDevice = isTouchDevice,
+                    onSelectedTabChange = { fullscreenGuideTab = it },
+                    onDismiss = {
+                        fullscreenGuideOpen = false
+                        hudPokeSignal++
+                    },
+                    onProgramSelect = { program -> playProgramInFullscreen(program) },
+                    modifier = Modifier,
+                )
             }
         }
 

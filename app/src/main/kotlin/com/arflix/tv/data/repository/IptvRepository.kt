@@ -234,15 +234,16 @@ class IptvRepository @Inject constructor(
     private val playlistCacheMs = staleAfterMs
     private val epgCacheMs = staleAfterMs
     private val epgEmptyRetryMs = 30_000L
-    private val epgUpcomingProgramLimit = 14
+    private val epgUpcomingProgramLimit = 48
     private val epgRecentProgramLimit = 2
     private val completeEpgCoverageTarget = 0.98f
     private val xtreamShortEpgLimit = 8
     private val startupShortEpgChannelLimit = 1200
     private val xtreamShortEpgBatchSize = 512
     private val xtreamShortEpgConcurrency = 32
-    private val cacheUpcomingProgramLimit = 8
+    private val cacheUpcomingProgramLimit = 24
     private val cacheRecentProgramLimit = 1
+    private val cacheCatchupRecentProgramLimit = 96
     private val catchupRecentProgramLimit = 1000
     private val xtreamVodCacheMs = 6 * 60 * 60_000L
     private val iptvHttpClient: OkHttpClient by lazy {
@@ -5683,8 +5684,9 @@ class IptvRepository @Inject constructor(
                 .asSequence()
                 .filter { (_, value) -> hasProgramData(value) }
                 .associate { (channelId, value) ->
-                    val recentLimit = if ((channelsById[channelId]?.catchupDays ?: 0) > 0) {
-                        catchupRecentProgramLimit
+                    val isCatchupChannel = effectiveCatchupDays(channelsById[channelId]) > 0
+                    val recentLimit = if (isCatchupChannel) {
+                        cacheCatchupRecentProgramLimit
                     } else {
                         cacheRecentProgramLimit
                     }
@@ -5713,11 +5715,16 @@ class IptvRepository @Inject constructor(
                 cacheFile().writeBytes(compressed)
             } else {
                 val reducedPayload = payload.copy(
-                    nowNext = compactNowNext.mapValues { (_, value) ->
+                    nowNext = compactNowNext.mapValues { (channelId, value) ->
+                        val keepCatchupRecent = if (effectiveCatchupDays(channelsById[channelId]) > 0) {
+                            value.recent.takeLast(cacheCatchupRecentProgramLimit / 2)
+                        } else {
+                            emptyList()
+                        }
                         value.copy(
                             later = null,
-                            upcoming = emptyList(),
-                            recent = emptyList()
+                            upcoming = value.upcoming.take(8),
+                            recent = keepCatchupRecent
                         )
                     }
                 )
