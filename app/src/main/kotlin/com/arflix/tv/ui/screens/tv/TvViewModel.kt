@@ -87,6 +87,7 @@ class TvViewModel @Inject constructor(
     private var completeEpgBackfillJob: Job? = null
     private var lastCompleteEpgBackfillKey: String? = null
     private var lastVisibleForcedCompleteEpgAt: Long = 0L
+    private var lastCompleteEpgBackfillCompletedAt: Long = 0L
     private var preparedContentJob: Job? = null
     private var preparedContentRevision: Long = 0L
     private val resolvedStalkerStreamCache = LinkedHashMap<String, String>()
@@ -700,6 +701,7 @@ class TvViewModel @Inject constructor(
                     )
                 )
                 val finalCoveragePct = (epgCoverageRatio(mergedSnapshot) * 100).toInt()
+                lastCompleteEpgBackfillCompletedAt = System.currentTimeMillis()
                 System.err.println("[EPG-Complete] merged full guide coverage=$finalCoveragePct%")
                 if (finalCoveragePct < 80) {
                     AppLogger.breadcrumb(
@@ -871,12 +873,11 @@ class TvViewModel @Inject constructor(
                 }
                 if (unresolvedIds.isNotEmpty()) {
                     val current = _uiState.value
+                    val hasGuideSource = current.hasPotentialGuideSource && hasNetworkEpgSource(current.config)
+                    val fullGuideRecentlyCompleted = lastCompleteEpgBackfillCompletedAt > 0L &&
+                        System.currentTimeMillis() - lastCompleteEpgBackfillCompletedAt < 5 * 60_000L
                     val waitingForFullGuide = current.epgBackfillInProgress ||
-                        (
-                            current.hasPotentialGuideSource &&
-                                hasNetworkEpgSource(current.config) &&
-                                !hasAnyEpgData(current.snapshot)
-                            )
+                        (hasGuideSource && !fullGuideRecentlyCompleted)
                     if (waitingForFullGuide) {
                         clearEpgLoading(unresolvedIds)
                         if (!current.epgBackfillInProgress) {

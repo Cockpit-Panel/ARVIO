@@ -5169,7 +5169,7 @@ class IptvRepository @Inject constructor(
 
         val keyLookup = buildChannelKeyLookup(channels)
         val xmlChannelNameMap = mutableMapOf<String, MutableSet<String>>()
-        val xmlChannelResolveCache = mutableMapOf<String, IptvChannel>()
+        val xmlChannelResolveCache = mutableMapOf<String, List<IptvChannel>>()
         val nowCandidates = mutableMapOf<String, IptvProgram?>()
         val upcomingCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
         val recentCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
@@ -5235,11 +5235,11 @@ class IptvRepository @Inject constructor(
                         }
                         parser.name.equals("programme", ignoreCase = true) -> {
                         val key = currentChannelKey
-                        val channel = key?.let {
-                            xmlChannelResolveCache[it] ?: resolveXmlTvChannel(it, xmlChannelNameMap, keyLookup)
-                                ?.also { resolved -> xmlChannelResolveCache[it] = resolved }
-                        }
-                        if (channel != null && currentStop > currentStart) {
+                        val resolvedChannels = key?.let {
+                            xmlChannelResolveCache[it] ?: resolveXmlTvChannels(it, xmlChannelNameMap, keyLookup)
+                                .also { resolved -> xmlChannelResolveCache[it] = resolved }
+                        }.orEmpty()
+                        if (resolvedChannels.isNotEmpty() && currentStop > currentStart) {
                             val program = IptvProgram(
                                 title = currentTitle ?: "Unknown program",
                                 description = currentDesc,
@@ -5247,15 +5247,17 @@ class IptvRepository @Inject constructor(
                                 endUtcMillis = currentStop
                             )
 
-                            val nowProgram = pickNow(nowCandidates[channel.id], program, nowUtc)
-                            nowCandidates[channel.id] = nowProgram
-                            if (program.startUtcMillis > nowUtc) {
-                                val future = upcomingCandidates.getOrPut(channel.id) { mutableListOf() }
-                                addUpcomingCandidate(future, program, limit = epgUpcomingProgramLimit)
-                            } else if (program.endUtcMillis <= nowUtc && program.endUtcMillis > recentCutoffForChannel(channel, nowUtc)) {
-                                val recent = recentCandidates.getOrPut(channel.id) { mutableListOf() }
-                                val limit = recentProgramLimitForChannel(channel)
-                                addRecentCandidate(recent, program, limit)
+                            resolvedChannels.forEach { channel ->
+                                val nowProgram = pickNow(nowCandidates[channel.id], program, nowUtc)
+                                nowCandidates[channel.id] = nowProgram
+                                if (program.startUtcMillis > nowUtc) {
+                                    val future = upcomingCandidates.getOrPut(channel.id) { mutableListOf() }
+                                    addUpcomingCandidate(future, program, limit = epgUpcomingProgramLimit)
+                                } else if (program.endUtcMillis <= nowUtc && program.endUtcMillis > recentCutoffForChannel(channel, nowUtc)) {
+                                    val recent = recentCandidates.getOrPut(channel.id) { mutableListOf() }
+                                    val limit = recentProgramLimitForChannel(channel)
+                                    addRecentCandidate(recent, program, limit)
+                                }
                             }
                         }
                         currentChannelKey = null
@@ -5280,7 +5282,7 @@ class IptvRepository @Inject constructor(
 
         val keyLookup = buildChannelKeyLookup(channels)
         val xmlChannelNameMap = mutableMapOf<String, MutableSet<String>>()
-        val xmlChannelResolveCache = mutableMapOf<String, IptvChannel>()
+        val xmlChannelResolveCache = mutableMapOf<String, List<IptvChannel>>()
         val nowCandidates = mutableMapOf<String, IptvProgram?>()
         val upcomingCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
         val recentCandidates = mutableMapOf<String, MutableList<IptvProgram>>()
@@ -5380,19 +5382,20 @@ class IptvRepository @Inject constructor(
                     }
                     "programme" -> {
                         val key = currentChannelKey
-                        val channel = key?.let {
-                            xmlChannelResolveCache[it] ?: resolveXmlTvChannel(it, xmlChannelNameMap, keyLookup)
-                                ?.also { resolved -> xmlChannelResolveCache[it] = resolved }
-                        }
-                        if (channel != null && currentStop > currentStart) {
+                        val resolvedChannels = key?.let {
+                            xmlChannelResolveCache[it] ?: resolveXmlTvChannels(it, xmlChannelNameMap, keyLookup)
+                                .also { resolved -> xmlChannelResolveCache[it] = resolved }
+                        }.orEmpty()
+                        if (resolvedChannels.isNotEmpty() && currentStop > currentStart) {
                             val program = IptvProgram(
                                 title = currentTitle ?: "Unknown program",
                                 description = currentDesc,
                                 startUtcMillis = currentStart,
                                 endUtcMillis = currentStop
                             )
-                            val nowProgram = pickNow(nowCandidates[channel.id], program, nowUtc)
-                            nowCandidates[channel.id] = nowProgram
+                            resolvedChannels.forEach { channel ->
+                                val nowProgram = pickNow(nowCandidates[channel.id], program, nowUtc)
+                                nowCandidates[channel.id] = nowProgram
                             if (program.startUtcMillis > nowUtc) {
                                 val future = upcomingCandidates.getOrPut(channel.id) { mutableListOf() }
                                 addUpcomingCandidate(future, program, limit = epgUpcomingProgramLimit)
@@ -5401,6 +5404,7 @@ class IptvRepository @Inject constructor(
                                 val recent = recentCandidates.getOrPut(channel.id) { mutableListOf() }
                                 val limit = recentProgramLimitForChannel(channel)
                                 addRecentCandidate(recent, program, limit)
+                            }
                             }
                         }
                         currentChannelKey = null
@@ -5734,51 +5738,100 @@ class IptvRepository @Inject constructor(
         return normalizeChannelKey(value).replace(NON_ALPHA_NUM_REGEX_INLINE, "")
     }
 
-    private fun buildChannelKeyLookup(channels: List<IptvChannel>): Map<String, IptvChannel> {
-        val map = LinkedHashMap<String, IptvChannel>(channels.size * 4)
+    private fun buildChannelKeyLookup(channels: List<IptvChannel>): Map<String, List<IptvChannel>> {
+        val map = LinkedHashMap<String, MutableList<IptvChannel>>(channels.size * 8)
         channels.forEach { channel ->
             val candidates = mutableSetOf<String>()
-            candidates += normalizeChannelKey(channel.name)
-            candidates += normalizeLooseKey(channel.name)
-            candidates += normalizeLooseKey(stripQualitySuffixes(channel.name))
+            candidates += guideKeyCandidates(channel.name)
 
             channel.epgId?.takeIf { it.isNotBlank() }?.let { epgId ->
-                candidates += normalizeChannelKey(epgId)
-                candidates += normalizeLooseKey(epgId)
+                candidates += guideKeyCandidates(epgId)
             }
 
+            channel.tvgName?.takeIf { it.isNotBlank() }?.let { tvgName ->
+                candidates += guideKeyCandidates(tvgName)
+            }
             extractAttr(channel.rawTitle, "tvg-name")?.takeIf { it.isNotBlank() }?.let { tvgName ->
-                candidates += normalizeChannelKey(tvgName)
-                candidates += normalizeLooseKey(tvgName)
-                candidates += normalizeLooseKey(stripQualitySuffixes(tvgName))
+                candidates += guideKeyCandidates(tvgName)
             }
 
             candidates.filter { it.isNotBlank() }.forEach { key ->
-                map.putIfAbsent(key, channel)
+                val bucket = map.getOrPut(key) { mutableListOf() }
+                if (bucket.none { it.id == channel.id }) {
+                    bucket += channel
+                }
             }
         }
         return map
     }
 
-    private fun resolveXmlTvChannel(
+    private fun resolveXmlTvChannels(
         xmlChannelKey: String,
         xmlChannelNameMap: Map<String, Set<String>>,
-        keyLookup: Map<String, IptvChannel>
-    ): IptvChannel? {
+        keyLookup: Map<String, List<IptvChannel>>
+    ): List<IptvChannel> {
         val normalized = normalizeChannelKey(xmlChannelKey)
-        val normalizedLoose = normalizeLooseKey(xmlChannelKey)
 
-        keyLookup[normalized]?.let { return it }
-        keyLookup[normalizedLoose]?.let { return it }
-        keyLookup[normalizeLooseKey(stripQualitySuffixes(xmlChannelKey))]?.let { return it }
+        guideKeyCandidates(xmlChannelKey).forEach { key ->
+            keyLookup[key]?.let { return it }
+        }
 
         val names = xmlChannelNameMap[normalized].orEmpty()
         names.forEach { display ->
-            keyLookup[display]?.let { return it }
-            keyLookup[normalizeLooseKey(display)]?.let { return it }
-            keyLookup[normalizeLooseKey(stripQualitySuffixes(display))]?.let { return it }
+            guideKeyCandidates(display).forEach { key ->
+                keyLookup[key]?.let { return it }
+            }
         }
-        return null
+        return emptyList()
+    }
+
+    private fun guideKeyCandidates(value: String?): Set<String> {
+        val raw = value?.trim().orEmpty()
+        if (raw.isBlank()) return emptySet()
+
+        val withoutBrackets = raw
+            .replace(BRACKET_CONTENT_REGEX, " ")
+            .replace(PAREN_CONTENT_REGEX, " ")
+            .replace(MULTI_SPACE_REGEX, " ")
+            .trim()
+        val withoutPrefix = stripGuidePrefix(withoutBrackets)
+        val afterPipe = withoutBrackets.substringAfterLast('|').trim()
+        val beforeDomain = withoutBrackets
+            .takeIf { '.' in it && !it.any(Char::isWhitespace) }
+            ?.substringBefore('.')
+            ?.trim()
+
+        val rawAliases = buildList {
+            add(raw)
+            add(withoutBrackets)
+            add(stripQualitySuffixes(withoutBrackets))
+            add(withoutPrefix)
+            add(stripQualitySuffixes(withoutPrefix))
+            add(afterPipe)
+            add(stripQualitySuffixes(afterPipe))
+            beforeDomain?.let {
+                add(it)
+                add(stripQualitySuffixes(it))
+            }
+        }
+
+        return rawAliases
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .flatMap { alias ->
+                sequenceOf(
+                    normalizeChannelKey(alias),
+                    normalizeLooseKey(alias),
+                    normalizeLooseKey(stripQualitySuffixes(alias))
+                )
+            }
+            .filter { it.isNotBlank() }
+            .toSet()
+    }
+
+    private fun stripGuidePrefix(value: String): String {
+        return value.replace(GUIDE_PREFIX_REGEX, "").trim()
     }
 
     private fun stripQualitySuffixes(value: String): String {
@@ -6684,6 +6737,7 @@ class IptvRepository @Inject constructor(
         val CSS_BRACE_REGEX = Regex("\\{[^}]*\\}")
         val NON_ALPHA_NUM_REGEX_INLINE = Regex("[^a-z0-9]")
         val QUALITY_SUFFIX_REGEX = Regex("\\b(hd|fhd|uhd|sd|4k|hevc|x265|x264|h264|h265)\\b")
+        val GUIDE_PREFIX_REGEX = Regex("""^\s*[a-z]{2,4}\s*[\|:：/\-]+\s*""", RegexOption.IGNORE_CASE)
 
         val XMLTV_LOCAL_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
 
