@@ -594,7 +594,8 @@ class TvViewModel @Inject constructor(
         val channels = state.snapshot.channels
         if (!state.isConfigured || channels.isEmpty()) return
         if (!hasNetworkEpgSource(state.config)) return
-        if (!force && isLargeIptvList(channels.size)) {
+        val hasGuideData = hasAnyEpgData(state.snapshot)
+        if (!force && isLargeIptvList(channels.size) && hasGuideData) {
             completeEpgBackfillJob?.cancel()
             completeEpgBackfillJob = null
             setEpgBackfillInProgress(false)
