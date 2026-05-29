@@ -162,6 +162,7 @@ class IptvRepository @Inject constructor(
     private val xtreamDataMutex = Mutex()
     private val xtreamSeriesEpisodeCacheMutex = Mutex()
     private val xtreamSeriesEpisodeInFlightMutex = Mutex()
+    private val epgIndex by lazy { IptvEpgIndex(context) }
     private val maxSeriesEpisodeCacheEntries = 8
 
     @Volatile
@@ -188,6 +189,8 @@ class IptvRepository @Inject constructor(
     private var cacheOwnerProfileId: String? = null
     @Volatile
     private var cacheOwnerConfigSig: String? = null
+    @Volatile
+    private var currentEpgIndexKey: String = ""
     @Volatile
     private var xtreamVodCacheKey: String? = null
     @Volatile
@@ -1198,6 +1201,7 @@ class IptvRepository @Inject constructor(
                             cachedNowNext.putAll(parsed) // Short EPG data takes priority (fresher)
                             resolvedNowNext = cachedNowNext
                             cachedEpgAt = System.currentTimeMillis()
+                            persistEpgIndexChannels(config, parsed, cachedEpgAt)
                             epgUpdated = true
                             resolved = true
                             System.err.println("[EPG] Xtream short EPG SUCCESS: ${parsed.size} fresh, ${cachedNowNext.size} total cached")
@@ -1260,6 +1264,7 @@ class IptvRepository @Inject constructor(
                         resolvedNowNext = mergedXmlNowNext
                         cachedNowNext = ConcurrentHashMap(mergedXmlNowNext)
                         cachedEpgAt = System.currentTimeMillis()
+                        persistEpgIndexAll(config, mergedXmlNowNext, cachedEpgAt)
                         epgUpdated = true
                         System.err.println("[EPG] Final merged EPG coverage=${(epgCoverageRatio(channels, mergedXmlNowNext) * 100).toInt()}% for ${channels.size} channels")
                     }
@@ -1292,6 +1297,7 @@ class IptvRepository @Inject constructor(
                                 resolvedNowNext = merged
                                 cachedNowNext = ConcurrentHashMap(merged)
                                 cachedEpgAt = System.currentTimeMillis()
+                                persistEpgIndexChannels(config, parsed, cachedEpgAt)
                                 epgUpdated = true
                                 val backfilledCoverage = epgCoverageRatio(channels, merged)
                                 System.err.println(
@@ -1317,6 +1323,7 @@ class IptvRepository @Inject constructor(
                             cachedNowNext.putAll(parsed)
                             resolvedNowNext = cachedNowNext
                             cachedEpgAt = System.currentTimeMillis()
+                            persistEpgIndexChannels(config, parsed, cachedEpgAt)
                             epgUpdated = true
                             resolved = true
                             System.err.println("[EPG] Broad Xtream fallback SUCCESS: ${parsed.size} fresh, ${cachedNowNext.size} total cached")
@@ -1508,13 +1515,27 @@ class IptvRepository @Inject constructor(
      */
     fun reDeriveCachedNowNext(channelIds: Set<String>): Map<String, IptvNowNext>? {
         val cached = cachedNowNext
-        if (cached.isEmpty()) return null
+        val missingIndexedIds = channelIds.filterTo(LinkedHashSet()) { channelId ->
+            !hasProgramData(cached[channelId])
+        }
+        val indexKey = currentEpgIndexKey
+        if (missingIndexedIds.isNotEmpty() && indexKey.isNotBlank()) {
+            val indexed = runCatching {
+                epgIndex.loadNowNext(indexKey, missingIndexedIds)
+            }.onFailure { error ->
+                System.err.println("[EPG-Index] Failed to read guide index: ${error.message}")
+            }.getOrDefault(emptyMap())
+            if (indexed.isNotEmpty()) {
+                cachedNowNext.putAll(indexed)
+            }
+        }
+        if (cachedNowNext.isEmpty()) return null
         val nowMs = System.currentTimeMillis()
         val channelsById = cachedChannels.associateBy { it.id }
 
         val result = mutableMapOf<String, IptvNowNext>()
         for (channelId in channelIds) {
-            val existing = cached[channelId] ?: continue
+            val existing = cachedNowNext[channelId] ?: continue
             val recentCutoff = recentCutoffForChannel(channelsById[channelId], nowMs)
             // Collect all known programs from the cached entry efficiently
             val allPrograms = java.util.ArrayList<IptvProgram>(
@@ -1674,6 +1695,7 @@ class IptvRepository @Inject constructor(
             // Merge into cache (in-place, no copy)
             cachedNowNext.putAll(mergedNowNext)
             cachedEpgAt = System.currentTimeMillis()
+            persistEpgIndexChannels(config, mergedNowNext, cachedEpgAt)
             if (cachedEpgAt - lastEpgCachePersistAt > 30_000L) {
                 lastEpgCachePersistAt = cachedEpgAt
                 persistCurrentCacheSnapshot(config, cachedEpgAt)
@@ -1697,6 +1719,32 @@ class IptvRepository @Inject constructor(
             nowNext = nowNext,
             loadedAtMs = loadedAtMs.coerceAtLeast(cachedPlaylistAt.coerceAtLeast(loadedAtMs))
         )
+    }
+
+    private fun persistEpgIndexAll(
+        config: IptvConfig,
+        nowNext: Map<String, IptvNowNext>,
+        updatedAtMs: Long = System.currentTimeMillis()
+    ) {
+        if (!hasAnyProgramData(nowNext)) return
+        runCatching {
+            epgIndex.replaceAll(currentEpgIndexKey(config), nowNext, updatedAtMs)
+        }.onFailure { error ->
+            System.err.println("[EPG-Index] Failed to replace guide index: ${error.message}")
+        }
+    }
+
+    private fun persistEpgIndexChannels(
+        config: IptvConfig,
+        nowNext: Map<String, IptvNowNext>,
+        updatedAtMs: Long = System.currentTimeMillis()
+    ) {
+        if (!hasAnyProgramData(nowNext)) return
+        runCatching {
+            epgIndex.replaceChannels(currentEpgIndexKey(config), nowNext, updatedAtMs)
+        }.onFailure { error ->
+            System.err.println("[EPG-Index] Failed to update guide index: ${error.message}")
+        }
     }
 
     private suspend fun fetchFreshChannelsForStartup(config: IptvConfig): Pair<List<IptvChannel>, com.arflix.tv.data.api.StalkerApi?>? {
@@ -1785,6 +1833,7 @@ class IptvRepository @Inject constructor(
         xtreamSeriesEpisodeInFlight = emptyMap()
         cacheOwnerProfileId = null
         cacheOwnerConfigSig = null
+        currentEpgIndexKey = ""
         // Drop derived per-creds caches that depend on the catalogs above.
         cachedXtreamVodCategories = emptyList()
         cachedXtreamSeriesCategories = emptyList()
@@ -1816,7 +1865,7 @@ class IptvRepository @Inject constructor(
     }
 
     private fun ensureCacheOwnership(profileId: String, config: IptvConfig) {
-        val sig = buildConfigSignature(config)
+        val sig = buildSourceSignature(config)
         val ownerChanged = cacheOwnerProfileId != null && cacheOwnerProfileId != profileId
         val configChanged = cacheOwnerConfigSig != null && cacheOwnerConfigSig != sig
         if (ownerChanged || configChanged) {
@@ -1824,6 +1873,7 @@ class IptvRepository @Inject constructor(
         }
         cacheOwnerProfileId = profileId
         cacheOwnerConfigSig = sig
+        currentEpgIndexKey = epgIndexKey(profileId, config)
     }
 
     private fun m3uUrlKey(): Preferences.Key<String> = profileManager.profileStringKey("iptv_m3u_url")
@@ -5799,6 +5849,15 @@ class IptvRepository @Inject constructor(
         ).joinToString("||")
         return digest.digest(raw.toByteArray(StandardCharsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
+    }
+
+    private fun epgIndexKey(profileId: String, config: IptvConfig): String =
+        "${profileId.trim().ifBlank { "default" }}|${buildSourceSignature(config)}"
+
+    private fun currentEpgIndexKey(config: IptvConfig): String {
+        val existing = currentEpgIndexKey
+        if (existing.isNotBlank()) return existing
+        return epgIndexKey(profileManager.getProfileIdSync(), config)
     }
 
     private fun buildLegacyConfigSignature(config: IptvConfig): String {
