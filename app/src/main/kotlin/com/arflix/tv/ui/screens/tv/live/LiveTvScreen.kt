@@ -230,13 +230,18 @@ fun LiveTvScreen(
             return@LaunchedEffect
         }
 
+        val initialLimit = when {
+            snapshot.size > 10_000 && isTouchDevice -> 240
+            snapshot.size > 10_000 -> 720
+            else -> snapshot.size
+        }
         val initialChannels = withContext(Dispatchers.Default) {
             buildInitialCategoryChannels(
                 channels = snapshot,
                 categoryId = selectedCategoryId,
                 favorites = favSet,
                 recents = recents.value,
-                limit = snapshot.size,
+                limit = initialLimit,
             )
         }
         val initialIndex = withContext(Dispatchers.Default) { buildCategoryIndex(initialChannels) }

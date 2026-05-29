@@ -845,7 +845,13 @@ class TvViewModel @Inject constructor(
             delay(120L)
             var pass = 0
             while (true) {
-                val batch = drainVisibleEpgBatch(maxChannels = if (pass == 0) 48 else 96)
+                val batch = drainVisibleEpgBatch(
+                    maxChannels = when (pass) {
+                        0 -> 1
+                        1 -> 16
+                        else -> 64
+                    }
+                )
                 if (batch.isEmpty()) break
 
                 val batchSet = batch.toCollection(LinkedHashSet())
@@ -1035,10 +1041,7 @@ class TvViewModel @Inject constructor(
         catchupAttempt: Int = 0
     ): String {
         val rawUrl = if (program != null) {
-            val candidates = iptvRepository.getCatchupUrlCandidates(channel, program)
-            candidates.getOrNull(catchupAttempt.coerceAtLeast(0))
-                ?: candidates.lastOrNull()
-                ?: iptvRepository.getCatchupUrl(channel, program)
+            iptvRepository.resolvePlayableCatchupUrl(channel, program, catchupAttempt)
         } else {
             channel.streamUrl
         }
