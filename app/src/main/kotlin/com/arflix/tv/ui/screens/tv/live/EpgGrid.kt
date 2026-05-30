@@ -29,7 +29,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,11 +52,12 @@ import com.arflix.tv.data.model.IptvNowNext
 import com.arflix.tv.data.model.IptvProgram
 import com.arflix.tv.ui.focus.arvioDpadFocusGroup
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
-private const val EpgWindowMinutes = 24 * 60
+private const val EpgPastWindowMinutes = 90
+private const val EpgFutureWindowMinutes = 12 * 60
+private const val CompactEpgPastWindowMinutes = 60
+private const val CompactEpgFutureWindowMinutes = 8 * 60
 
 enum class EpgGridFocusMode {
     ChannelList,
@@ -116,15 +116,13 @@ fun EpgGrid(
     }
     val selectedChannel = selectedChannelId?.let { id -> channelIndexById[id]?.let { index -> channels.getOrNull(index) } }
 
-    val maxCatchupDays = remember(channels) {
-        channels.maxOfOrNull { ch -> effectiveCatchupDays(ch) } ?: 0
+    val pastWindowMinutes = if (compact) CompactEpgPastWindowMinutes else EpgPastWindowMinutes
+    val futureWindowMinutes = if (compact) CompactEpgFutureWindowMinutes else EpgFutureWindowMinutes
+    val windowStartMillis = remember(clockTickMillis, pastWindowMinutes) {
+        roundedGuideWindowStart(clockTickMillis, pastWindowMinutes)
     }
-    val todayStartMillis = remember { roundedWindowStart() }
-    val windowStartMillis = remember(todayStartMillis, maxCatchupDays) {
-        todayStartMillis - maxCatchupDays * 24L * 60L * 60_000L
-    }
-    val windowEndMillis = remember(todayStartMillis) {
-        todayStartMillis + EpgWindowMinutes * 60L * 1000L
+    val windowEndMillis = remember(windowStartMillis, futureWindowMinutes) {
+        windowStartMillis + (pastWindowMinutes + futureWindowMinutes) * 60L * 1000L
     }
     val slotCount = remember(windowStartMillis, windowEndMillis) {
         (((windowEndMillis - windowStartMillis) / 60_000L) / 30L).toInt().coerceAtLeast(1)
@@ -702,16 +700,10 @@ private fun buildHalfHourSlots(startMillis: Long, count: Int): List<TimeSlot> {
     return out
 }
 
-/** Round down to the start of the current day (00:00) so the user can
- *  scroll back through the full daily timeline for catchup. */
-private fun roundedWindowStart(): Long {
-    val cal = java.util.Calendar.getInstance()
-    cal.timeInMillis = System.currentTimeMillis()
-    cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-    cal.set(java.util.Calendar.MINUTE, 0)
-    cal.set(java.util.Calendar.SECOND, 0)
-    cal.set(java.util.Calendar.MILLISECOND, 0)
-    return cal.timeInMillis
+private fun roundedGuideWindowStart(nowMillis: Long, pastWindowMinutes: Int): Long {
+    val halfHourMs = 30L * 60_000L
+    val roundedNow = nowMillis - (nowMillis % halfHourMs)
+    return roundedNow - pastWindowMinutes * 60_000L
 }
 
 private fun programsInWindow(

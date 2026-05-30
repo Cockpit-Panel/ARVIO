@@ -90,12 +90,12 @@ fun ChannelRow(
     val now = nowNext?.now
     val animatedBorderWidth by animateDpAsState(
         targetValue = if (visuallyFocused) 3.dp else 0.dp,
-        animationSpec = tween(durationMillis = 130),
+        animationSpec = tween(durationMillis = 70),
         label = "channel-row-border",
     )
     val animatedScale by animateFloatAsState(
-        targetValue = if (visuallyFocused) 1.01f else 1f,
-        animationSpec = tween(durationMillis = 150),
+        targetValue = if (visuallyFocused) 1.004f else 1f,
+        animationSpec = tween(durationMillis = 80),
         label = "channel-row-scale",
     )
     Row(

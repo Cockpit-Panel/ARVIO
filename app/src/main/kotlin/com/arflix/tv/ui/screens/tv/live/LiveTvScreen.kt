@@ -43,7 +43,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusRequester
@@ -90,7 +89,6 @@ import com.arflix.tv.util.LocalDeviceType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -390,6 +388,7 @@ fun LiveTvScreen(
     val rememberedChannelByCategory = remember { mutableMapOf<String, String>() }
     var playingChannelId by rememberSaveable { mutableStateOf<String?>(initialChannelId) }
     var focusedChannelId by rememberSaveable { mutableStateOf<String?>(initialChannelId) }
+    var epgPrefetchAnchorId by rememberSaveable { mutableStateOf<String?>(initialChannelId) }
     var playingCatchupProgram by remember { mutableStateOf<IptvProgram?>(null) }
     val focusCommitScope = rememberCoroutineScope()
     val pendingFocusCommit = remember { arrayOf<Pair<String, String>?>(null) }
@@ -398,11 +397,12 @@ fun LiveTvScreen(
         pendingFocusCommit[0] = channel.id to selectedCategoryId
         focusCommitJob[0]?.cancel()
         focusCommitJob[0] = focusCommitScope.launch {
-            delay(70L)
+            delay(140L)
             val (channelId, categoryId) = pendingFocusCommit[0] ?: return@launch
             if (focusedChannelId != channelId) {
                 focusedChannelId = channelId
             }
+            epgPrefetchAnchorId = channelId
             rememberedChannelByCategory[categoryId] = channelId
         }
     }
@@ -432,7 +432,10 @@ fun LiveTvScreen(
         }
     }
 
-    val epgAnchorChannelId = selectedDisplayChannelId ?: focusedChannelId ?: playingChannelId
+    val epgAnchorChannelId = epgPrefetchAnchorId
+        ?: selectedDisplayChannelId
+        ?: focusedChannelId
+        ?: playingChannelId
     val epgPrefetchIds = remember(filteredChannels, filteredChannelIndexById, selectedCategoryId, epgAnchorChannelId) {
         val maxPrefetch = if (selectedCategoryId == "all") 96 else 180
         val anchorIndex = epgAnchorChannelId?.let(filteredChannelIndexById::get) ?: 0
@@ -508,6 +511,7 @@ fun LiveTvScreen(
             focusedChannelId = displayChannelIdFor(playingChannelId, visibleEnrichedState.value.index.byId, variantGroups)
                 ?.takeIf { id -> id in filteredChannelIndexById }
                 ?: filteredChannels.firstOrNull()?.id
+            epgPrefetchAnchorId = focusedChannelId
         }
     }
 
@@ -587,6 +591,7 @@ fun LiveTvScreen(
         val nextIdx = ((start + delta) % size + size) % size
         playingChannelId = all[nextIdx].id
         focusedChannelId = all[nextIdx].id
+        epgPrefetchAnchorId = all[nextIdx].id
         rememberedChannelByCategory[selectedCategoryId] = all[nextIdx].id
         playingCatchupProgram = null
         fullscreenGuideOpen = false
@@ -610,6 +615,7 @@ fun LiveTvScreen(
     fun focusChannelList(channelId: String? = focusedChannelId ?: playingChannelId) {
         channelId?.let {
             focusedChannelId = it
+            epgPrefetchAnchorId = it
             rememberedChannelByCategory[selectedCategoryId] = it
         }
         focusZone = LiveTvFocusZone.CHANNEL_LIST
@@ -619,6 +625,7 @@ fun LiveTvScreen(
 
     fun focusEpg(channelId: String) {
         focusedChannelId = channelId
+        epgPrefetchAnchorId = channelId
         rememberedChannelByCategory[selectedCategoryId] = channelId
         focusZone = LiveTvFocusZone.EPG
         focusEpgSignal += 1
@@ -633,6 +640,7 @@ fun LiveTvScreen(
 
     fun selectChannel(channel: EnrichedChannel) {
         focusedChannelId = channel.id
+        epgPrefetchAnchorId = channel.id
         rememberedChannelByCategory[selectedCategoryId] = channel.id
         val currentDisplayId = displayChannelIdFor(playingChannelId, visibleEnrichedState.value.index.byId, variantGroups)
         if (channel.id == currentDisplayId && !isFullScreen) {
@@ -658,6 +666,7 @@ fun LiveTvScreen(
         val displayId = displayChannelIdFor(channel.id, visibleEnrichedState.value.index.byId, variantGroups) ?: channel.id
         playingChannelId = channel.id
         focusedChannelId = displayId
+        epgPrefetchAnchorId = displayId
         rememberedChannelByCategory[selectedCategoryId] = displayId
         playingCatchupProgram = null
         fullscreenGuideOpen = false
@@ -666,6 +675,7 @@ fun LiveTvScreen(
 
     fun playProgramInMini(channel: EnrichedChannel, program: IptvProgram?) {
         focusedChannelId = channel.id
+        epgPrefetchAnchorId = channel.id
         rememberedChannelByCategory[selectedCategoryId] = channel.id
         playingChannelId = channel.id
         playingCatchupProgram = program
@@ -688,6 +698,7 @@ fun LiveTvScreen(
     fun tuneChannelNumber(channel: EnrichedChannel) {
         playingChannelId = channel.id
         focusedChannelId = channel.id
+        epgPrefetchAnchorId = channel.id
         playingCatchupProgram = null
         fullscreenGuideOpen = false
         rememberedChannelByCategory[selectedCategoryId] = channel.id
@@ -1132,6 +1143,7 @@ fun LiveTvScreen(
                             selectedProviderId = id
                             selectedCategoryId = "all"
                             focusedChannelId = null
+                            epgPrefetchAnchorId = null
                         },
                         onMoveDown = { focusPlaylistSearch() },
                         modifier = Modifier.fillMaxWidth(),
@@ -1261,6 +1273,7 @@ fun LiveTvScreen(
                             selectedProviderId = id
                             selectedCategoryId = "all"
                             focusedChannelId = null
+                            epgPrefetchAnchorId = null
                         },
                         focusRequester = providerFocus,
                         onMoveUp = {
@@ -1540,6 +1553,7 @@ fun LiveTvScreen(
                     selectedCategoryId = bestCategoryIdForChannel(channel, visibleEnrichedState.value.tree)
                     playingChannelId = channel.id
                     focusedChannelId = channel.id
+                    epgPrefetchAnchorId = channel.id
                     searchOpen = false
                     focusChannelList(channel.id)
                 },

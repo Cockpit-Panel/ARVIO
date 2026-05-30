@@ -86,21 +86,36 @@ fun ProgramCell(
         isNow -> LiveColors.Accent.copy(alpha = 0.45f)
         else -> Color.Transparent
     }
-    val borderWidth by animateDpAsState(
-        targetValue = if (focused) 3.dp else 1.dp,
-        animationSpec = tween(durationMillis = 130),
-        label = "program-cell-border",
-    )
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.012f else 1f,
-        animationSpec = tween(durationMillis = 150),
-        label = "program-cell-scale",
-    )
-    val contentAlpha by animateFloatAsState(
-        targetValue = if (isPast && !focused && !isCatchupSupported) 0.55f else 1f,
-        animationSpec = tween(durationMillis = 150),
-        label = "program-cell-alpha",
-    )
+    val borderWidth = if (focusable) {
+        val animated by animateDpAsState(
+            targetValue = if (focused) 3.dp else 1.dp,
+            animationSpec = tween(durationMillis = 80),
+            label = "program-cell-border",
+        )
+        animated
+    } else {
+        if (focused) 3.dp else 1.dp
+    }
+    val scale = if (focusable) {
+        val animated by animateFloatAsState(
+            targetValue = if (focused) 1.008f else 1f,
+            animationSpec = tween(durationMillis = 90),
+            label = "program-cell-scale",
+        )
+        animated
+    } else {
+        1f
+    }
+    val contentAlpha = if (focusable) {
+        val animated by animateFloatAsState(
+            targetValue = if (isPast && !focused && !isCatchupSupported) 0.55f else 1f,
+            animationSpec = tween(durationMillis = 90),
+            label = "program-cell-alpha",
+        )
+        animated
+    } else {
+        if (isPast && !isCatchupSupported) 0.55f else 1f
+    }
     Box(
         modifier = modifier
             .height(rowHeight)
