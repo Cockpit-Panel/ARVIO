@@ -241,6 +241,10 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { iptvRepository.get().warmupFromCacheOnly() }
+        }
+
         setContent {
             // Observe device mode override changes live from DataStore
             val deviceModeOverride by remember {
@@ -366,8 +370,9 @@ class MainActivity : ComponentActivity() {
             }
             ArflixApplication.instance.scheduleTraktSyncIfNeeded()
             lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                kotlinx.coroutines.delay(60_000L)
                 val repo = iptvRepository.get()
+                runCatching { repo.warmupFromCacheOnly() }
+                kotlinx.coroutines.delay(60_000L)
                 runCatching { repo.prefetchFreshStartupData() }
             }
         }

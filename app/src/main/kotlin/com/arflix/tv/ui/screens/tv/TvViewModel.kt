@@ -950,7 +950,8 @@ class TvViewModel @Inject constructor(
                             runCatching {
                                 iptvRepository.refreshEpgForChannels(
                                     missingIds.toSet(),
-                                    maxChannels = missingIds.size
+                                    maxChannels = missingIds.size,
+                                    preferFullCatchupHistory = pass == 0
                                 )
                             }.getOrNull()
                         }

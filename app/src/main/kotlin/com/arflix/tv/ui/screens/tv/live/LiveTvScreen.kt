@@ -66,6 +66,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.HttpDataSource
@@ -103,6 +104,12 @@ private enum class LiveTvFocusZone {
     CHANNEL_LIST,
     EPG,
 }
+
+private const val GuideInitialWindowRows = 120
+private const val GuidePageRows = 120
+private const val GuideMaxWindowRows = 420
+private const val CatchupSeekStepMs = 30_000L
+private const val IptvPlaybackUserAgent = "VLC/3.0.20 LibVLC/3.0.20"
 
 private fun digitForTvKeyCode(keyCode: Int): Int? = when (keyCode) {
     AndroidKeyEvent.KEYCODE_0, AndroidKeyEvent.KEYCODE_NUMPAD_0 -> 0
@@ -153,6 +160,37 @@ private fun chooseStartupChannelId(
  * Preserves every IPTV feature from the legacy [com.arflix.tv.ui.screens.tv.TvScreen]
  * (favorites, hidden groups, EPG refresh, cloud sync) — only the UI shell is new.
  */
+private fun guideWindowAround(index: Int, total: Int): Pair<Int, Int> {
+    if (total <= 0) return 0 to 0
+    val safeIndex = index.coerceIn(0, total - 1)
+    val before = GuideInitialWindowRows / 3
+    val start = (safeIndex - before).coerceAtLeast(0)
+    val end = (start + GuideInitialWindowRows).coerceAtMost(total)
+    val balancedStart = (end - GuideInitialWindowRows).coerceAtLeast(0)
+    return balancedStart to end
+}
+
+private fun expandGuideWindowAfter(start: Int, end: Int, total: Int): Pair<Int, Int> {
+    if (end >= total) return start to end
+    val nextEnd = (end + GuidePageRows).coerceAtMost(total)
+    val overflow = (nextEnd - start - GuideMaxWindowRows).coerceAtLeast(0)
+    return (start + overflow).coerceAtMost(nextEnd) to nextEnd
+}
+
+private fun expandGuideWindowBefore(start: Int, end: Int): Pair<Int, Int> {
+    if (start <= 0) return start to end
+    val nextStart = (start - GuidePageRows).coerceAtLeast(0)
+    val overflow = (end - nextStart - GuideMaxWindowRows).coerceAtLeast(0)
+    return nextStart to (end - overflow).coerceAtLeast(nextStart)
+}
+
+private fun looksLikeMpegTsUrl(url: String): Boolean {
+    val normalized = url.substringBefore('?').lowercase()
+    return normalized.endsWith(".ts") ||
+        normalized.contains("/timeshift/") ||
+        normalized.contains("/live/")
+}
+
 @Composable
 fun LiveTvScreen(
     viewModel: TvViewModel = hiltViewModel(),
@@ -318,12 +356,12 @@ fun LiveTvScreen(
             visibleEnrichedState.value = EnrichedChannels.Empty
             return@LaunchedEffect
         }
+        if (selectedProviderId == "all") {
+            visibleEnrichedState.value = current
+            return@LaunchedEffect
+        }
         val visibleChannels = withContext(Dispatchers.Default) {
-            if (selectedProviderId == "all") {
-                current.all
-            } else {
-                current.all.filter(providerMatcher(selectedProviderId, state.config))
-            }
+            current.all.filter(providerMatcher(selectedProviderId, state.config))
         }
         val index = withContext(Dispatchers.Default) { buildCategoryIndex(visibleChannels, hiddenGroupSet) }
         val tree = withContext(Dispatchers.Default) {
@@ -433,30 +471,67 @@ fun LiveTvScreen(
         }
     }
 
+    var guideWindowStart by rememberSaveable { mutableIntStateOf(0) }
+    var guideWindowEnd by rememberSaveable { mutableIntStateOf(GuideInitialWindowRows) }
+    fun setGuideWindow(window: Pair<Int, Int>) {
+        val total = filteredChannels.size
+        val start = window.first.coerceIn(0, total.coerceAtLeast(0))
+        val end = window.second.coerceIn(start, total)
+        guideWindowStart = start
+        guideWindowEnd = end
+    }
+    fun requestGuideWindowBefore() {
+        setGuideWindow(expandGuideWindowBefore(guideWindowStart, guideWindowEnd))
+    }
+    fun requestGuideWindowAfter() {
+        setGuideWindow(expandGuideWindowAfter(guideWindowStart, guideWindowEnd, filteredChannels.size))
+    }
+    LaunchedEffect(selectedProviderId, selectedCategoryId, filteredChannels) {
+        val anchorId = playingChannelId ?: focusedChannelId ?: initialChannelId
+        val anchorIndex = anchorId?.let(filteredChannelIndexById::get) ?: 0
+        setGuideWindow(guideWindowAround(anchorIndex, filteredChannels.size))
+    }
+    LaunchedEffect(playingChannelId, filteredChannels, selectedCategoryId, selectedProviderId) {
+        val index = playingChannelId?.let(filteredChannelIndexById::get) ?: return@LaunchedEffect
+        if (index !in guideWindowStart until guideWindowEnd) {
+            setGuideWindow(guideWindowAround(index, filteredChannels.size))
+        }
+    }
+    val normalizedGuideStart = guideWindowStart.coerceIn(0, filteredChannels.size)
+    val normalizedGuideEnd = guideWindowEnd.coerceIn(normalizedGuideStart, filteredChannels.size)
+    val guideChannels = remember(filteredChannels, normalizedGuideStart, normalizedGuideEnd) {
+        if (normalizedGuideStart >= normalizedGuideEnd) emptyList() else filteredChannels.subList(normalizedGuideStart, normalizedGuideEnd)
+    }
+    val guideChannelIndexById = remember(guideChannels) {
+        HashMap<String, Int>(guideChannels.size).apply {
+            guideChannels.forEachIndexed { index, channel -> put(channel.id, index) }
+        }
+    }
+
     val epgAnchorChannelId = epgPrefetchAnchorId
         ?: selectedDisplayChannelId
         ?: focusedChannelId
         ?: playingChannelId
-    val epgPrefetchIds = remember(filteredChannels, filteredChannelIndexById, selectedCategoryId, epgAnchorChannelId) {
+    val epgPrefetchIds = remember(guideChannels, guideChannelIndexById, selectedCategoryId, epgAnchorChannelId) {
         val maxPrefetch = if (selectedCategoryId == "all") 96 else 180
-        val anchorIndex = epgAnchorChannelId?.let(filteredChannelIndexById::get) ?: 0
+        val anchorIndex = epgAnchorChannelId?.let(guideChannelIndexById::get) ?: 0
         buildList<String> {
-            filteredChannels.getOrNull(anchorIndex)?.id?.let { add(it) }
+            guideChannels.getOrNull(anchorIndex)?.id?.let { add(it) }
             var index = anchorIndex + 1
-            while (index < filteredChannels.size && size < maxPrefetch) {
-                add(filteredChannels[index].id)
+            while (index < guideChannels.size && size < maxPrefetch) {
+                add(guideChannels[index].id)
                 index++
             }
             var backIndex = anchorIndex - 1
             var backCount = 0
             while (backIndex >= 0 && backCount < 24 && size < maxPrefetch) {
-                add(filteredChannels[backIndex].id)
+                add(guideChannels[backIndex].id)
                 backIndex--
                 backCount++
             }
             index = 0
-            while (index < filteredChannels.size && size < maxPrefetch) {
-                val id = filteredChannels[index].id
+            while (index < guideChannels.size && size < maxPrefetch) {
+                val id = guideChannels[index].id
                 if (id != epgAnchorChannelId && !contains(id)) {
                     add(id)
                 }
@@ -474,9 +549,9 @@ fun LiveTvScreen(
             )
         }
     }
-    val guideStatusIds = remember(epgPrefetchIds, filteredChannels) {
+    val guideStatusIds = remember(epgPrefetchIds, guideChannels) {
         epgPrefetchIds
-            .ifEmpty { filteredChannels.asSequence().map { it.id }.take(96).toList() }
+            .ifEmpty { guideChannels.asSequence().map { it.id }.take(96).toList() }
             .toCollection(HashSet())
     }
     val matchedGuideCount = remember(state.snapshot.nowNext, guideStatusIds) {
@@ -525,7 +600,6 @@ fun LiveTvScreen(
     // mini-player to cover the whole screen. Back collapses back to the grid.
     var isFullScreen by rememberSaveable { mutableStateOf(initialStreamUrl != null) }
     var fullscreenGuideOpen by remember { mutableStateOf(false) }
-    var fullscreenGuideTab by remember { mutableStateOf(FullscreenGuideTab.Now) }
     var variantPickerChannel by remember { mutableStateOf<EnrichedChannel?>(null) }
     LaunchedEffect(isFullScreen) {
         onFullscreenChanged(isFullScreen)
@@ -545,11 +619,6 @@ fun LiveTvScreen(
 
     fun openFullscreenGuide() {
         viewModel.refreshCatchupHistoryForChannel(playingChannelId)
-        fullscreenGuideTab = if (playingCatchupProgram != null) {
-            FullscreenGuideTab.Past
-        } else {
-            FullscreenGuideTab.Now
-        }
         fullscreenGuideOpen = true
         hudPokeSignal++
     }
@@ -618,6 +687,10 @@ fun LiveTvScreen(
             focusedChannelId = it
             epgPrefetchAnchorId = it
             rememberedChannelByCategory[selectedCategoryId] = it
+            val index = filteredChannelIndexById[it]
+            if (index != null && index !in guideWindowStart until guideWindowEnd) {
+                setGuideWindow(guideWindowAround(index, filteredChannels.size))
+            }
         }
         focusZone = LiveTvFocusZone.CHANNEL_LIST
         focusSelectedChannelSignal += 1
@@ -628,6 +701,10 @@ fun LiveTvScreen(
         focusedChannelId = channelId
         epgPrefetchAnchorId = channelId
         rememberedChannelByCategory[selectedCategoryId] = channelId
+        val index = filteredChannelIndexById[channelId]
+        if (index != null && index !in guideWindowStart until guideWindowEnd) {
+            setGuideWindow(guideWindowAround(index, filteredChannels.size))
+        }
         focusZone = LiveTvFocusZone.EPG
         focusEpgSignal += 1
         runCatching { epgFocus.requestFocus() }
@@ -751,12 +828,13 @@ fun LiveTvScreen(
         mapOf(
             "Accept" to "*/*",
             "Accept-Encoding" to "identity",
+            "User-Agent" to OkHttpProvider.userAgentOr(IptvPlaybackUserAgent),
             "Connection" to "keep-alive"
         )
     }
     val iptvDataSourceFactory = remember(iptvHttpClient, baseRequestHeaders) {
         OkHttpDataSource.Factory(iptvHttpClient)
-            .setUserAgent(OkHttpProvider.userAgent)
+            .setUserAgent(OkHttpProvider.userAgentOr(IptvPlaybackUserAgent))
             .setDefaultRequestProperties(baseRequestHeaders)
     }
     val mediaSourceFactory = remember(iptvDataSourceFactory) {
@@ -841,6 +919,9 @@ fun LiveTvScreen(
             MediaItem.Builder()
                 .setUri(stream)
                 .apply {
+                    if (looksLikeMpegTsUrl(stream)) {
+                        setMimeType(MimeTypes.VIDEO_MP2T)
+                    }
                     if (playingCatchupProgram == null) {
                         setLiveConfiguration(
                             MediaItem.LiveConfiguration.Builder()
@@ -879,11 +960,18 @@ fun LiveTvScreen(
     fun seekCatchupBy(deltaMs: Long) {
         if (playingCatchupProgram == null) return
         val duration = playerDurationMs
+        val wasPlayRequested = exoPlayer.playWhenReady
+        val maxPosition = if (duration > 1_000L) duration - 1_000L else duration
         val target = (exoPlayer.currentPosition + deltaMs)
             .coerceAtLeast(0L)
-            .let { if (duration > 0L) it.coerceAtMost(duration) else it }
+            .let { if (maxPosition > 0L) it.coerceAtMost(maxPosition) else it }
         exoPlayer.seekTo(target)
-        exoPlayer.play()
+        exoPlayer.playWhenReady = wasPlayRequested
+        if (wasPlayRequested) {
+            exoPlayer.play()
+        } else {
+            exoPlayer.pause()
+        }
         hudPokeSignal++
     }
 
@@ -916,10 +1004,23 @@ fun LiveTvScreen(
     LaunchedEffect(currentStreamUrl, playingCatchupProgram, playingChannel?.id) {
         val rawStream = currentStreamUrl ?: return@LaunchedEffect
         val sourceChannel = playingChannel?.source
-        val stream = if (sourceChannel != null) {
-            viewModel.resolvePlayableStreamUrl(sourceChannel, playingCatchupProgram, catchupAttempt = 0)
-        } else {
-            rawStream
+        val stream = runCatching {
+            if (sourceChannel != null) {
+                viewModel.resolvePlayableStreamUrl(sourceChannel, playingCatchupProgram, catchupAttempt = 0)
+            } else {
+                rawStream
+            }
+        }.getOrElse { error ->
+            playbackDiagnostic = PlaybackDiagnostic(
+                title = if (playingCatchupProgram != null) "Catch-up unavailable" else "Playback failed",
+                detail = error.message ?: "Provider did not return a playable stream.",
+                severity = PlaybackDiagnosticSeverity.Error,
+            )
+            System.err.println(
+                "[IPTV] Failed to resolve playable stream catchup=${playingCatchupProgram != null} " +
+                    "channel=${sourceChannel?.id.orEmpty()} reason=${error.message}"
+            )
+            return@LaunchedEffect
         }
         val headers = sourceChannel?.requestHeaders.orEmpty()
         delay(90L)
@@ -965,8 +1066,8 @@ fun LiveTvScreen(
                 } else {
                     0
                 }
-                val maxRetryCount = if (retryProgram != null && catchupCandidateCount > 1) {
-                    maxOf(3, (catchupCandidateCount - 1).coerceAtMost(8))
+                val maxRetryCount = if (retryProgram != null) {
+                    (catchupCandidateCount - 1).coerceAtLeast(0).coerceAtMost(2)
                 } else {
                     3
                 }
@@ -987,15 +1088,28 @@ fun LiveTvScreen(
                 val retryHeaders = retryChannel?.requestHeaders ?: lastPreparedHeaders
                 coroutineScope.launch {
                     delay(350L * nextAttempt)
-                    val retryStream = if (retryChannel != null) {
-                        viewModel.resolvePlayableStreamUrl(
-                            channel = retryChannel,
-                            program = retryProgram,
-                            forceRefresh = true,
-                            catchupAttempt = if (retryProgram != null) nextAttempt else 0
+                    val retryStream = runCatching {
+                        if (retryChannel != null) {
+                            viewModel.resolvePlayableStreamUrl(
+                                channel = retryChannel,
+                                program = retryProgram,
+                                forceRefresh = true,
+                                catchupAttempt = if (retryProgram != null) nextAttempt else 0
+                            )
+                        } else {
+                            prepared
+                        }
+                    }.getOrElse { resolveError ->
+                        playbackDiagnostic = PlaybackDiagnostic(
+                            title = if (retryProgram != null) "Catch-up unavailable" else "Playback failed",
+                            detail = resolveError.message ?: classifyPlaybackError(error),
+                            severity = PlaybackDiagnosticSeverity.Error,
                         )
-                    } else {
-                        prepared
+                        System.err.println(
+                            "[IPTV] Retry resolve failed catchup=${retryProgram != null} " +
+                                "code=${error.errorCodeName} reason=${resolveError.message}"
+                        )
+                        return@launch
                     }
                     System.err.println(
                         "[IPTV] Retrying live playback attempt=$nextAttempt " +
@@ -1029,7 +1143,11 @@ fun LiveTvScreen(
         fullscreenGuideOpen = false
     }
     BackHandler(enabled = !searchOpen && isFullScreen && !fullscreenGuideOpen) {
-        exitFullScreenPlayback()
+        if (playingCatchupProgram != null) {
+            returnCatchupToLive()
+        } else {
+            exitFullScreenPlayback()
+        }
     }
     BackHandler(enabled = !searchOpen && variantPickerChannel == null && !isFullScreen) {
         onBack()
@@ -1178,7 +1296,9 @@ fun LiveTvScreen(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     EpgGrid(
-                        channels = filteredChannels,
+                        channels = guideChannels,
+                        channelWindowOffset = normalizedGuideStart,
+                        totalChannelCount = filteredChannels.size,
                         clockTickMillis = guideClockMillis,
                         nowNext = state.snapshot.nowNext,
                         epgLoadingChannelIds = state.epgLoadingChannelIds,
@@ -1208,6 +1328,8 @@ fun LiveTvScreen(
                         onMoveLeftFromChannels = { focusPlaylistSearch() },
                         onEnterEpg = { channel -> focusEpg(channel.id) },
                         onExitEpg = { channel -> focusChannelList(channel?.id ?: focusedChannelId ?: playingChannelId) },
+                        onRequestPreviousChannels = ::requestGuideWindowBefore,
+                        onRequestNextChannels = ::requestGuideWindowAfter,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -1307,7 +1429,9 @@ fun LiveTvScreen(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     EpgGrid(
-                        channels = filteredChannels,
+                        channels = guideChannels,
+                        channelWindowOffset = normalizedGuideStart,
+                        totalChannelCount = filteredChannels.size,
                         clockTickMillis = guideClockMillis,
                         nowNext = state.snapshot.nowNext,
                         epgLoadingChannelIds = state.epgLoadingChannelIds,
@@ -1334,6 +1458,8 @@ fun LiveTvScreen(
                         onMoveLeftFromChannels = { focusPlaylistSearch() },
                         onEnterEpg = { channel -> focusEpg(channel.id) },
                         onExitEpg = { channel -> focusChannelList(channel?.id ?: focusedChannelId ?: playingChannelId) },
+                        onRequestPreviousChannels = ::requestGuideWindowBefore,
+                        onRequestNextChannels = ::requestGuideWindowAfter,
                         modifier = Modifier
                             .fillMaxSize()
                             .onFocusChanged {
@@ -1387,77 +1513,73 @@ fun LiveTvScreen(
                                     hudPokeSignal++
                                     true
                                 }
-                                Key.DirectionLeft -> {
-                                    fullscreenGuideTab = fullscreenGuideTab.previous()
-                                    hudPokeSignal++
-                                    true
-                                }
-                                Key.DirectionRight -> {
-                                    fullscreenGuideTab = fullscreenGuideTab.next()
-                                    hudPokeSignal++
-                                    true
-                                }
                                 else -> false
                             }
                         } else {
-                        if (playingCatchupProgram != null && ev.nativeKeyEvent.repeatCount == 0) {
-                            when (ev.nativeKeyEvent.keyCode) {
-                                AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                                AndroidKeyEvent.KEYCODE_SPACE -> {
-                                    toggleCatchupPlayback()
-                                    return@onPreviewKeyEvent true
+                            val firstPress = ev.nativeKeyEvent.repeatCount == 0
+                            if (playingCatchupProgram != null) {
+                                when (ev.key) {
+                                    Key.Back, Key.Escape -> {
+                                        if (firstPress) returnCatchupToLive()
+                                        return@onPreviewKeyEvent true
+                                    }
+                                    Key.DirectionCenter, Key.Enter -> {
+                                        if (firstPress) toggleCatchupPlayback()
+                                        return@onPreviewKeyEvent true
+                                    }
+                                    Key.DirectionLeft -> {
+                                        if (firstPress) seekCatchupBy(-CatchupSeekStepMs)
+                                        return@onPreviewKeyEvent true
+                                    }
+                                    Key.DirectionRight -> {
+                                        if (firstPress) seekCatchupBy(CatchupSeekStepMs)
+                                        return@onPreviewKeyEvent true
+                                    }
+                                    else -> Unit
                                 }
-                                AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> {
-                                    exoPlayer.play()
-                                    hudPokeSignal++
-                                    return@onPreviewKeyEvent true
-                                }
-                                AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                                    exoPlayer.pause()
-                                    hudPokeSignal++
-                                    return@onPreviewKeyEvent true
-                                }
-                                AndroidKeyEvent.KEYCODE_MEDIA_REWIND -> {
-                                    seekCatchupBy(-30_000L)
-                                    return@onPreviewKeyEvent true
-                                }
-                                AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                                    seekCatchupBy(30_000L)
-                                    return@onPreviewKeyEvent true
-                                }
-                            }
-                        }
-                        if (ev.nativeKeyEvent.repeatCount == 0) {
-                            digitForTvKeyCode(ev.nativeKeyEvent.keyCode)?.let { digit ->
-                                hudPokeSignal++
-                                return@onPreviewKeyEvent handleChannelNumberDigit(digit)
-                            }
-                        }
-                        when (ev.key) {
-                            Key.Back, Key.Escape -> { exitFullScreenPlayback(); true }
-                            Key.DirectionUp -> { zap(+1); hudPokeSignal++; true }
-                            Key.DirectionDown -> { zap(-1); hudPokeSignal++; true }
-                            Key.DirectionCenter, Key.Enter -> { openFullscreenGuide(); true }
-                            Key.DirectionLeft -> {
-                                if (playingCatchupProgram != null) {
-                                    seekCatchupBy(-10_000L)
-                                    true
-                                } else {
-                                    hudPokeSignal++
-                                    false
-                                }
-                            }
-                            Key.DirectionRight -> {
-                                if (playingCatchupProgram != null) {
-                                    seekCatchupBy(10_000L)
-                                    true
-                                } else {
-                                    hudPokeSignal++
-                                    false
+                                if (firstPress) {
+                                    when (ev.nativeKeyEvent.keyCode) {
+                                        AndroidKeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                                        AndroidKeyEvent.KEYCODE_SPACE -> {
+                                            toggleCatchupPlayback()
+                                            return@onPreviewKeyEvent true
+                                        }
+                                        AndroidKeyEvent.KEYCODE_MEDIA_PLAY -> {
+                                            exoPlayer.play()
+                                            hudPokeSignal++
+                                            return@onPreviewKeyEvent true
+                                        }
+                                        AndroidKeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                                            exoPlayer.pause()
+                                            hudPokeSignal++
+                                            return@onPreviewKeyEvent true
+                                        }
+                                        AndroidKeyEvent.KEYCODE_MEDIA_REWIND -> {
+                                            seekCatchupBy(-CatchupSeekStepMs)
+                                            return@onPreviewKeyEvent true
+                                        }
+                                        AndroidKeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                                            seekCatchupBy(CatchupSeekStepMs)
+                                            return@onPreviewKeyEvent true
+                                        }
+                                    }
                                 }
                             }
-                            else -> false
-                        }
+                            if (firstPress) {
+                                digitForTvKeyCode(ev.nativeKeyEvent.keyCode)?.let { digit ->
+                                    hudPokeSignal++
+                                    return@onPreviewKeyEvent handleChannelNumberDigit(digit)
+                                }
+                            }
+                            when (ev.key) {
+                                Key.Back, Key.Escape -> { exitFullScreenPlayback(); true }
+                                Key.DirectionUp -> { zap(+1); hudPokeSignal++; true }
+                                Key.DirectionDown -> { zap(-1); hudPokeSignal++; true }
+                                Key.DirectionCenter, Key.Enter -> { openFullscreenGuide(); true }
+                                Key.DirectionLeft -> { hudPokeSignal++; false }
+                                Key.DirectionRight -> { hudPokeSignal++; false }
+                                else -> false
+                            }
                         }
                     }
                     .then(
@@ -1497,7 +1619,17 @@ fun LiveTvScreen(
                         isPlaying = playerIsPlaying,
                         playbackPositionMs = playerPositionMs,
                         playbackDurationMs = playerDurationMs,
-                        onBackClick = if (isTouchDevice) { { exitFullScreenPlayback() } } else null,
+                        onBackClick = if (isTouchDevice) {
+                            {
+                                if (playingCatchupProgram != null) {
+                                    returnCatchupToLive()
+                                } else {
+                                    exitFullScreenPlayback()
+                                }
+                            }
+                        } else {
+                            null
+                        },
                         onGuideClick = { openFullscreenGuide() },
                         onPlayPauseClick = { toggleCatchupPlayback() },
                         onSeekBy = { delta -> seekCatchupBy(delta) },
@@ -1510,9 +1642,7 @@ fun LiveTvScreen(
                     channel = playingChannel,
                     guide = playingChannelId?.let { state.snapshot.nowNext[it] },
                     selectedProgram = playingCatchupProgram,
-                    selectedTab = fullscreenGuideTab,
                     isTouchDevice = isTouchDevice,
-                    onSelectedTabChange = { fullscreenGuideTab = it },
                     onDismiss = {
                         fullscreenGuideOpen = false
                         hudPokeSignal++

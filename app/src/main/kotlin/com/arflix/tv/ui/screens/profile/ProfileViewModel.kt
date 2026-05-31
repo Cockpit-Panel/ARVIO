@@ -130,14 +130,20 @@ class ProfileViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isSwitchingProfile = true)
             try {
+                val previousProfileId = withContext(Dispatchers.IO) {
+                    profileRepository.getActiveProfileId()
+                }
+                val isSameProfile = previousProfileId == profile.id
                 withContext(Dispatchers.Default) {
                     // CRITICAL: Clear ALL profile caches BEFORE switching to ensure complete isolation.
                     // Keep this off the main thread; some profiles carry enough data here to stall
                     // touch devices during the profile tap transition.
-                    traktRepository.clearAllProfileCaches()
-                    watchHistoryRepository.clearProfileCaches()
-                    watchlistRepository.clearWatchlistCache()
-                    iptvRepository.invalidateCache()
+                    if (!isSameProfile) {
+                        traktRepository.clearAllProfileCaches()
+                        watchHistoryRepository.clearProfileCaches()
+                        watchlistRepository.clearWatchlistCache()
+                        iptvRepository.invalidateCache()
+                    }
                 }
 
                 // Update ProfileManager cache immediately so profile-scoped keys are correct
@@ -151,6 +157,11 @@ class ProfileViewModel @Inject constructor(
                 // Persist the active profile before the UI navigates away.
                 withContext(Dispatchers.IO) {
                     profileRepository.setActiveProfile(profile.id)
+                }
+
+                viewModelScope.launch(Dispatchers.IO) {
+                    if (profileRepository.getActiveProfileId() != profile.id) return@launch
+                    runCatching { iptvRepository.warmupFromCacheOnly() }
                 }
 
                 // Pull cloud state before the profile screen is allowed to disappear.
@@ -168,12 +179,19 @@ class ProfileViewModel @Inject constructor(
                 }
 
                 viewModelScope.launch(Dispatchers.IO) {
+                    if (profileRepository.getActiveProfileId() != profile.id) return@launch
+                    runCatching { iptvRepository.warmupFromCacheOnly() }
+                }
+
+                viewModelScope.launch(Dispatchers.IO) {
                     delay(1_000L)
                     if (profileRepository.getActiveProfileId() != profile.id) return@launch
                     runCatching { cloudSyncRepository.pullFromCloud() }
                 }
 
-                // Defer IPTV warmup/network parse to keep initial Home navigation smooth.
+                // Defer network parsing to keep initial Home navigation smooth. The
+                // cache-only warmup above is safe to run immediately because it never
+                // touches the provider.
                 viewModelScope.launch(Dispatchers.IO) {
                     delay(45_000L)
                     if (profileRepository.getActiveProfileId() != profile.id) return@launch

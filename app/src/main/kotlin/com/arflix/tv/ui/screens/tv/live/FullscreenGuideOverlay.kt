@@ -71,15 +71,10 @@ import androidx.tv.material3.Text
 import com.arflix.tv.data.model.IptvNowNext
 import com.arflix.tv.data.model.IptvProgram
 import kotlinx.coroutines.delay
-
-internal enum class FullscreenGuideTab(val label: String) {
-    Past("Past 48h"),
-    Now("Now"),
-    Later("Later");
-
-    fun next(): FullscreenGuideTab = entries[(ordinal + 1) % entries.size]
-    fun previous(): FullscreenGuideTab = entries[(ordinal + entries.size - 1) % entries.size]
-}
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 private enum class GuideProgramState {
     PastPlayable,
@@ -99,9 +94,7 @@ internal fun FullscreenGuideOverlay(
     channel: EnrichedChannel?,
     guide: IptvNowNext?,
     selectedProgram: IptvProgram?,
-    selectedTab: FullscreenGuideTab,
     isTouchDevice: Boolean,
-    onSelectedTabChange: (FullscreenGuideTab) -> Unit,
     onDismiss: () -> Unit,
     onProgramSelect: (IptvProgram?) -> Unit,
     modifier: Modifier = Modifier,
@@ -128,7 +121,7 @@ internal fun FullscreenGuideOverlay(
                 .asSequence()
                 .filter { it.endUtcMillis <= nowMillis && it.endUtcMillis >= pastWindowStart }
                 .distinctBy { "${it.startUtcMillis}:${it.endUtcMillis}:${it.title}" }
-                .sortedByDescending { it.startUtcMillis }
+                .sortedBy { it.startUtcMillis }
                 .map { GuideProgramItem(it, GuideProgramState.PastPlayable) }
                 .toList()
         }
@@ -152,10 +145,32 @@ internal fun FullscreenGuideOverlay(
             .map { GuideProgramItem(it, GuideProgramState.Future) }
             .toList()
     }
-    val items = when (selectedTab) {
-        FullscreenGuideTab.Past -> past
-        FullscreenGuideTab.Now -> live
-        FullscreenGuideTab.Later -> future
+    val items = remember(past, live, future) {
+        (past + live + future)
+            .distinctBy { "${it.program.startUtcMillis}:${it.program.endUtcMillis}:${it.program.title}" }
+            .sortedBy { it.program.startUtcMillis }
+    }
+    val anchorIndex = remember(items, selectedProgram, nowMillis) {
+        val selectedIndex = selectedProgram?.let { selected ->
+            items.indexOfFirst {
+                it.program.startUtcMillis == selected.startUtcMillis &&
+                    it.program.endUtcMillis == selected.endUtcMillis &&
+                    it.program.title == selected.title
+            }
+        } ?: -1
+        val liveIndex = items.indexOfFirst { it.state == GuideProgramState.Live }
+        if (selectedIndex >= 0) {
+            selectedIndex
+        } else if (liveIndex >= 0) {
+            liveIndex
+        } else {
+            val nextIndex = items.indexOfFirst { it.program.startUtcMillis > nowMillis }
+            when {
+                nextIndex >= 0 -> nextIndex
+                items.isNotEmpty() -> items.lastIndex
+                else -> 0
+            }
+        }
     }
 
     val enter = if (isTouchDevice) {
@@ -202,7 +217,7 @@ internal fun FullscreenGuideOverlay(
                                 .padding(horizontal = 8.dp, vertical = 6.dp)
                         } else {
                             Modifier
-                                .width(470.dp)
+                                .width(520.dp)
                                 .fillMaxHeight()
                                 .padding(top = 24.dp, end = 24.dp, bottom = 24.dp)
                         }
@@ -223,15 +238,14 @@ internal fun FullscreenGuideOverlay(
                 FullscreenGuideContent(
                     channel = channel,
                     selectedProgram = selectedProgram,
-                    selectedTab = selectedTab,
                     pastCount = past.size,
                     liveCount = live.size,
                     futureCount = future.size,
                     items = items,
+                    anchorIndex = anchorIndex,
                     catchupSupported = catchupSupported,
                     nowMillis = nowMillis,
                     isTouchDevice = isTouchDevice,
-                    onSelectedTabChange = onSelectedTabChange,
                     onDismiss = onDismiss,
                     onProgramSelect = onProgramSelect,
                 )
@@ -245,15 +259,14 @@ internal fun FullscreenGuideOverlay(
 private fun FullscreenGuideContent(
     channel: EnrichedChannel,
     selectedProgram: IptvProgram?,
-    selectedTab: FullscreenGuideTab,
     pastCount: Int,
     liveCount: Int,
     futureCount: Int,
     items: List<GuideProgramItem>,
+    anchorIndex: Int,
     catchupSupported: Boolean,
     nowMillis: Long,
     isTouchDevice: Boolean,
-    onSelectedTabChange: (FullscreenGuideTab) -> Unit,
     onDismiss: () -> Unit,
     onProgramSelect: (IptvProgram?) -> Unit,
 ) {
@@ -307,60 +320,21 @@ private fun FullscreenGuideContent(
             }
         }
 
-        Row(
-            modifier = if (isTouchDevice) {
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color.White.copy(alpha = 0.055f))
-                    .padding(4.dp)
-            } else {
-                Modifier
-            },
-            horizontalArrangement = Arrangement.spacedBy(if (isTouchDevice) 4.dp else 8.dp)
-        ) {
-            GuideTabButton(
-                label = "Past",
-                count = pastCount,
-                selected = selectedTab == FullscreenGuideTab.Past,
-                enabled = catchupSupported,
-                onClick = { onSelectedTabChange(FullscreenGuideTab.Past) },
-                isTouchDevice = isTouchDevice,
-                modifier = if (isTouchDevice) Modifier.weight(1f) else Modifier,
-            )
-            GuideTabButton(
-                label = "Now",
-                count = liveCount,
-                selected = selectedTab == FullscreenGuideTab.Now,
-                enabled = true,
-                onClick = { onSelectedTabChange(FullscreenGuideTab.Now) },
-                isTouchDevice = isTouchDevice,
-                modifier = if (isTouchDevice) Modifier.weight(1f) else Modifier,
-            )
-            GuideTabButton(
-                label = "Later",
-                count = futureCount,
-                selected = selectedTab == FullscreenGuideTab.Later,
-                enabled = true,
-                onClick = { onSelectedTabChange(FullscreenGuideTab.Later) },
-                isTouchDevice = isTouchDevice,
-                modifier = if (isTouchDevice) Modifier.weight(1f) else Modifier,
-            )
-        }
-
-        GuideLiveButton(
-            isSelected = selectedProgram == null,
+        GuideTimelineSummary(
+            pastCount = pastCount,
+            liveCount = liveCount,
+            futureCount = futureCount,
+            catchupSupported = catchupSupported,
             isTouchDevice = isTouchDevice,
-            onClick = { onProgramSelect(null) },
         )
 
         val listState = rememberLazyListState()
-        val firstFocusRequester = remember { FocusRequester() }
-        LaunchedEffect(selectedTab, items.size) {
+        val anchorFocusRequester = remember { FocusRequester() }
+        LaunchedEffect(channel.id, items.size, anchorIndex) {
             if (items.isNotEmpty()) {
-                listState.scrollToItem(0)
+                listState.scrollToItem((anchorIndex - 1).coerceAtLeast(0))
                 delay(90)
-                runCatching { firstFocusRequester.requestFocus() }
+                runCatching { anchorFocusRequester.requestFocus() }
             }
         }
 
@@ -373,7 +347,6 @@ private fun FullscreenGuideContent(
             if (items.isEmpty()) {
                 item {
                     GuideEmptyState(
-                        selectedTab = selectedTab,
                         catchupSupported = catchupSupported,
                         isTouchDevice = isTouchDevice,
                     )
@@ -385,9 +358,12 @@ private fun FullscreenGuideContent(
                 ) { index, item ->
                     GuideProgramRow(
                         item = item,
-                        selected = item.program == selectedProgram,
+                        selected = when (item.state) {
+                            GuideProgramState.Live -> selectedProgram == null
+                            else -> item.program == selectedProgram
+                        },
                         nowMillis = nowMillis,
-                        focusRequester = if (index == 0) firstFocusRequester else null,
+                        focusRequester = if (index == anchorIndex) anchorFocusRequester else null,
                         isTouchDevice = isTouchDevice,
                         onClick = {
                             when (item.state) {
@@ -423,61 +399,73 @@ private fun GuideSheetHandle() {
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun GuideLiveButton(
-    isSelected: Boolean,
+private fun GuideTimelineSummary(
+    pastCount: Int,
+    liveCount: Int,
+    futureCount: Int,
+    catchupSupported: Boolean,
     isTouchDevice: Boolean,
-    onClick: () -> Unit,
 ) {
-    var focused by remember { mutableStateOf(false) }
-    val active = focused || isSelected
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (active) LiveColors.Accent.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.06f))
-            .border(
-                BorderStroke(1.dp, if (active) LiveColors.Accent else Color.White.copy(alpha = 0.08f)),
-                RoundedCornerShape(12.dp)
-            )
-            .onFocusChanged { focused = it.hasFocus }
-            .focusable()
-            .onKeyEvent { ev ->
-                if (ev.type == KeyEventType.KeyDown && (ev.key == Key.DirectionCenter || ev.key == Key.Enter)) {
-                    onClick()
-                    true
-                } else {
-                    false
-                }
-            }
-            .clickable(onClick = onClick)
-            .heightIn(min = if (isTouchDevice) 48.dp else 0.dp)
-            .padding(horizontal = 12.dp, vertical = if (isTouchDevice) 9.dp else 10.dp),
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(alpha = if (isTouchDevice) 0.055f else 0.045f))
+            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)), RoundedCornerShape(14.dp))
+            .padding(5.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (isTouchDevice) 5.dp else 7.dp),
     ) {
-        Icon(
-            imageVector = Icons.Default.PlayArrow,
-            contentDescription = null,
-            tint = LiveColors.Accent,
-            modifier = Modifier.size(if (isTouchDevice) 19.dp else 20.dp),
+        GuideTimelinePill(
+            label = "Aired",
+            value = if (catchupSupported) pastCount.toString() else "--",
+            accent = if (catchupSupported) LiveColors.Accent else LiveColors.FgMute,
+            modifier = Modifier.weight(1f),
         )
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "Go Live",
-                style = LiveType.CellTitle.copy(color = LiveColors.Fg, fontSize = if (isTouchDevice) 13.sp else 14.sp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (!isTouchDevice) {
-                Text(
-                    text = "Return to the live broadcast",
-                    style = LiveType.BodySynopsis.copy(color = LiveColors.FgDim, fontSize = 10.sp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        GuideChip("LIVE", Color.White, LiveColors.LiveRed)
+        GuideTimelinePill(
+            label = "Live",
+            value = liveCount.coerceAtMost(1).toString(),
+            accent = LiveColors.LiveRed,
+            modifier = Modifier.weight(1f),
+        )
+        GuideTimelinePill(
+            label = "Later",
+            value = futureCount.toString(),
+            accent = LiveColors.FgDim,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun GuideTimelinePill(
+    label: String,
+    value: String,
+    accent: Color,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(accent.copy(alpha = 0.13f))
+            .padding(horizontal = 8.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = label,
+            style = LiveType.Badge.copy(color = LiveColors.Fg, fontSize = 10.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = value,
+            style = LiveType.Badge.copy(color = accent, fontSize = 10.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -528,9 +516,35 @@ private fun GuideProgramRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(if (isTouchDevice) 10.dp else 12.dp),
     ) {
+        Column(
+            modifier = Modifier
+                .width(if (isTouchDevice) 70.dp else 84.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                text = timelineDateLabel(item.program, nowMillis),
+                style = LiveType.Badge.copy(
+                    color = when (item.state) {
+                        GuideProgramState.PastPlayable -> LiveColors.Accent
+                        GuideProgramState.Live -> LiveColors.LiveRed
+                        GuideProgramState.Future -> LiveColors.FgDim
+                    },
+                    fontSize = if (isTouchDevice) 9.sp else 10.sp,
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = formatTimeWindow(item.program),
+                style = LiveType.TimeMono.copy(color = LiveColors.FgDim, fontSize = if (isTouchDevice) 8.sp else 9.sp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
         Box(
             modifier = Modifier
-                .size(if (isTouchDevice) 38.dp else 42.dp)
+                .size(if (isTouchDevice) 34.dp else 38.dp)
                 .clip(CircleShape)
                 .background(
                     when (item.state) {
@@ -553,7 +567,7 @@ private fun GuideProgramRow(
                     GuideProgramState.Live -> LiveColors.LiveRed
                     GuideProgramState.Future -> LiveColors.FgDim
                 },
-                modifier = Modifier.size(if (isTouchDevice) 20.dp else 22.dp),
+                modifier = Modifier.size(if (isTouchDevice) 18.dp else 20.dp),
             )
         }
 
@@ -565,16 +579,10 @@ private fun GuideProgramRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    text = formatTimeWindow(item.program),
-                    style = LiveType.TimeMono.copy(color = LiveColors.FgDim, fontSize = if (isTouchDevice) 9.sp else 10.sp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
                 GuideChip(
                     label = when (item.state) {
-                        GuideProgramState.PastPlayable -> "Replay"
-                        GuideProgramState.Live -> "Live"
+                        GuideProgramState.PastPlayable -> "AIRED"
+                        GuideProgramState.Live -> "LIVE"
                         GuideProgramState.Future -> startsLabel(item.program, nowMillis)
                     },
                     fg = when (item.state) {
@@ -626,19 +634,14 @@ private fun GuideProgramRow(
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun GuideEmptyState(
-    selectedTab: FullscreenGuideTab,
     catchupSupported: Boolean,
     isTouchDevice: Boolean,
 ) {
     val text = when {
-        selectedTab == FullscreenGuideTab.Past && !catchupSupported ->
-            "Catchup is not available for this channel."
-        selectedTab == FullscreenGuideTab.Past ->
-            "No replay programmes yet."
-        selectedTab == FullscreenGuideTab.Now ->
-            "No current programme."
+        !catchupSupported ->
+            "No programme timeline is available for this channel."
         else ->
-            "No upcoming programmes yet."
+            "No guide timeline is available yet."
     }
     Box(
         modifier = Modifier
@@ -661,48 +664,6 @@ private fun GuideEmptyState(
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun GuideTabButton(
-    label: String,
-    count: Int,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    isTouchDevice: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val fg = when {
-        selected -> LiveColors.Bg
-        enabled -> LiveColors.Fg
-        else -> LiveColors.FgMute
-    }
-    val bg = when {
-        selected -> LiveColors.Accent
-        enabled -> Color.White.copy(alpha = 0.075f)
-        else -> Color.White.copy(alpha = 0.035f)
-    }
-    Row(
-        modifier = modifier
-            .heightIn(min = if (isTouchDevice) 38.dp else 0.dp)
-            .clip(RoundedCornerShape(if (isTouchDevice) 10.dp else 999.dp))
-            .background(bg)
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = if (isTouchDevice) 8.dp else 12.dp, vertical = if (isTouchDevice) 8.dp else 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        Text(
-            label,
-            style = LiveType.Badge.copy(color = fg, fontSize = 11.sp),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(count.toString(), style = LiveType.Badge.copy(color = fg.copy(alpha = 0.74f), fontSize = 10.sp))
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
 private fun GuideChip(label: String, fg: Color, bg: Color) {
     Box(
         modifier = Modifier
@@ -714,12 +675,40 @@ private fun GuideChip(label: String, fg: Color, bg: Color) {
     }
 }
 
+private val timelineDateFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault())
+
+private fun timelineDateLabel(program: IptvProgram, nowMillis: Long): String {
+    val zone = ZoneId.systemDefault()
+    val today = Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
+    val programDate = Instant.ofEpochMilli(program.startUtcMillis).atZone(zone).toLocalDate()
+    return when (programDate) {
+        today.minusDays(1) -> "Yesterday"
+        today -> "Today"
+        today.plusDays(1) -> "Tomorrow"
+        else -> timelineDateFormatter.format(programDate)
+    }
+}
+
 private fun EnrichedChannel.supportsFullscreenCatchup(): Boolean {
     val channelSource = this.source
     if (channelSource.catchupDays > 0) return true
     if (!channelSource.catchupType.isNullOrBlank() || !channelSource.catchupSource.isNullOrBlank()) return true
     if (channelSource.xtreamStreamId != null) return true
-    return channelSource.streamUrl.contains("/live/", ignoreCase = true)
+    return looksLikeXtreamStreamUrl(channelSource.streamUrl)
+}
+
+private fun looksLikeXtreamStreamUrl(url: String): Boolean {
+    val path = url.substringAfter("://", missingDelimiterValue = "")
+        .substringAfter('/', missingDelimiterValue = "")
+        .substringBefore('?')
+        .trim('/')
+    if (path.isBlank()) return false
+    val segments = path.split('/').filter { it.isNotBlank() }
+    if (segments.size >= 4 && segments.first().equals("live", ignoreCase = true)) {
+        return segments.last().substringBefore('.').toIntOrNull() != null
+    }
+    return segments.size >= 3 && segments.last().substringBefore('.').toIntOrNull() != null
 }
 
 private fun startsLabel(program: IptvProgram, nowMillis: Long): String {

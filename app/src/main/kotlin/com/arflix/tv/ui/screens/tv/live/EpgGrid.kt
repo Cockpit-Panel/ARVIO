@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,12 +53,14 @@ import com.arflix.tv.data.model.IptvNowNext
 import com.arflix.tv.data.model.IptvProgram
 import com.arflix.tv.ui.focus.arvioDpadFocusGroup
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 private const val EpgPastWindowMinutes = 90
 private const val EpgFutureWindowMinutes = 12 * 60
 private const val CompactEpgPastWindowMinutes = 60
 private const val CompactEpgFutureWindowMinutes = 8 * 60
+private const val ChannelWindowPrefetchThreshold = 18
 
 enum class EpgGridFocusMode {
     ChannelList,
@@ -74,6 +77,8 @@ enum class EpgGridFocusMode {
 @Composable
 fun EpgGrid(
     channels: List<EnrichedChannel>,
+    channelWindowOffset: Int = 0,
+    totalChannelCount: Int = channels.size,
     clockTickMillis: Long,
     nowNext: Map<String, IptvNowNext>,
     epgLoadingChannelIds: Set<String> = emptySet(),
@@ -96,6 +101,8 @@ fun EpgGrid(
     onMoveLeftFromChannels: () -> Unit = {},
     onEnterEpg: (EnrichedChannel) -> Unit = {},
     onExitEpg: (EnrichedChannel?) -> Unit = {},
+    onRequestPreviousChannels: () -> Unit = {},
+    onRequestNextChannels: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
@@ -115,6 +122,20 @@ fun EpgGrid(
         }
     }
     val selectedChannel = selectedChannelId?.let { id -> channelIndexById[id]?.let { index -> channels.getOrNull(index) } }
+    val safeTotalChannelCount = totalChannelCount.coerceAtLeast(channels.size)
+    fun requestMoreRowsIfNeeded(rowIdx: Int) {
+        if (rowIdx <= ChannelWindowPrefetchThreshold && channelWindowOffset > 0) {
+            onRequestPreviousChannels()
+        }
+        val absoluteAfter = channelWindowOffset + rowIdx
+        if (
+            channels.isNotEmpty() &&
+            channels.lastIndex - rowIdx <= ChannelWindowPrefetchThreshold &&
+            absoluteAfter < safeTotalChannelCount - 1
+        ) {
+            onRequestNextChannels()
+        }
+    }
 
     val pastWindowMinutes = if (compact) CompactEpgPastWindowMinutes else EpgPastWindowMinutes
     val futureWindowMinutes = if (compact) CompactEpgFutureWindowMinutes else EpgFutureWindowMinutes
@@ -167,6 +188,7 @@ fun EpgGrid(
 
     fun keepChannelFocus(rowIdx: Int): Boolean {
         val channel = channels.getOrNull(rowIdx) ?: return true
+        requestMoreRowsIfNeeded(rowIdx)
         activeChannelFocusId = channel.id
         pendingChannelFocusId = channel.id
         onChannelFocused(channel)
@@ -198,7 +220,18 @@ fun EpgGrid(
         val anchorIdx = anchorId?.let(channelIndexById::get)
             ?: selectedChannelId?.let(channelIndexById::get)
             ?: return true
-        return keepChannelFocus(anchorIdx + delta)
+        val targetIdx = anchorIdx + delta
+        return when {
+            targetIdx < 0 -> {
+                onRequestPreviousChannels()
+                true
+            }
+            targetIdx >= channels.size -> {
+                onRequestNextChannels()
+                true
+            }
+            else -> keepChannelFocus(targetIdx)
+        }
     }
 
     // Scroll the grid to the active channel whenever the selection changes
@@ -245,6 +278,28 @@ fun EpgGrid(
         }
     }
 
+    LaunchedEffect(channelListState, channels.size, channelWindowOffset, safeTotalChannelCount) {
+        snapshotFlow {
+            val visibleItems = channelListState.layoutInfo.visibleItemsInfo
+            val first = visibleItems.firstOrNull()?.index ?: 0
+            val last = visibleItems.lastOrNull()?.index ?: 0
+            first to last
+        }
+            .distinctUntilChanged()
+            .collect { (first, last) ->
+                if (first <= ChannelWindowPrefetchThreshold && channelWindowOffset > 0) {
+                    onRequestPreviousChannels()
+                }
+                if (
+                    channels.isNotEmpty() &&
+                    channels.lastIndex - last <= ChannelWindowPrefetchThreshold &&
+                    channelWindowOffset + last < safeTotalChannelCount - 1
+                ) {
+                    onRequestNextChannels()
+                }
+            }
+    }
+
     Column(
         modifier = modifier.fillMaxSize().background(LiveColors.Bg),
     ) {
@@ -267,7 +322,7 @@ fun EpgGrid(
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("CHANNELS", style = LiveType.SectionTag.copy(color = LiveColors.FgMute))
-                    Text(channels.size.toString(),
+                    Text(safeTotalChannelCount.toString(),
                         style = LiveType.NumberMono.copy(color = LiveColors.FgDim))
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -397,6 +452,7 @@ fun EpgGrid(
                                     }
                                     pendingChannelFocusId = null
                                     activeChannelFocusId = ch.id
+                                    requestMoreRowsIfNeeded(idx)
                                     onChannelFocused(ch)
                                 },
                                 onMoveLeft = onMoveLeftFromChannels,
@@ -758,14 +814,21 @@ private fun effectiveCatchupDays(channel: EnrichedChannel): Int {
     val source = channel.source
     val hasCatchupMetadata = !source.catchupType.isNullOrBlank() || !source.catchupSource.isNullOrBlank()
     if (hasCatchupMetadata) return 7
-    val pathId = source.streamUrl.substringBefore('?')
-        .trimEnd('/')
-        .substringAfterLast('/')
-        .substringBefore('.')
-        .toIntOrNull()
-    val looksLikeXtream = source.xtreamStreamId != null ||
-        (pathId != null && source.streamUrl.contains("/live/", ignoreCase = true))
+    val looksLikeXtream = source.xtreamStreamId != null || looksLikeXtreamStreamUrl(source.streamUrl)
     return if (looksLikeXtream) 7 else 0
+}
+
+private fun looksLikeXtreamStreamUrl(url: String): Boolean {
+    val path = url.substringAfter("://", missingDelimiterValue = "")
+        .substringAfter('/', missingDelimiterValue = "")
+        .substringBefore('?')
+        .trim('/')
+    if (path.isBlank()) return false
+    val segments = path.split('/').filter { it.isNotBlank() }
+    if (segments.size >= 4 && segments.first().equals("live", ignoreCase = true)) {
+        return segments.last().substringBefore('.').toIntOrNull() != null
+    }
+    return segments.size >= 3 && segments.last().substringBefore('.').toIntOrNull() != null
 }
 
 private fun ProgramPlacement.canFocus(channel: EnrichedChannel, nowMillis: Long): Boolean =

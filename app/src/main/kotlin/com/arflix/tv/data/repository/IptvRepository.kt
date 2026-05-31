@@ -18,6 +18,7 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
+import com.google.gson.stream.JsonReader
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -186,8 +187,6 @@ class IptvRepository @Inject constructor(
 
     @Volatile
     private var cachedEpgAt: Long = 0L
-    @Volatile
-    private var lastEpgCachePersistAt: Long = 0L
 
     private val discoveredM3uEpgUrls = java.util.concurrent.CopyOnWriteArraySet<String>()
     @Volatile
@@ -317,6 +316,14 @@ class IptvRepository @Inject constructor(
     private data class IptvCachePayload(
         val channels: List<IptvChannel> = emptyList(),
         val nowNext: Map<String, IptvNowNext> = emptyMap(),
+        val loadedAtEpochMs: Long = 0L,
+        val configSignature: String = "",
+        val sourceSignature: String = "",
+        val discoveredEpgUrls: List<String> = emptyList()
+    )
+
+    private data class IptvChannelCachePayload(
+        val channels: List<IptvChannel> = emptyList(),
         val loadedAtEpochMs: Long = 0L,
         val configSignature: String = "",
         val sourceSignature: String = "",
@@ -755,7 +762,7 @@ class IptvRepository @Inject constructor(
                     )
                 }
             }
-            candidates.getOrNull(safeAttempt) ?: candidates.first()
+            throw IOException("No playable catchup stream returned by provider")
         }
     }
 
@@ -1648,10 +1655,10 @@ class IptvRepository @Inject constructor(
                 if (!hasAnyConfiguredSource(config)) return@withLock
                 if (cachedChannels.isNotEmpty()) return@withLock
 
-                val cached = readCache(config) ?: return@withLock
+                val cached = readChannelCache(config) ?: return@withLock
                 cachedChannels = cached.channels
                 cachedGroupedChannels = buildGroupedChannels(cached.channels)
-                cachedNowNext = ConcurrentHashMap(cached.nowNext)
+                cachedNowNext = ConcurrentHashMap()
                 cachedPlaylistAt = cached.loadedAtEpochMs
                 cachedEpgAt = cached.loadedAtEpochMs
             }
@@ -1918,8 +1925,7 @@ class IptvRepository @Inject constructor(
                 val streamIds = providerChannels.mapNotNull { resolveXtreamStreamId(it) }
                 var errors = 0
                 val shouldUseFullCatchupHistory = preferFullCatchupHistory &&
-                    providerChannels.size <= fullCatchupHistoryChannelLimit &&
-                    providerChannels.any { effectiveCatchupDays(it) > 0 }
+                    providerChannels.size <= fullCatchupHistoryChannelLimit
                 val fullListings = if (shouldUseFullCatchupHistory) {
                     fetchXtreamFullEpgListingsAsync(
                         creds = creds,
@@ -1953,7 +1959,7 @@ class IptvRepository @Inject constructor(
                 )
 
                 if (allListings.isEmpty()) {
-                    if (errors == 0 && !preferFullCatchupHistory) {
+                    if (errors == 0 && !preferFullCatchupHistory && providerChannels.size >= startupShortEpgChannelLimit) {
                         emptyShortEpgCooldownUntil[providerCooldownKey] =
                             System.currentTimeMillis() + 10 * 60_000L
                     }
@@ -1972,7 +1978,8 @@ class IptvRepository @Inject constructor(
                     mergedNowNext.putAll(freshNowNext)
                 }
             }
-            if (mergedNowNext.isEmpty() && !preferFullCatchupHistory && channels.size >= 4) {
+            val hasXtreamRequestedChannels = channelsByCredentials.isNotEmpty()
+            if (mergedNowNext.isEmpty() && !preferFullCatchupHistory && !hasXtreamRequestedChannels && channels.size >= 4) {
                 val xmlFallback = fetchVisibleXmlEpgForChannels(config, channels)
                 if (xmlFallback.isNotEmpty()) {
                     mergedNowNext.putAll(xmlFallback)
@@ -1987,10 +1994,6 @@ class IptvRepository @Inject constructor(
             cachedNowNext.putAll(mergedNowNext)
             cachedEpgAt = System.currentTimeMillis()
             persistEpgIndexChannels(config, mergedNowNext, cachedEpgAt)
-            if (cachedEpgAt - lastEpgCachePersistAt > 30_000L) {
-                lastEpgCachePersistAt = cachedEpgAt
-                persistCurrentCacheSnapshot(config, cachedEpgAt)
-            }
 
             System.err.println(
                 "[EPG-Refresh] Updated ${mergedNowNext.size} channels in cache " +
@@ -6431,6 +6434,12 @@ class IptvRepository @Inject constructor(
         return File(dir, "${profileManager.getProfileIdSync()}_iptv_cache.json")
     }
 
+    private fun channelCacheFile(): File {
+        val dir = File(context.filesDir, "iptv_cache")
+        if (!dir.exists()) dir.mkdirs()
+        return File(dir, "${profileManager.getProfileIdSync()}_iptv_channels_cache.json")
+    }
+
     private fun cleanupStaleEpgTempFiles(maxAgeMs: Long = 3 * 60_000L) {
         runCatching {
             val now = System.currentTimeMillis()
@@ -6539,6 +6548,20 @@ class IptvRepository @Inject constructor(
                     rawTitle = channel.name
                 )
             }
+            val channelPayload = IptvChannelCachePayload(
+                channels = compactChannels,
+                loadedAtEpochMs = loadedAtMs,
+                configSignature = buildConfigSignature(config),
+                sourceSignature = buildSourceSignature(config),
+                discoveredEpgUrls = discoveredM3uEpgUrls
+                    .asSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .toList()
+            )
+            channelCacheFile().writeBytes(gzipBytes(gson.toJson(channelPayload)))
+
             val channelsById = compactChannels.associateBy { it.id }
             val compactNowNext = nowNext
                 .asSequence()
@@ -6617,24 +6640,112 @@ class IptvRepository @Inject constructor(
             val text = decodeCacheText(file.readBytes())
             if (text.isBlank()) return null
             val payload = gson.fromJson(text, IptvCachePayload::class.java) ?: return null
-            val currentSignature = buildConfigSignature(config)
-            val legacySignature = buildLegacyConfigSignature(config)
-            val currentSourceSignature = buildSourceSignature(config)
-            val cacheSignature = payload.configSignature.trim()
-            val cacheSourceSignature = payload.sourceSignature.trim()
-            if (
-                cacheSignature.isNotBlank() &&
-                cacheSignature != currentSignature &&
-                cacheSignature != legacySignature &&
-                cacheSourceSignature != currentSourceSignature
-            ) return null
+            if (!isValidCacheSignature(config, payload.configSignature, payload.sourceSignature)) return null
             if (payload.channels.isEmpty()) return null
-            payload.discoveredEpgUrls.orEmpty()
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .forEach { discoveredM3uEpgUrls.add(it) }
+            rememberDiscoveredEpgUrls(payload.discoveredEpgUrls.orEmpty())
             payload
         }.getOrNull()
+    }
+
+    private fun readChannelCache(config: IptvConfig): IptvChannelCachePayload? {
+        readDedicatedChannelCache(config)?.let { return it }
+        return readChannelsFromLegacyCache(config)
+    }
+
+    private fun readDedicatedChannelCache(config: IptvConfig): IptvChannelCachePayload? {
+        return runCatching {
+            val file = channelCacheFile()
+            if (!file.exists()) return null
+            if (file.length() > MAX_IPTV_CACHE_BYTES) {
+                runCatching { file.delete() }
+                return null
+            }
+            val text = decodeCacheText(file.readBytes())
+            if (text.isBlank()) return null
+            val payload = gson.fromJson(text, IptvChannelCachePayload::class.java) ?: return null
+            payload.takeIf { isValidCacheSignature(config, it.configSignature, it.sourceSignature) && it.channels.isNotEmpty() }
+                ?.also { rememberDiscoveredEpgUrls(it.discoveredEpgUrls) }
+        }.getOrNull()
+    }
+
+    private fun readChannelsFromLegacyCache(config: IptvConfig): IptvChannelCachePayload? {
+        return runCatching {
+            val file = cacheFile()
+            if (!file.exists()) return null
+            if (file.length() > MAX_IPTV_CACHE_BYTES * 2) {
+                runCatching { file.delete() }
+                return null
+            }
+
+            var channels: List<IptvChannel> = emptyList()
+            var loadedAt = 0L
+            var configSignature = ""
+            var sourceSignature = ""
+            var discoveredUrls: List<String> = emptyList()
+
+            cacheJsonReader(file).use { reader ->
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    when (reader.nextName()) {
+                        "channels" -> {
+                            val type = TypeToken.getParameterized(List::class.java, IptvChannel::class.java).type
+                            channels = gson.fromJson(reader, type) ?: emptyList()
+                        }
+                        "loadedAtEpochMs" -> loadedAt = runCatching { reader.nextLong() }.getOrDefault(0L)
+                        "configSignature" -> configSignature = reader.nextString().orEmpty()
+                        "sourceSignature" -> sourceSignature = reader.nextString().orEmpty()
+                        "discoveredEpgUrls" -> {
+                            val type = TypeToken.getParameterized(List::class.java, String::class.java).type
+                            discoveredUrls = gson.fromJson(reader, type) ?: emptyList()
+                        }
+                        else -> reader.skipValue()
+                    }
+                }
+                reader.endObject()
+            }
+
+            IptvChannelCachePayload(
+                channels = channels,
+                loadedAtEpochMs = loadedAt,
+                configSignature = configSignature,
+                sourceSignature = sourceSignature,
+                discoveredEpgUrls = discoveredUrls
+            ).takeIf { isValidCacheSignature(config, it.configSignature, it.sourceSignature) && it.channels.isNotEmpty() }
+                ?.also {
+                    rememberDiscoveredEpgUrls(it.discoveredEpgUrls)
+                    channelCacheFile().writeBytes(gzipBytes(gson.toJson(it)))
+                }
+        }.getOrNull()
+    }
+
+    private fun cacheJsonReader(file: File): JsonReader {
+        val input = FileInputStream(file)
+        val stream = BufferedInputStream(input, 64 * 1024)
+        stream.mark(2)
+        val b1 = stream.read()
+        val b2 = stream.read()
+        stream.reset()
+        val source = if (b1 == 0x1f && b2 == 0x8b) GZIPInputStream(stream) else stream
+        return JsonReader(InputStreamReader(source, StandardCharsets.UTF_8))
+    }
+
+    private fun isValidCacheSignature(config: IptvConfig, cacheSignature: String, cacheSourceSignature: String): Boolean {
+        val currentSignature = buildConfigSignature(config)
+        val legacySignature = buildLegacyConfigSignature(config)
+        val currentSourceSignature = buildSourceSignature(config)
+        val signature = cacheSignature.trim()
+        val sourceSignature = cacheSourceSignature.trim()
+        return signature.isBlank() ||
+            signature == currentSignature ||
+            signature == legacySignature ||
+            sourceSignature == currentSourceSignature
+    }
+
+    private fun rememberDiscoveredEpgUrls(urls: List<String>) {
+        urls.asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { discoveredM3uEpgUrls.add(it) }
     }
 
     private fun IptvProgram.compactForCache(): IptvProgram =
