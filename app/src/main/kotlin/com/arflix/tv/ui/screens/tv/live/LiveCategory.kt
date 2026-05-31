@@ -271,18 +271,7 @@ fun IptvChannel.enrich(number: Int): EnrichedChannel {
 // ─────────────────────────────────────────────────────────────────────────
 
 fun IptvChannel.enrichForFastStartup(number: Int): EnrichedChannel {
-    val brand = brandForGenre(Genre.General)
-    return EnrichedChannel(
-        source = this,
-        number = number,
-        country = null,
-        genre = Genre.General,
-        quality = Quality.SD,
-        lang = "EN",
-        brandBg = brand.bg,
-        brandFg = brand.fg,
-        isAdult = isAdultGroup(group, name),
-    )
+    return enrich(number)
 }
 
 data class LiveCategory(

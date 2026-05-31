@@ -169,11 +169,17 @@ class IptvRepository @Inject constructor(
     @Volatile
     private var cachedChannels: List<IptvChannel> = emptyList()
     @Volatile
+    private var cachedChannelsLookupSource: List<IptvChannel>? = null
+    @Volatile
+    private var cachedChannelsById: Map<String, IptvChannel> = emptyMap()
+    @Volatile
     private var cachedGroupedChannels: Map<String, List<IptvChannel>> = emptyMap()
     @Volatile var cachedStalkerApi: com.arflix.tv.data.api.StalkerApi? = null
 
     @Volatile
     private var cachedNowNext: ConcurrentHashMap<String, IptvNowNext> = ConcurrentHashMap()
+    private val emptyShortEpgCooldownUntil = ConcurrentHashMap<String, Long>()
+    private val visibleXmlEpgCooldownUntil = ConcurrentHashMap<String, Long>()
 
     @Volatile
     private var cachedPlaylistAt: Long = 0L
@@ -198,6 +204,19 @@ class IptvRepository @Inject constructor(
 
     private fun buildGroupedChannels(channels: List<IptvChannel>): Map<String, List<IptvChannel>> =
         channels.groupBy { it.group.ifBlank { "Uncategorized" } }
+
+    private fun cachedChannelLookup(): Map<String, IptvChannel> {
+        val source = cachedChannels
+        val current = cachedChannelsById
+        if (cachedChannelsLookupSource === source && current.size == source.size) {
+            return current
+        }
+        val rebuilt = source.associateBy { it.id }
+        cachedChannelsLookupSource = source
+        cachedChannelsById = rebuilt
+        return rebuilt
+    }
+
     private data class ScopedEpgCandidate(
         val url: String,
         val playlistId: String? = null
@@ -1370,8 +1389,11 @@ class IptvRepository @Inject constructor(
             val hasXtreamChannels = xtreamProviderGroups.isNotEmpty()
             val shouldFetchBroadShortEpg = allowBroadShortEpg || epgCandidates.isEmpty() || channels.size <= 10_000
             System.err.println("[EPG] loadSnapshot: forceEpgReload=$forceEpgReload shouldUseCachedEpg=$shouldUseCachedEpg cachedHasPrograms=$cachedHasPrograms xtreamProviders=${xtreamProviderGroups.size} hasXtreamChannels=$hasXtreamChannels epgCandidates=${epgCandidates.size} broadShort=$shouldFetchBroadShortEpg")
-            val cachedFallbackNowNext =
+            val cachedFallbackNowNext = if (channels.size > 10_000) {
+                cachedNowNext
+            } else {
                 reDeriveCachedNowNext(channels.asSequence().map { it.id }.toSet()) ?: cachedNowNext
+            }
             val nowNext = if (shouldUseCachedEpg) {
                 onProgress(IptvLoadProgress("Using cached EPG", 92))
                 System.err.println("[EPG] Using cached EPG (${cachedNowNext.size} channels, age=${(now - cachedEpgAt)/1000}s)")
@@ -1749,7 +1771,7 @@ class IptvRepository @Inject constructor(
         }
         if (cachedNowNext.isEmpty()) return null
         val nowMs = System.currentTimeMillis()
-        val channelsById = cachedChannels.associateBy { it.id }
+        val channelsById = cachedChannelLookup()
 
         val result = mutableMapOf<String, IptvNowNext>()
         for (channelId in channelIds) {
@@ -1842,7 +1864,8 @@ class IptvRepository @Inject constructor(
             } else {
                 channelIds
             }
-            val channels = cachedChannels.filter { it.id in requested }
+            val lookup = cachedChannelLookup()
+            val channels = requested.mapNotNull(lookup::get)
             if (channels.isEmpty()) return@withContext null
 
             val activePlaylistById = activePlaylists(config).associateBy { it.id }
@@ -1858,13 +1881,22 @@ class IptvRepository @Inject constructor(
                 if (resolveXtreamStreamId(channel) == null) continue
                 channelsByCredentials.getOrPut(creds) { mutableListOf() }.add(channel)
             }
-            if (channelsByCredentials.isEmpty()) return@withContext null
-
             val mergedNowNext = ConcurrentHashMap<String, IptvNowNext>()
             var totalListings = 0
             var totalErrors = 0
 
             channelsByCredentials.forEach { (creds, providerChannels) ->
+                val providerCooldownKey = "${creds.baseUrl}|${creds.username}"
+                val nowMs = System.currentTimeMillis()
+                val cooldownUntil = emptyShortEpgCooldownUntil[providerCooldownKey] ?: 0L
+                if (cooldownUntil > nowMs && !preferFullCatchupHistory) {
+                    System.err.println(
+                        "[EPG-Refresh] Skipping empty short EPG provider ${creds.baseUrl} " +
+                            "for ${(cooldownUntil - nowMs) / 1000}s"
+                    )
+                    return@forEach
+                }
+
                 // Build lookups for this provider's channels only. Multi-playlist
                 // setups may use different Xtream credentials per playlist.
                 val epgIdToChannelIds = mutableMapOf<String, MutableList<String>>()
@@ -1920,7 +1952,14 @@ class IptvRepository @Inject constructor(
                         "fullCatchup=$shouldUseFullCatchupHistory"
                 )
 
-                if (allListings.isEmpty()) return@forEach
+                if (allListings.isEmpty()) {
+                    if (errors == 0 && !preferFullCatchupHistory) {
+                        emptyShortEpgCooldownUntil[providerCooldownKey] =
+                            System.currentTimeMillis() + 10 * 60_000L
+                    }
+                    return@forEach
+                }
+                emptyShortEpgCooldownUntil.remove(providerCooldownKey)
 
                 val freshNowNext = buildNowNextFromXtreamListings(
                     creds = creds,
@@ -1931,6 +1970,15 @@ class IptvRepository @Inject constructor(
                 )
                 if (freshNowNext.isNotEmpty()) {
                     mergedNowNext.putAll(freshNowNext)
+                }
+            }
+            if (mergedNowNext.isEmpty() && !preferFullCatchupHistory && channels.size >= 4) {
+                val xmlFallback = fetchVisibleXmlEpgForChannels(config, channels)
+                if (xmlFallback.isNotEmpty()) {
+                    mergedNowNext.putAll(xmlFallback)
+                    System.err.println(
+                        "[EPG-Refresh] XMLTV visible fallback added ${xmlFallback.size} channels"
+                    )
                 }
             }
             if (mergedNowNext.isEmpty()) return@withContext null
@@ -1950,6 +1998,58 @@ class IptvRepository @Inject constructor(
             )
             mergedNowNext
         }
+    }
+
+    private suspend fun fetchVisibleXmlEpgForChannels(
+        config: IptvConfig,
+        channels: List<IptvChannel>
+    ): Map<String, IptvNowNext> {
+        if (channels.isEmpty()) return emptyMap()
+        val candidates = resolveScopedEpgCandidates(config)
+        if (candidates.isEmpty()) return emptyMap()
+
+        val playlistKey = channels
+            .asSequence()
+            .map { it.id.substringBefore(':', missingDelimiterValue = "") }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(4)
+            .joinToString(",")
+        val cooldownKey = "${currentEpgIndexKey(config)}|$playlistKey|visible_xml"
+        val nowMs = System.currentTimeMillis()
+        val cooldownUntil = visibleXmlEpgCooldownUntil[cooldownKey] ?: 0L
+        if (cooldownUntil > nowMs) {
+            System.err.println(
+                "[EPG-Refresh] Skipping XMLTV visible fallback for ${(cooldownUntil - nowMs) / 1000}s"
+            )
+            return emptyMap()
+        }
+        visibleXmlEpgCooldownUntil[cooldownKey] = nowMs + 90_000L
+
+        val visibleCandidates = candidates.take(2)
+        for ((index, candidate) in visibleCandidates.withIndex()) {
+            val candidateChannels = channelsForScopedEpgCandidate(candidate, channels)
+            if (candidateChannels.isEmpty()) continue
+            System.err.println(
+                "[EPG-Refresh] XMLTV visible fallback ${index + 1}/${visibleCandidates.size} " +
+                    "for ${candidateChannels.size} channels"
+            )
+            val parsed = runCatching {
+                withTimeoutOrNull(12_000L) {
+                    fetchAndParseEpg(candidate.url, candidateChannels)
+                } ?: emptyMap()
+            }.onFailure { error ->
+                System.err.println("[EPG-Refresh] XMLTV visible fallback failed: ${error.message}")
+            }.getOrDefault(emptyMap())
+
+            if (parsed.isNotEmpty() && hasAnyProgramData(parsed)) {
+                visibleXmlEpgCooldownUntil[cooldownKey] = System.currentTimeMillis() + 30_000L
+                return parsed
+            }
+        }
+
+        visibleXmlEpgCooldownUntil[cooldownKey] = System.currentTimeMillis() + 5 * 60_000L
+        return emptyMap()
     }
 
     private fun persistCurrentCacheSnapshot(config: IptvConfig, loadedAtMs: Long = System.currentTimeMillis()) {

@@ -229,11 +229,6 @@ fun LiveTvScreen(
             return@LaunchedEffect
         }
 
-        val initialLimit = when {
-            snapshot.size > 10_000 && isTouchDevice -> 240
-            snapshot.size > 10_000 -> 720
-            else -> snapshot.size
-        }
         val initialChannels = withContext(Dispatchers.Default) {
             buildInitialCategoryChannels(
                 channels = snapshot,
@@ -241,7 +236,7 @@ fun LiveTvScreen(
                 favorites = favSet,
                 recents = recents.value,
                 hiddenGroups = hiddenGroupSet,
-                limit = initialLimit,
+                limit = snapshot.size,
             )
         }
         val initialIndex = withContext(Dispatchers.Default) { buildCategoryIndex(initialChannels, hiddenGroupSet) }
@@ -254,11 +249,17 @@ fun LiveTvScreen(
                 groupOrder = state.snapshot.groupOrder,
             )
         }
-        enrichedState.value = EnrichedChannels(
+        val initialValue = EnrichedChannels(
             all = initialChannels,
             tree = initialTree,
             index = initialIndex,
         )
+        enrichedState.value = initialValue
+        if (snapshot.size > 10_000) {
+            viewModel.cachedEnrichedChannels = initialValue
+            viewModel.cachedChannelsSignature = signature
+            return@LaunchedEffect
+        }
         val enriched = withContext(Dispatchers.Default) {
             snapshot.mapIndexed { idx, ch -> ch.enrich(100 + idx) }
         }
@@ -1480,7 +1481,11 @@ fun LiveTvScreen(
                             setKeepContentOnPlayerReset(true)
                         }
                     },
-                    update = { it.player = exoPlayer },
+                    update = { view ->
+                        if (view.player !== exoPlayer) {
+                            view.player = exoPlayer
+                        }
+                    },
                     modifier = Modifier.fillMaxSize(),
                 )
                 if (isFullScreen && !fullscreenGuideOpen) {

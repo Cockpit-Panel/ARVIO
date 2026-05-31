@@ -174,7 +174,11 @@ private fun VideoCard(
                         setKeepContentOnPlayerReset(true)
                     }
                 },
-                update = { it.player = exoPlayer },
+                update = { view ->
+                    if (view.player !== exoPlayer) {
+                        view.player = exoPlayer
+                    }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
             LiveBug(modifier = Modifier.align(Alignment.TopEnd).padding(10.dp))
