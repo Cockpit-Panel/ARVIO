@@ -2062,9 +2062,7 @@ private fun MobileHeroCarousel(
                     item.year
                 }
             }
-            val rating = remember(item.id) {
-                imdbRatingFor(item).ifEmpty { item.tmdbRating.takeIf { parseRatingValue(it) > 0f }.orEmpty() }
-            }
+            val rating = remember(item.id, item.imdbRating) { imdbRatingFor(item) }
             val logoUrl = remember(item.id) { cardLogoUrls["${item.mediaType}_${item.id}"] }
 
             // Scale down cards that aren't in the center; animate smoothly as they scroll in/out

@@ -85,6 +85,7 @@ data class Episode(
     val overview: String = "",
     val stillPath: String? = null,
     val voteAverage: Float = 0f,
+    val imdbRating: String = "",
     val runtime: Int = 0,
     val airDate: String = "",
     val isWatched: Boolean = false

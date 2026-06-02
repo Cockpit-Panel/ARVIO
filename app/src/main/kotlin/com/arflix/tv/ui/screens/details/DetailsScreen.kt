@@ -3245,6 +3245,7 @@ private fun EpisodeCard(
     val aspectRatio = 16f / 9f
     val context = LocalContext.current
     val density = LocalDensity.current
+    val metadataLogoImageLoader = rememberMetadataLogoImageLoader(context)
 
     val shape = rememberArvioCardShape(ArvioSkin.radius.md)
     val scale by animateFloatAsState(
@@ -3267,11 +3268,7 @@ private fun EpisodeCard(
     }
 
     val episodeCode = "S${episode.seasonNumber} • E${String.format("%02d", episode.episodeNumber)}"
-    val ratingLabel = if (episode.voteAverage > 0f) {
-        "${String.format("%.1f", episode.voteAverage)}"
-    } else {
-        null
-    }
+    val ratingLabel = episode.imdbRating.takeIf { parseRatingValue(it) > 0f }
     val isSpoilerBlurred = spoilerBlurEnabled && !episode.isWatched
     val previewText = if (isSpoilerBlurred) {
         ""
@@ -3412,26 +3409,25 @@ private fun EpisodeCard(
             }
 
             ratingLabel?.let { rating ->
-                Row(
+                Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
                         .padding(horizontal = 8.dp, vertical = 8.dp)
                         .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
                         .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 3.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Star,
-                        contentDescription = null,
-                        tint = Color(0xFFF5C518),
-                        modifier = Modifier.size(10.dp)
-                    )
-                    Text(
-                        text = rating,
-                        style = ArvioSkin.typography.caption.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-                        color = Color.White
+                    DetailsImdbSvgRatingBadge(
+                        rating = rating,
+                        imageLoader = metadataLogoImageLoader,
+                        ratingFontSize = 9,
+                        logoWidth = 24.dp,
+                        logoHeight = 10.dp,
+                        textShadow = Shadow(
+                            color = Color.Black.copy(alpha = 0.75f),
+                            offset = Offset(0f, 1f),
+                            blurRadius = 2f
+                        )
                     )
                 }
             }

@@ -118,6 +118,7 @@ class MediaRepository @Inject constructor(
     private val watchProvidersCache = mutableMapOf<String, CacheEntry<StreamingServicesResult?>>()
     private val seasonEpisodesCache = mutableMapOf<String, CacheEntry<List<Episode>>>()
     private val imdbRatingCache = ConcurrentHashMap<String, CacheEntry<String>>()
+    private val imdbEpisodeRatingsCache = ConcurrentHashMap<String, CacheEntry<Map<Pair<Int, Int>, String>>>()
     private val imdbIdCache = ConcurrentHashMap<String, String>()
     private val addonImdbToTmdbCache = ConcurrentHashMap<String, CacheEntry<Pair<MediaType, Int>?>>()
     private val addonTitleToTmdbCache = ConcurrentHashMap<String, CacheEntry<Pair<MediaType, Int>?>>()
@@ -315,11 +316,7 @@ class MediaRepository @Inject constructor(
         val cacheKey = detailsCacheKey(mediaType, mediaId)
         getFromCache(imdbRatingCache, cacheKey)?.let { return it }
 
-        val resolvedImdbId = imdbId
-            ?.trim()
-            ?.takeIf { it.startsWith("tt", ignoreCase = true) }
-            ?: getCachedImdbId(mediaType, mediaId)
-            ?: resolveExternalIds(mediaType, mediaId)?.imdbId?.also { cacheImdbId(mediaType, mediaId, it) }
+        val resolvedImdbId = resolveImdbId(mediaType, mediaId, imdbId)
 
         val rating = resolvedImdbId
             ?.let { fetchCinemetaImdbRating(mediaType, it) }
@@ -328,6 +325,18 @@ class MediaRepository @Inject constructor(
 
         imdbRatingCache[cacheKey] = CacheEntry(rating, System.currentTimeMillis())
         return rating
+    }
+
+    private suspend fun resolveImdbId(mediaType: MediaType, mediaId: Int, imdbId: String? = null): String? {
+        val direct = imdbId
+            ?.trim()
+            ?.takeIf { it.startsWith("tt", ignoreCase = true) }
+        if (!direct.isNullOrBlank()) {
+            cacheImdbId(mediaType, mediaId, direct)
+            return direct
+        }
+        return getCachedImdbId(mediaType, mediaId)
+            ?: resolveExternalIds(mediaType, mediaId)?.imdbId?.also { cacheImdbId(mediaType, mediaId, it) }
     }
 
     private suspend fun resolveExternalIds(mediaType: MediaType, mediaId: Int): TmdbExternalIds? {
@@ -351,12 +360,68 @@ class MediaRepository @Inject constructor(
             okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@use null
                 val body = response.body?.string().orEmpty()
-                JSONObject(body)
-                    .optJSONObject("meta")
-                    ?.optString("imdbRating")
-                    ?.takeIf { it.isNotBlank() && it != "N/A" }
+                val meta = JSONObject(body).optJSONObject("meta") ?: return@use null
+                parseCinemetaMetaRating(meta)
             }
         }.getOrNull()
+    }
+
+    private fun parseCinemetaMetaRating(meta: JSONObject): String? {
+        listOf(
+            meta.optString("imdbRating"),
+            meta.optString("rating")
+        ).firstOrNull { it.isNotBlank() && !it.equals("N/A", ignoreCase = true) }?.let { return it }
+
+        val links = meta.optJSONArray("links") ?: return null
+        for (index in 0 until links.length()) {
+            val link = links.optJSONObject(index) ?: continue
+            if (link.optString("category").equals("imdb", ignoreCase = true)) {
+                return link.optString("name").takeIf { it.isNotBlank() && !it.equals("N/A", ignoreCase = true) }
+            }
+        }
+        return null
+    }
+
+    private suspend fun getSeriesEpisodeImdbRatings(tvId: Int, imdbId: String? = null): Map<Pair<Int, Int>, String> {
+        val resolvedImdbId = resolveImdbId(MediaType.TV, tvId, imdbId) ?: return emptyMap()
+        val cacheKey = "series_$resolvedImdbId"
+        getFromCache(imdbEpisodeRatingsCache, cacheKey)?.let { return it }
+
+        val ratings = fetchCinemetaEpisodeRatings(resolvedImdbId)
+        imdbEpisodeRatingsCache[cacheKey] = CacheEntry(ratings, System.currentTimeMillis())
+        return ratings
+    }
+
+    private suspend fun fetchCinemetaEpisodeRatings(imdbId: String): Map<Pair<Int, Int>, String> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("https://v3-cinemeta.strem.io/meta/series/$imdbId.json")
+            .header("Accept", "application/json")
+            .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; ARVIO)"))
+            .build()
+
+        runCatching {
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use emptyMap()
+                val body = response.body?.string().orEmpty()
+                val videos = JSONObject(body)
+                    .optJSONObject("meta")
+                    ?.optJSONArray("videos")
+                    ?: return@use emptyMap()
+                buildMap {
+                    for (index in 0 until videos.length()) {
+                        val video = videos.optJSONObject(index) ?: continue
+                        val season = video.optInt("season", -1)
+                        val episode = video.optInt("episode", -1)
+                            .takeIf { it > 0 }
+                            ?: video.optInt("number", -1)
+                        val rating = normalizeRating(video.optString("rating")).orEmpty()
+                        if (season >= 0 && episode > 0 && rating.isNotBlank()) {
+                            put(season to episode, rating)
+                        }
+                    }
+                }
+            }
+        }.getOrDefault(emptyMap())
     }
 
     fun cacheItem(item: MediaItem) {
@@ -2566,7 +2631,14 @@ class MediaRepository @Inject constructor(
     suspend fun getMovieDetails(movieId: Int): MediaItem {
         val cacheKey = "movie_$movieId"
         getFromCache(detailsCache, cacheKey)?.let { cached ->
-            if (cacheKey in fullDetailsCacheKeys) return cached
+            if (cacheKey in fullDetailsCacheKeys) {
+                if (cached.imdbRating.isNotBlank()) return cached
+                val imdbRating = getImdbRating(MediaType.MOVIE, movieId)
+                if (!imdbRating.isNullOrBlank()) {
+                    return cached.copy(imdbRating = imdbRating).also { cacheFullDetailsItem(it) }
+                }
+                return cached
+            }
         }
 
         val item = coroutineScope {
@@ -2588,7 +2660,14 @@ class MediaRepository @Inject constructor(
     suspend fun getTvDetails(tvId: Int): MediaItem {
         val cacheKey = "tv_$tvId"
         getFromCache(detailsCache, cacheKey)?.let { cached ->
-            if (cacheKey in fullDetailsCacheKeys) return cached
+            if (cacheKey in fullDetailsCacheKeys) {
+                if (cached.imdbRating.isNotBlank()) return cached
+                val imdbRating = getImdbRating(MediaType.TV, tvId)
+                if (!imdbRating.isNullOrBlank()) {
+                    return cached.copy(imdbRating = imdbRating).also { cacheFullDetailsItem(it) }
+                }
+                return cached
+            }
         }
 
         val item = coroutineScope {
@@ -2654,19 +2733,32 @@ class MediaRepository @Inject constructor(
 
         // Re-apply watched status on cached episodes so stale season cache doesn't hide badges.
         if (cachedEpisodes != null) {
+            val episodeImdbRatings = if (cachedEpisodes.any { it.imdbRating.isBlank() }) {
+                getSeriesEpisodeImdbRatings(tvId)
+            } else {
+                emptyMap()
+            }
             return cachedEpisodes.map { episode ->
                 val episodeKey = "show_tmdb:$tvId:${episode.seasonNumber}:${episode.episodeNumber}"
                 episode.copy(
+                    imdbRating = episode.imdbRating.ifBlank {
+                        episodeImdbRatings[episode.seasonNumber to episode.episodeNumber].orEmpty()
+                    },
                     isWatched = if (hasShowWatchedData) episodeKey in watchedEpisodes else episode.isWatched
                 )
             }
         }
 
-        val season = tmdbApi.getTvSeason(tvId, seasonNumber, apiKey, language = contentLanguage)
+        val (season, episodeImdbRatings) = coroutineScope {
+            val seasonDeferred = async { tmdbApi.getTvSeason(tvId, seasonNumber, apiKey, language = contentLanguage) }
+            val ratingsDeferred = async { getSeriesEpisodeImdbRatings(tvId) }
+            seasonDeferred.await() to ratingsDeferred.await()
+        }
 
         val episodes = season.episodes.map { episode ->
             val episodeKey = "show_tmdb:$tvId:$seasonNumber:${episode.episodeNumber}"
             episode.toEpisode().copy(
+                imdbRating = episodeImdbRatings[seasonNumber to episode.episodeNumber].orEmpty(),
                 isWatched = episodeKey in watchedEpisodes
             )
         }
