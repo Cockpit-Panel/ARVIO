@@ -5134,6 +5134,18 @@ class IptvRepository @Inject constructor(
     private fun JsonElement.toXtreamEpgListingOrNull(): XtreamEpgListing? =
         runCatching { gson.fromJson(this, XtreamEpgListing::class.java) }.getOrNull()
 
+    private fun List<XtreamEpgListing>.withRequestedStreamId(streamId: Int): List<XtreamEpgListing> {
+        if (isEmpty()) return this
+        val streamIdValue = streamId.toString()
+        return map { listing ->
+            if (listing.streamId.isNullOrBlank()) {
+                listing.copy(streamId = streamIdValue)
+            } else {
+                listing
+            }
+        }
+    }
+
     /**
      * Decode a base64-encoded string from the Xtream short EPG API.
      * Returns the decoded text or the original string if decoding fails.
@@ -5458,9 +5470,10 @@ class IptvRepository @Inject constructor(
                                         }
                                     }
                                     if (!listings.isNullOrEmpty()) {
-                                        listingsResult.addAll(listings)
+                                        val taggedListings = listings.withRequestedStreamId(sid)
+                                        listingsResult.addAll(taggedListings)
                                         if (sampleLogged.compareAndSet(false, true)) {
-                                            val sample = listings.first()
+                                            val sample = taggedListings.first()
                                             System.err.println("[EPG] Sample response for stream_id=$sid: channelId=${sample.channelId} epgId=${sample.epgId} streamId=${sample.streamId} start=${sample.start} startTs=${sample.startTimestamp} title=${sample.title?.take(40)}")
                                         }
                                     }
@@ -5514,6 +5527,7 @@ class IptvRepository @Inject constructor(
                                     hadError = true
                                 }
                                 val listings = trimXtreamListingsToGuideWindow(parseXtreamListingsFromJson(resp))
+                                    .withRequestedStreamId(sid)
                                 if (listings.isNotEmpty()) {
                                     listingsResult.addAll(listings)
                                 }
@@ -5697,7 +5711,8 @@ class IptvRepository @Inject constructor(
 
         val withNow = result.values.count { it.now != null }
         val withNext = result.values.count { it.next != null }
-        System.err.println("[EPG] buildNowNext result: ${result.size} channels, $withNow with NOW, $withNext with NEXT")
+        val withRecent = result.values.count { it.recent.isNotEmpty() }
+        System.err.println("[EPG] buildNowNext result: ${result.size} channels, $withNow with NOW, $withNext with NEXT, $withRecent with RECENT")
         return result
     }
 

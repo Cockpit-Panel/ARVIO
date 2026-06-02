@@ -482,14 +482,33 @@ class TvViewModel @Inject constructor(
         if (updated.isEmpty()) return
         val current = _uiState.value
         val updatedIds = updated.keys
+        val mergedNowNext = current.snapshot.nowNext.toMutableMap().apply {
+            updated.forEach { (channelId, fresh) ->
+                put(channelId, mergeGuideSlice(this[channelId], fresh))
+            }
+        }
         setUiState(
             current.copy(
                 snapshot = current.snapshot.copy(
-                    nowNext = current.snapshot.nowNext.toMutableMap().apply { putAll(updated) }
+                    nowNext = mergedNowNext
                 ),
                 epgLoadingChannelIds = current.epgLoadingChannelIds - updatedIds,
                 epgAttemptedChannelIds = capChannelStateSet(current.epgAttemptedChannelIds + updatedIds, EpgAttemptedStateLimit),
             )
+        )
+    }
+
+    private fun mergeGuideSlice(
+        existing: com.arflix.tv.data.model.IptvNowNext?,
+        fresh: com.arflix.tv.data.model.IptvNowNext
+    ): com.arflix.tv.data.model.IptvNowNext {
+        if (existing == null) return fresh
+        return com.arflix.tv.data.model.IptvNowNext(
+            now = fresh.now ?: existing.now,
+            next = fresh.next ?: existing.next,
+            later = fresh.later ?: existing.later,
+            upcoming = if (fresh.upcoming.isNotEmpty()) fresh.upcoming else existing.upcoming,
+            recent = if (fresh.recent.isNotEmpty()) fresh.recent else existing.recent,
         )
     }
 
@@ -1037,11 +1056,19 @@ class TvViewModel @Inject constructor(
 
         markEpgLoading(setOf(id))
         viewModelScope.launch {
+            System.err.println(
+                "[EPG-Catchup] refreshing history channel=$id " +
+                    "recent=${recentCatchupCount(current.snapshot.nowNext[id], now)}"
+            )
             refreshGuideFromCache(setOf(id))
             val afterCache = _uiState.value
             val afterCacheChannel = afterCache.channelLookup[id]
                 ?: afterCache.snapshot.channels.firstOrNull { it.id == id }
             if (hasRecentCatchupHistory(afterCacheChannel, afterCache.snapshot.nowNext[id])) {
+                System.err.println(
+                    "[EPG-Catchup] cache satisfied channel=$id " +
+                        "recent=${recentCatchupCount(afterCache.snapshot.nowNext[id])}"
+                )
                 clearEpgLoading(setOf(id))
                 return@launch
             }
@@ -1055,8 +1082,13 @@ class TvViewModel @Inject constructor(
                 }.getOrNull()
             }
             if (!refreshed.isNullOrEmpty()) {
+                System.err.println(
+                    "[EPG-Catchup] refreshed channel=$id keys=${refreshed.size} " +
+                        "recent=${recentCatchupCount(refreshed[id])}"
+                )
                 mergeNowNext(refreshed)
             } else {
+                System.err.println("[EPG-Catchup] no history returned channel=$id")
                 finishEpgAttempt(setOf(id))
             }
         }
