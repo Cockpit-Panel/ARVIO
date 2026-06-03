@@ -480,6 +480,18 @@ class TvViewModel @Inject constructor(
         return hours * 60L * 60_000L
     }
 
+    private fun hasRecentAiredHistory(
+        item: com.arflix.tv.data.model.IptvNowNext?,
+        now: Long = System.currentTimeMillis()
+    ): Boolean {
+        val recent = item?.recent
+            .orEmpty()
+            .filter { it.endUtcMillis <= now && it.endUtcMillis >= now - CatchupHistoryWindowMs }
+        if (recent.size < RichCatchupRecentTarget) return false
+        val oldestStart = recent.minOfOrNull { it.startUtcMillis } ?: return false
+        return now - oldestStart >= (CatchupHistoryWindowMs * 3) / 4 || recent.size >= 24
+    }
+
     private suspend fun refreshGuideFromCache() {
         val state = _uiState.value
         val channelIds = buildPriorityEpgChannelIds(
@@ -1041,17 +1053,22 @@ class TvViewModel @Inject constructor(
                 ?: afterCacheState.snapshot.channels.firstOrNull { it.id == id }
             val cachedGuide = afterCacheState.snapshot.nowNext[id]
             val needsCatchupHistory = supportsCatchup(channel) && !hasRecentCatchupHistory(channel, cachedGuide)
-            if (hasRichSelectedGuideData(cachedGuide) && !needsCatchupHistory) {
+            val needsAiredHistory = !hasRecentAiredHistory(cachedGuide)
+            val needsFullHistory = needsCatchupHistory || needsAiredHistory
+            if (hasRichSelectedGuideData(cachedGuide) && !needsFullHistory) {
                 clearEpgLoading(setOf(id))
                 return@launch
             }
-            System.err.println("[EPG-Current] refreshing channel=$id fullCatchup=$needsCatchupHistory")
+            System.err.println(
+                "[EPG-Current] refreshing channel=$id fullHistory=$needsFullHistory " +
+                    "catchup=$needsCatchupHistory aired=$needsAiredHistory recent=${recentCatchupCount(cachedGuide)}"
+            )
             val refreshed = withContext(Dispatchers.IO) {
                 runCatching {
                     iptvRepository.refreshEpgForChannels(
                         channelIds = setOf(id),
                         maxChannels = 1,
-                        preferFullCatchupHistory = needsCatchupHistory
+                        preferFullCatchupHistory = needsFullHistory
                     )
                 }.getOrNull()
             }

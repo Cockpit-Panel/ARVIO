@@ -78,6 +78,7 @@ import java.util.Locale
 
 private enum class GuideProgramState {
     PastPlayable,
+    PastUnavailable,
     Live,
     Future,
 }
@@ -114,17 +115,18 @@ internal fun FullscreenGuideOverlay(
     val catchupSupported = remember(channel) { channel.supportsFullscreenCatchup() }
     val pastWindowStart = nowMillis - 48L * 60L * 60_000L
     val past = remember(guide, nowMillis, catchupSupported) {
-        if (!catchupSupported) {
-            emptyList()
-        } else {
-            guide?.recent.orEmpty()
-                .asSequence()
-                .filter { it.endUtcMillis <= nowMillis && it.endUtcMillis >= pastWindowStart }
-                .distinctBy { "${it.startUtcMillis}:${it.endUtcMillis}:${it.title}" }
-                .sortedBy { it.startUtcMillis }
-                .map { GuideProgramItem(it, GuideProgramState.PastPlayable) }
-                .toList()
-        }
+        guide?.recent.orEmpty()
+            .asSequence()
+            .filter { it.endUtcMillis <= nowMillis && it.endUtcMillis >= pastWindowStart }
+            .distinctBy { "${it.startUtcMillis}:${it.endUtcMillis}:${it.title}" }
+            .sortedBy { it.startUtcMillis }
+            .map {
+                GuideProgramItem(
+                    it,
+                    if (catchupSupported) GuideProgramState.PastPlayable else GuideProgramState.PastUnavailable
+                )
+            }
+            .toList()
     }
     val live = remember(guide, nowMillis) {
         guide?.now
@@ -368,6 +370,7 @@ private fun FullscreenGuideContent(
                         onClick = {
                             when (item.state) {
                                 GuideProgramState.PastPlayable -> onProgramSelect(item.program)
+                                GuideProgramState.PastUnavailable -> Unit
                                 GuideProgramState.Live -> onProgramSelect(null)
                                 GuideProgramState.Future -> Unit
                             }
@@ -418,7 +421,7 @@ private fun GuideTimelineSummary(
     ) {
         GuideTimelinePill(
             label = "Aired",
-            value = if (catchupSupported) pastCount.toString() else "--",
+            value = pastCount.toString(),
             accent = if (catchupSupported) LiveColors.Accent else LiveColors.FgMute,
             modifier = Modifier.weight(1f),
         )
@@ -480,7 +483,7 @@ private fun GuideProgramRow(
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
-    val playable = item.state != GuideProgramState.Future
+    val playable = item.state == GuideProgramState.PastPlayable || item.state == GuideProgramState.Live
     val active = focused || selected
     val bg = when {
         active -> LiveColors.PanelRaised.copy(alpha = 0.94f)
@@ -526,6 +529,7 @@ private fun GuideProgramRow(
                 style = LiveType.Badge.copy(
                     color = when (item.state) {
                         GuideProgramState.PastPlayable -> LiveColors.Accent
+                        GuideProgramState.PastUnavailable -> LiveColors.FgDim
                         GuideProgramState.Live -> LiveColors.LiveRed
                         GuideProgramState.Future -> LiveColors.FgDim
                     },
@@ -549,6 +553,7 @@ private fun GuideProgramRow(
                 .background(
                     when (item.state) {
                         GuideProgramState.PastPlayable -> LiveColors.Accent.copy(alpha = 0.18f)
+                        GuideProgramState.PastUnavailable -> Color.White.copy(alpha = 0.06f)
                         GuideProgramState.Live -> LiveColors.LiveRed.copy(alpha = 0.22f)
                         GuideProgramState.Future -> Color.White.copy(alpha = 0.08f)
                     }
@@ -558,12 +563,14 @@ private fun GuideProgramRow(
             Icon(
                 imageVector = when (item.state) {
                     GuideProgramState.PastPlayable -> Icons.Default.Replay
+                    GuideProgramState.PastUnavailable -> Icons.Default.Replay
                     GuideProgramState.Live -> Icons.Default.PlayArrow
                     GuideProgramState.Future -> Icons.Default.Schedule
                 },
                 contentDescription = null,
                 tint = when (item.state) {
                     GuideProgramState.PastPlayable -> LiveColors.Accent
+                    GuideProgramState.PastUnavailable -> LiveColors.FgDim
                     GuideProgramState.Live -> LiveColors.LiveRed
                     GuideProgramState.Future -> LiveColors.FgDim
                 },
@@ -582,16 +589,19 @@ private fun GuideProgramRow(
                 GuideChip(
                     label = when (item.state) {
                         GuideProgramState.PastPlayable -> "AIRED"
+                        GuideProgramState.PastUnavailable -> "AIRED"
                         GuideProgramState.Live -> "LIVE"
                         GuideProgramState.Future -> startsLabel(item.program, nowMillis)
                     },
                     fg = when (item.state) {
                         GuideProgramState.PastPlayable -> LiveColors.Bg
+                        GuideProgramState.PastUnavailable -> LiveColors.FgDim
                         GuideProgramState.Live -> Color.White
                         GuideProgramState.Future -> LiveColors.FgDim
                     },
                     bg = when (item.state) {
                         GuideProgramState.PastPlayable -> LiveColors.Accent
+                        GuideProgramState.PastUnavailable -> Color.White.copy(alpha = 0.08f)
                         GuideProgramState.Live -> LiveColors.LiveRed
                         GuideProgramState.Future -> Color.White.copy(alpha = 0.08f)
                     },
@@ -600,7 +610,11 @@ private fun GuideProgramRow(
             Text(
                 text = item.program.title,
                 style = LiveType.ProgramTitle.copy(
-                    color = if (item.state == GuideProgramState.Future) LiveColors.FgDim else LiveColors.Fg,
+                    color = if (item.state == GuideProgramState.Future || item.state == GuideProgramState.PastUnavailable) {
+                        LiveColors.FgDim
+                    } else {
+                        LiveColors.Fg
+                    },
                     fontSize = if (isTouchDevice) 14.sp else 15.sp,
                 ),
                 maxLines = 1,

@@ -6807,7 +6807,7 @@ class IptvRepository @Inject constructor(
             ).joinToString("|")
         }
         val raw = listOf(
-            "playlist-group-prefix-v2",
+            "playlist-group-prefix-v3-catchup-history-48h",
             config.m3uUrl.trim(),
             config.epgUrl.trim(),
             config.stalkerPortalUrl.trim(),
@@ -6829,7 +6829,7 @@ class IptvRepository @Inject constructor(
             ).joinToString("|")
         }
         val raw = listOf(
-            "playlist-sources-v1",
+            "playlist-sources-v2-catchup-history-48h",
             config.m3uUrl.trim(),
             config.stalkerPortalUrl.trim(),
             config.stalkerMacAddress.trim(),
@@ -7055,10 +7055,13 @@ class IptvRepository @Inject constructor(
         val currentSourceSignature = buildSourceSignature(config)
         val signature = cacheSignature.trim()
         val sourceSignature = cacheSourceSignature.trim()
+        if (sourceSignature.isNotBlank()) {
+            return sourceSignature == currentSourceSignature &&
+                (signature.isBlank() || signature == currentSignature || signature == legacySignature)
+        }
         return signature.isBlank() ||
             signature == currentSignature ||
-            signature == legacySignature ||
-            sourceSignature == currentSourceSignature
+            signature == legacySignature
     }
 
     private fun rememberDiscoveredEpgUrls(urls: List<String>) {
