@@ -1013,9 +1013,16 @@ fun LiveTvScreen(
     }
 
     fun exitFullScreenPlayback() {
+        val returnFocusChannelId = playingChannelId ?: focusedChannelId
         fullscreenGuideOpen = false
         isFullScreen = false
-        focusChannelList(playingChannelId ?: focusedChannelId)
+        hudPokeSignal++
+        focusCommitScope.launch {
+            // Let the fullscreen layer start collapsing before returning focus
+            // to the large guide. On big IPTV lists this keeps Back immediate.
+            delay(16L)
+            focusChannelList(returnFocusChannelId)
+        }
     }
 
     fun selectChannel(channel: EnrichedChannel) {
