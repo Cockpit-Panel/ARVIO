@@ -189,6 +189,17 @@ android {
 // is the same as before — marks domain models as stable to avoid
 // unnecessary recompositions — but fed through a first-class plugin
 // extension instead of a raw -P freeCompilerArg.
+configurations.configureEach {
+    exclude(group = "org.json", module = "json")
+
+    resolutionStrategy.eachDependency {
+        if (requested.group == "org.jetbrains.kotlinx" && requested.name.startsWith("kotlinx-coroutines")) {
+            useVersion("1.7.3")
+            because("Ktor 2.3.7 used by Supabase and the Telegram proxy crashes with coroutines 1.10.x on Android TV.")
+        }
+    }
+}
+
 composeCompiler {
     stabilityConfigurationFile = rootProject.layout.projectDirectory
         .file("app/compose_stability_config.conf")
