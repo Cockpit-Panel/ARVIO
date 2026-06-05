@@ -31,13 +31,13 @@ class IptvRepositoryOptimizationTest {
         // regular chars not escaped (e.g. \y) -> keep y
         val inputStr = "Hello\\\"World\\nTest\\yDone\u0001Control"
         val expectedStr = "Hello\"World\nTestyDone Control"
-        
+
         val rawStream = ByteArrayInputStream(inputStr.toByteArray(Charsets.UTF_8))
         val sanitizingStream = createSanitizingStream(rawStream)
-        
+
         val buffer = ByteArray(100)
         val readCount = sanitizingStream.read(buffer, 0, buffer.size)
-        
+
         val result = String(buffer, 0, readCount, Charsets.UTF_8)
         assertEquals(expectedStr, result)
     }
@@ -46,17 +46,17 @@ class IptvRepositoryOptimizationTest {
     fun testBackslashSanitizationByteByByteRead() {
         val inputStr = "Hello\\\"World\\nTest\\yDone\u0001Control"
         val expectedStr = "Hello\"World\nTestyDone Control"
-        
+
         val rawStream = ByteArrayInputStream(inputStr.toByteArray(Charsets.UTF_8))
         val sanitizingStream = createSanitizingStream(rawStream)
-        
+
         val sb = StringBuilder()
         while (true) {
             val b = sanitizingStream.read()
             if (b == -1) break
             sb.append(b.toChar())
         }
-        
+
         assertEquals(expectedStr, sb.toString())
     }
 
@@ -66,7 +66,7 @@ class IptvRepositoryOptimizationTest {
         val inputStr = "A\\nB" // length 4
         val rawStream = ByteArrayInputStream(inputStr.toByteArray(Charsets.UTF_8))
         val sanitizingStream = createSanitizingStream(rawStream)
-        
+
         // Read exactly up to the backslash first (2 bytes: 'A', '\')
         // Actually, let's read with buffer size 2
         val buffer = ByteArray(2)
@@ -76,7 +76,7 @@ class IptvRepositoryOptimizationTest {
         // maps it to '\n' and puts it into buffer[1]. So buffer should have ['A', '\n'].
         assertEquals('A', buffer[0].toChar())
         assertEquals('\n', buffer[1].toChar())
-        
+
         // Next read should get the remaining 'B'
         val read2 = sanitizingStream.read(buffer, 0, 2)
         assertEquals(1, read2)
@@ -88,7 +88,7 @@ class IptvRepositoryOptimizationTest {
         val inputStr = "A\\" // Traling backslash
         val rawStream = ByteArrayInputStream(inputStr.toByteArray(Charsets.UTF_8))
         val sanitizingStream = createSanitizingStream(rawStream)
-        
+
         val buffer = ByteArray(5)
         val read = sanitizingStream.read(buffer, 0, 5)
         assertEquals(2, read)
@@ -101,7 +101,7 @@ class IptvRepositoryOptimizationTest {
         // Simulate synchronized list modification and copying concurrently
         val list = Collections.synchronizedList(mutableListOf<Int>())
         val exceptionCount = AtomicInteger(0)
-        
+
         // Coroutines writing to the list and reading from it (calling toList())
         val writers = (1..10).map { id ->
             async {
@@ -110,7 +110,7 @@ class IptvRepositoryOptimizationTest {
                 }
             }
         }
-        
+
         val readers = (1..10).map {
             async {
                 repeat(1000) {
@@ -127,10 +127,76 @@ class IptvRepositoryOptimizationTest {
                 }
             }
         }
-        
+
         writers.awaitAll()
         readers.awaitAll()
-        
+
         assertEquals("Should not encounter any ConcurrentModificationException", 0, exceptionCount.get())
+    }
+
+    @Test
+    fun testGuideKeyCandidatesCaching() {
+        val context = io.mockk.mockk<android.content.Context>(relaxed = true)
+        val okHttpClient = io.mockk.mockk<okhttp3.OkHttpClient>(relaxed = true)
+        val profileManager = io.mockk.mockk<com.arflix.tv.data.repository.ProfileManager>(relaxed = true)
+        val invalidationBus = io.mockk.mockk<com.arflix.tv.data.repository.CloudSyncInvalidationBus>(relaxed = true)
+        val repository = IptvRepository(context, okHttpClient, profileManager, invalidationBus)
+
+        // Get private field guideKeyCandidatesCache using reflection
+        val cacheField = IptvRepository::class.java.getDeclaredField("guideKeyCandidatesCache")
+        cacheField.isAccessible = true
+        val cache = cacheField.get(repository) as Map<*, *>
+
+        val method = IptvRepository::class.java.getDeclaredMethod("guideKeyCandidates", String::class.java)
+        method.isAccessible = true
+
+        val initialSize = cache.size
+
+        // First call
+        val result1 = method.invoke(repository, "NPO 1 FHD [NL]") as Set<String>
+        val sizeAfterFirst = cache.size
+        assertEquals(initialSize + 1, sizeAfterFirst)
+
+        // Second call with same value (should hit cache)
+        val result2 = method.invoke(repository, "NPO 1 FHD [NL]") as Set<String>
+        assertEquals(sizeAfterFirst, cache.size)
+        assertEquals(result1, result2)
+    }
+
+    @Test
+    fun testFetchAndParseEpgThrows304Exception() {
+        val context = io.mockk.mockk<android.content.Context>(relaxed = true)
+        val okHttpClient = io.mockk.mockk<okhttp3.OkHttpClient>()
+        val profileManager = io.mockk.mockk<com.arflix.tv.data.repository.ProfileManager>(relaxed = true)
+        val invalidationBus = io.mockk.mockk<com.arflix.tv.data.repository.CloudSyncInvalidationBus>(relaxed = true)
+
+        val builder = io.mockk.mockk<okhttp3.OkHttpClient.Builder>(relaxed = true)
+        io.mockk.every { okHttpClient.newBuilder() } returns builder
+        io.mockk.every { builder.connectTimeout(any(), any()) } returns builder
+        io.mockk.every { builder.readTimeout(any(), any()) } returns builder
+        io.mockk.every { builder.writeTimeout(any(), any()) } returns builder
+        io.mockk.every { builder.callTimeout(any(), any()) } returns builder
+
+        val customClient = io.mockk.mockk<okhttp3.OkHttpClient>()
+        io.mockk.every { builder.build() } returns customClient
+
+        val call = io.mockk.mockk<okhttp3.Call>()
+        val response = io.mockk.mockk<okhttp3.Response>()
+        io.mockk.every { response.code } returns 304
+        io.mockk.every { response.close() } returns Unit
+        io.mockk.every { call.execute() } returns response
+        io.mockk.every { customClient.newCall(any()) } returns call
+
+        val repository = IptvRepository(context, okHttpClient, profileManager, invalidationBus)
+        val method = IptvRepository::class.java.getDeclaredMethod("fetchAndParseEpg", String::class.java, List::class.java)
+        method.isAccessible = true
+
+        try {
+            method.invoke(repository, "http://example.com/epg.xml", emptyList<com.arflix.tv.data.model.IptvChannel>())
+            fail("Expected EpgNotModifiedException to be thrown")
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val cause = e.cause
+            assertEquals(IptvRepository.EpgNotModifiedException::class.java, cause?.javaClass)
+        }
     }
 }
