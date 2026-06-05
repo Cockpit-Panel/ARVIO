@@ -1072,7 +1072,7 @@ fun HomeScreen(
                 )
             }
         } // end if (!isMobile) backdrop
-        
+
         Box(modifier = Modifier.fillMaxSize().graphicsLayer { alpha = trailerOverlayAlpha.value }) {
         HomeInputLayer(
             categories = displayCategories,

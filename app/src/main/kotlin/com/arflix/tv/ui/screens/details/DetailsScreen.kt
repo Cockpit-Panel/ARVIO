@@ -227,19 +227,19 @@ fun DetailsScreen(
     var similarIndex by remember { mutableIntStateOf(0) }
     var collectionIndex by remember { mutableIntStateOf(0) }
     var suppressSelectUntilMs by remember { mutableLongStateOf(0L) }
-    
+
     // Sidebar state
     var isSidebarFocused by remember { mutableStateOf(false) }
     val hasProfile = currentProfile != null
     val maxSidebarIndex = topBarMaxIndex(hasProfile)
     var sidebarFocusIndex by remember { mutableIntStateOf(if (hasProfile) 2 else 1) }
-    
+
     // Stream Selector state
     var showStreamSelector by remember { mutableStateOf(false) }
     var showTrailerPlayer by remember { mutableStateOf(false) }
     KeepScreenOn(active = showTrailerPlayer)
     var pendingAutoPlayRequest by remember { mutableStateOf<PendingAutoPlayRequest?>(null) }
-    
+
     // Episode Context Menu state
     var showEpisodeContextMenu by remember { mutableStateOf(false) }
     var contextMenuEpisode by remember { mutableStateOf<Episode?>(null) }
@@ -515,7 +515,7 @@ fun DetailsScreen(
                     if (showStreamSelector || showEpisodeContextMenu || showSeasonContextMenu || uiState.showPersonModal) {
                         return@onPreviewKeyEvent false // Let the modal handle it
                     }
-                    
+
                     when (event.key) {
                         Key.Back, Key.Escape -> {
                             if (showTrailerPlayer) { showTrailerPlayer = false; true }
@@ -890,7 +890,7 @@ fun DetailsScreen(
                 profile = currentProfile
             )
         }
-        
+
         // Person Modal
         PersonModal(
             isVisible = uiState.showPersonModal,
@@ -902,7 +902,7 @@ fun DetailsScreen(
                 onNavigateToDetails(type, id)
             }
         )
-        
+
         // In-app Trailer Player (fullscreen overlay)
         if (showTrailerPlayer && uiState.trailerKey != null) {
             BackHandler { showTrailerPlayer = false }
@@ -975,7 +975,7 @@ fun DetailsScreen(
             },
             onClose = { showStreamSelector = false }
         )
-        
+
         // Episode Context Menu
         contextMenuEpisode?.let { episode ->
             EpisodeContextMenu(
@@ -1275,13 +1275,13 @@ private fun DetailsContent(
                                 )
                             )
                     )
-                    
+
                     if (topBarAlpha > 0f) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
                                 .fillMaxWidth()
-                                .graphicsLayer { 
+                                .graphicsLayer {
                                     alpha = topBarAlpha
                                     translationY = mobileScrollState.value.toFloat()
                                 }
@@ -1308,7 +1308,7 @@ private fun DetailsContent(
                                     val currentInitialY = coords.positionInWindow().y + mobileScrollState.value
                                     val pinnedY = statusBarsTop - with(density) { 12.dp.toPx() }
                                     val calculatedThreshold = currentInitialY - pinnedY
-                                    
+
                                     // Update if uninitialized, or if the layout shifts significantly (e.g. metadata loaded)
                                     // The > 10f check prevents infinite recomposition loops and ignores 1-2px scroll jitter.
                                     if (stickyThreshold < 0f || kotlin.math.abs(calculatedThreshold - stickyThreshold) > 10f) {
@@ -1319,11 +1319,11 @@ private fun DetailsContent(
                                     if (stickyThreshold >= 0f && mobileScrollState.value > stickyThreshold) {
                                         val overscroll = mobileScrollState.value - stickyThreshold
                                         translationY = overscroll
-                                        
+
                                         // Smooth scale down to feel like a header
                                         val maxOverscroll = 200f
                                         val progress = (overscroll / maxOverscroll).coerceIn(0f, 1f)
-                                        val scale = 1f - (0.28f * progress) 
+                                        val scale = 1f - (0.28f * progress)
                                         scaleX = scale
                                         scaleY = scale
                                     }
@@ -3716,9 +3716,9 @@ private fun CastCard(
                 }
             }
         }
-        
+
         Spacer(modifier = Modifier.height(8.dp))
-        
+
         Text(
             text = member.name,
             style = ArvioSkin.typography.cardTitle,
@@ -3726,7 +3726,7 @@ private fun CastCard(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
-        
+
         if (member.character.isNotEmpty()) {
             Text(
                 text = member.character,
