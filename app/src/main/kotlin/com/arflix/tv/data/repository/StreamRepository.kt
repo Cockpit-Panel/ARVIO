@@ -1254,6 +1254,8 @@ class StreamRepository @Inject constructor(
     private val ADDON_TIMEOUT_MS = 6_000L
     private val ADDON_EPISODE_TIMEOUT_MS = 10_000L
     private val ADDON_SINGLE_STREAM_REQUEST_TIMEOUT_MS = 4_000L
+    private val ADDON_NATIVE_ANIME_EPISODE_TIMEOUT_MS = 24_000L
+    private val ADDON_NATIVE_ANIME_SINGLE_STREAM_REQUEST_TIMEOUT_MS = 12_000L
     // Subtitles should not block playback but need enough time on slow connections.
     private val SUBTITLE_TIMEOUT_MS = 6_000L
     // If addons return nothing, allow Xtream VOD lookup to recover playback.
@@ -1461,8 +1463,14 @@ class StreamRepository @Inject constructor(
         airDate: String? = null
     ): List<StreamSource> {
         val startedAt = System.currentTimeMillis()
+        val nativeAnimeAddonHint = shouldPreferNativeAnimeIds(addon)
+        val addonTimeoutMs = if (nativeAnimeAddonHint) {
+            ADDON_NATIVE_ANIME_EPISODE_TIMEOUT_MS
+        } else {
+            ADDON_EPISODE_TIMEOUT_MS
+        }
         return try {
-            withTimeout(ADDON_EPISODE_TIMEOUT_MS) {
+            withTimeout(addonTimeoutMs) {
                 if (httpLocalScraperRuntime.canHandle(addon)) {
                     val streams = httpLocalScraperRuntime.resolveEpisodeStreams(
                         addon = addon,
@@ -1482,7 +1490,7 @@ class StreamRepository @Inject constructor(
                 val (baseUrl, queryParams) = getAddonBaseUrl(addon.url ?: return@withTimeout emptyList())
 
                 val strictAnime = animeMapper.isAnimeContent(tmdbId, genreIds, originalLanguage)
-                val nativeAnimeAddon = shouldPreferNativeAnimeIds(addon)
+                val nativeAnimeAddon = nativeAnimeAddonHint
                 val resolveAsAnime = strictAnime ||
                     shouldTryNativeAnimeFallback(
                         genreIds = genreIds,
@@ -1542,6 +1550,11 @@ class StreamRepository @Inject constructor(
                     preferAnimePath: Boolean
                 ): List<StreamSource> {
                     var lastError: Exception? = null
+                    val singleRequestTimeoutMs = if (nativeAnimeAddon) {
+                        ADDON_NATIVE_ANIME_SINGLE_STREAM_REQUEST_TIMEOUT_MS
+                    } else {
+                        ADDON_SINGLE_STREAM_REQUEST_TIMEOUT_MS
+                    }
                     for (requestType in streamRequestTypes(contentId, preferAnimePath)) {
                         val requestUrl = streamUrl(requestType, contentId)
                         Log.d(
@@ -1549,13 +1562,13 @@ class StreamRepository @Inject constructor(
                             "[StreamFetch][Episode] $label request addon=${addon.name} addonId=${addon.id} type=$requestType url=${sanitizeLogUrl(requestUrl)}"
                         )
                         try {
-                            val response = withTimeoutOrNull(ADDON_SINGLE_STREAM_REQUEST_TIMEOUT_MS) {
+                            val response = withTimeoutOrNull(singleRequestTimeoutMs) {
                                 streamApi.getAddonStreams(requestUrl)
                             }
                             if (response == null) {
                                 Log.w(
                                     TAG,
-                                    "[StreamFetch][Episode] $label request timeout addon=${addon.name} addonId=${addon.id} type=$requestType timeoutMs=$ADDON_SINGLE_STREAM_REQUEST_TIMEOUT_MS"
+                                    "[StreamFetch][Episode] $label request timeout addon=${addon.name} addonId=${addon.id} type=$requestType timeoutMs=$singleRequestTimeoutMs"
                                 )
                                 continue
                             }
@@ -1595,7 +1608,7 @@ class StreamRepository @Inject constructor(
                     animeQuery = if (useKitsuFallback) animeQuery else null,
                     tmdbEpisodeId = tmdbEpisodeId,
                     preferNativeAnimeIds = preferNativeAnimeIds,
-                    includeTmdbCandidate = !nativeAnimeAddon
+                    includeTmdbCandidate = true
                 )) {
                     addonStreams = requestEpisodeId(
                         contentId = candidate.contentId,

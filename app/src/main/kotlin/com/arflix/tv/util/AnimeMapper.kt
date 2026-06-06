@@ -1,4 +1,5 @@
 package com.arflix.tv.util
+import com.arflix.tv.data.api.ArmMappingEntry
 import com.arflix.tv.data.api.StreamApi
 import com.arflix.tv.data.api.TmdbApi
 import kotlinx.coroutines.Dispatchers
@@ -9,6 +10,89 @@ import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import javax.inject.Inject
 import javax.inject.Singleton
+
+internal data class ArmSeasonKitsuCandidates(
+    val kitsuIds: List<Int>,
+    val explicitTmdbSeason: Boolean
+)
+
+internal fun armSeasonKitsuCandidates(entries: List<ArmMappingEntry>, season: Int): ArmSeasonKitsuCandidates {
+    val explicitSeasonIds = entries
+        .filter { it.themoviedbSeason == season }
+        .mapNotNull { it.kitsu }
+        .distinct()
+    if (explicitSeasonIds.isNotEmpty()) {
+        return ArmSeasonKitsuCandidates(explicitSeasonIds, explicitTmdbSeason = true)
+    }
+
+    val fallbackIds = entries
+        .filter { it.themoviedbSeason == null }
+        .mapNotNull { it.kitsu }
+        .distinct()
+    return ArmSeasonKitsuCandidates(fallbackIds, explicitTmdbSeason = false)
+}
+
+internal fun armSeasonKitsuIds(entries: List<ArmMappingEntry>, season: Int): List<Int> {
+    return armSeasonKitsuCandidates(entries, season).kitsuIds
+}
+
+internal suspend fun armEpisodeQueryFromSeasonCandidates(
+    candidates: ArmSeasonKitsuCandidates,
+    season: Int,
+    episode: Int,
+    episodeCountProvider: suspend (Int) -> Int?
+): String? {
+    val kitsuIds = candidates.kitsuIds
+    if (kitsuIds.isEmpty()) return null
+
+    if (candidates.explicitTmdbSeason) {
+        return if (kitsuIds.size == 1) {
+            "kitsu:${kitsuIds.first()}:$episode"
+        } else {
+            walkArmKitsuIds(kitsuIds, episode, episodeCountProvider)
+        }
+    }
+
+    if (season == 1 && kitsuIds.size > 1) {
+        return walkArmKitsuIds(kitsuIds, episode, episodeCountProvider)
+    }
+
+    val seasonIndex = season - 1
+    if (seasonIndex !in kitsuIds.indices) return null
+
+    val kitsuId = kitsuIds[seasonIndex]
+    val episodeCount = episodeCountProvider(kitsuId)
+    if (episodeCount != null && episode > episodeCount && seasonIndex < kitsuIds.lastIndex) {
+        return walkArmKitsuIds(kitsuIds.drop(seasonIndex), episode, episodeCountProvider)
+    }
+
+    return "kitsu:$kitsuId:$episode"
+}
+
+private suspend fun walkArmKitsuIds(
+    kitsuIds: List<Int>,
+    episode: Int,
+    episodeCountProvider: suspend (Int) -> Int?
+): String {
+    var remaining = episode
+    for ((index, kitsuId) in kitsuIds.withIndex()) {
+        val episodeCount = episodeCountProvider(kitsuId)
+        if (episodeCount == null) {
+            if (index == kitsuIds.lastIndex || remaining <= 12) {
+                return "kitsu:$kitsuId:$remaining"
+            }
+            remaining -= 12
+            continue
+        }
+
+        if (remaining <= episodeCount) {
+            return "kitsu:$kitsuId:$remaining"
+        }
+        remaining -= episodeCount
+    }
+
+    return "kitsu:${kitsuIds.last()}:$remaining"
+}
 
 /**
  * Maps TMDB IDs to Kitsu IDs for anime content and resolves correct episode queries.
@@ -43,7 +127,7 @@ class AnimeMapper @Inject constructor(
     private val tmdbSeasonEpCountCache = mutableMapOf<String, Int>() // "tmdbId:season" -> episodeCount
     private val sequelCache = mutableMapOf<Int, Int?>()            // kitsuId -> sequelKitsuId (null = no sequel)
     private val hasSequelCache = mutableMapOf<Int, Boolean>()      // kitsuId -> whether it has a sequel
-    private val armTmdbCache = mutableMapOf<Int, List<Int>>()      // tmdbId -> list of Kitsu IDs (one per season)
+    private val armTmdbCache = mutableMapOf<Int, List<ArmMappingEntry>>() // tmdbId -> ARM entries with season metadata
     private val inFlightRequests = mutableMapOf<Int, CompletableDeferred<Unit>>() // tmdbId -> guard against concurrent API calls
 
     // ========== Hardcoded Maps ==========
@@ -552,75 +636,19 @@ class AnimeMapper @Inject constructor(
     private suspend fun resolveTierArm(tmdbId: Int, season: Int, episode: Int): String? = withContext(Dispatchers.IO) {
         try {
             // Check cache first
-            val cachedKitsuIds = cacheMutex.withLock { armTmdbCache[tmdbId] }
-            val kitsuIds = cachedKitsuIds ?: fetchArmMapping(tmdbId)
+            val cachedEntries = cacheMutex.withLock { armTmdbCache[tmdbId] }
+            val entries = cachedEntries ?: fetchArmMapping(tmdbId)
 
-            if (kitsuIds.isNullOrEmpty()) {
+            if (entries.isNullOrEmpty()) {
                 return@withContext null
             }
-            // GLOBAL FIX: Handle the case where TMDB has 1 season but Kitsu has multiple entries
-            // This is the most common anime numbering discrepancy (e.g., MF Ghost, Spy x Family).
-            //
-            // Strategy:
-            // 1. If TMDB season = 1 and we have multiple Kitsu IDs, walk through ALL entries
-            //    because TMDB often merges multiple Kitsu seasons into one.
-            // 2. Otherwise, use seasonIndex to pick the correct entry for that TMDB season.
-
-            if (season == 1 && kitsuIds.size > 1) {
-                // TMDB season 1 with multiple Kitsu entries - likely merged seasons
-                // Walk through all entries to find the right one for this episode
-                var remaining = episode
-                for (kitsuId in kitsuIds) {
-                    val epCount = getKitsuEpisodeCount(kitsuId)
-                    if (epCount == null) {
-                        // Unknown count (ongoing) - if this is the last entry or episode fits, use it
-                        if (kitsuId == kitsuIds.last()) {
-                            return@withContext "kitsu:$kitsuId:$remaining"
-                        }
-                        // Assume typical anime cour (12 episodes) and continue
-                        if (remaining <= 12) {
-                            return@withContext "kitsu:$kitsuId:$remaining"
-                        }
-                        remaining -= 12
-                        continue
-                    }
-
-                    if (remaining <= epCount) {
-                        return@withContext "kitsu:$kitsuId:$remaining"
-                    }
-                    remaining -= epCount
-                }
-
-                // Past all entries - use last entry with remaining offset
-                val lastId = kitsuIds.last()
-                return@withContext "kitsu:$lastId:$remaining"
-            }
-
-            // Standard case: TMDB season maps to the corresponding Kitsu entry.
-            // Do not clamp high season numbers down to the last known Kitsu entry:
-            // that makes requests like TMDB S4E4 fetch the previous mapped season
-            // (for example S3E4) when ARM has an incomplete mapping.
-            val seasonIndex = season - 1
-            if (seasonIndex !in kitsuIds.indices) {
+            val candidates = armSeasonKitsuCandidates(entries, season)
+            if (candidates.kitsuIds.isEmpty()) {
                 return@withContext null
             }
-            val kitsuId = kitsuIds[seasonIndex]
-
-            // Check if episode exceeds this entry's count (cour split within season)
-            val episodeCount = getKitsuEpisodeCount(kitsuId)
-            if (episodeCount != null && episode > episodeCount && seasonIndex < kitsuIds.size - 1) {
-                // Walk through remaining entries
-                var remaining = episode
-                for (i in seasonIndex until kitsuIds.size) {
-                    val id = kitsuIds[i]
-                    val count = getKitsuEpisodeCount(id) ?: 99
-                    if (remaining <= count) {
-                        return@withContext "kitsu:$id:$remaining"
-                    }
-                    remaining -= count
-                }
+            armEpisodeQueryFromSeasonCandidates(candidates, season, episode) { kitsuId ->
+                getKitsuEpisodeCount(kitsuId)
             }
-            "kitsu:$kitsuId:$episode"
         } catch (e: Exception) {
             null
         }
@@ -630,21 +658,20 @@ class AnimeMapper @Inject constructor(
      * Fetch Kitsu IDs from ARM API for a TMDB ID.
      * Caches the result for future use.
      */
-    private suspend fun fetchArmMapping(tmdbId: Int): List<Int>? {
+    private suspend fun fetchArmMapping(tmdbId: Int): List<ArmMappingEntry>? {
         return try {
             val url = "https://arm.haglund.dev/api/v2/themoviedb?id=$tmdbId"
             val response = streamApi.getArmMappingByTmdb(url)
 
-            // Extract Kitsu IDs from the response (preserves order for seasons)
-            val kitsuIds = response.mapNotNull { it.kitsu }
+            val entries = response.filter { it.kitsu != null }
 
-            if (kitsuIds.isNotEmpty()) {
+            if (entries.isNotEmpty()) {
                 cacheMutex.withLock {
                     evictIfNeeded(armTmdbCache)
-                    armTmdbCache[tmdbId] = kitsuIds
+                    armTmdbCache[tmdbId] = entries
                 }
             }
-            kitsuIds.ifEmpty { null }
+            entries.ifEmpty { null }
         } catch (e: Exception) {
             null
         }

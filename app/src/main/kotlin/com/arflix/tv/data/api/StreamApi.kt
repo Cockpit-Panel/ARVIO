@@ -471,7 +471,10 @@ data class ArmMappingEntry(
     @SerializedName("notify-moe") val notifyMoe: String? = null,
     val imdb: String? = null,
     val themoviedb: Int? = null,
-    val thetvdb: Int? = null
+    @SerializedName("themoviedb-season") val themoviedbSeason: Int? = null,
+    val thetvdb: Int? = null,
+    @SerializedName("thetvdb-season") val thetvdbSeason: Int? = null,
+    val media: String? = null
 )
 
 private object StreamApiRegexes {
