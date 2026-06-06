@@ -1208,6 +1208,7 @@ fun TvScreen(
                                 AndroidView(
                                     factory = { ctx ->
                                         PlayerView(ctx).apply {
+                                            keepScreenOn = true
                                             miniPlayerView = this
                                             player = null
                                             useController = false
@@ -1218,6 +1219,7 @@ fun TvScreen(
                                     },
                                     modifier = Modifier.fillMaxSize(),
                                     update = { playerView ->
+                                        playerView.keepScreenOn = true
                                         miniPlayerView = playerView
                                         if (!isFullScreen) {
                                             playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -1289,6 +1291,7 @@ fun TvScreen(
                     AndroidView(
                         factory = { ctx ->
                             PlayerView(ctx).apply {
+                                keepScreenOn = true
                                 fullPlayerView = this
                                 player = null
                                 useController = false
@@ -1299,6 +1302,7 @@ fun TvScreen(
                         },
                         modifier = Modifier.fillMaxSize(),
                         update = { playerView ->
+                            playerView.keepScreenOn = true
                             fullPlayerView = playerView
                             // Do NOT assign player here; let the LaunchedEffect handle it via postDelayed
                             // to ensure the view has been laid out first (avoids black screen).

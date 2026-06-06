@@ -2040,12 +2040,14 @@ fun LiveTvScreen(
                 androidx.compose.ui.viewinterop.AndroidView(
                     factory = { ctx ->
                         androidx.media3.ui.PlayerView(ctx).apply {
+                            keepScreenOn = true
                             player = exoPlayer
                             useController = false
                             setKeepContentOnPlayerReset(true)
                         }
                     },
                     update = { view ->
+                        view.keepScreenOn = true
                         if (view.player !== exoPlayer) {
                             view.player = exoPlayer
                         }
