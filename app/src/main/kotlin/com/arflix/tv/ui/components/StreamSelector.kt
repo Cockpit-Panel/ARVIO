@@ -61,6 +61,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
@@ -82,6 +83,7 @@ import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
 import androidx.compose.ui.res.stringResource
+import coil.compose.AsyncImage
 import com.arflix.tv.R
 
 // OLED source picker colors. Keep these deliberately monochrome so the sheet
@@ -90,7 +92,6 @@ private val OledPanel = Color.White.copy(alpha = 0.055f)
 private val OledPanelStrong = Color.White.copy(alpha = 0.095f)
 private val OledBorder = Color.White.copy(alpha = 0.16f)
 private val OledMutedBorder = Color.White.copy(alpha = 0.08f)
-private val OledFocus = Color.White
 private val OledMutedText = Color.White.copy(alpha = 0.58f)
 private val GlassWhite = OledPanel
 private val GlassBorder = OledBorder
@@ -150,7 +151,6 @@ fun StreamSelector(
             SourceFilter("All"),
             SourceFilter("4K"),
             SourceFilter("1080p"),
-            SourceFilter("Ready"),
             SourceFilter("Debrid"),
             SourceFilter("Direct")
         )
@@ -189,8 +189,7 @@ fun StreamSelector(
 
     val presentations = remember(streams) { streams.map(::presentSource) }
 
-    // Sort streams with richer heuristics:
-    // cached/direct first, then resolution, then release type, then addon order, then size.
+    // Recommended ordering for per-addon lists keeps robust playback and quality heuristics.
     val addonOrder = remember(addonTabs, addonOrderedIds) {
         if (addonOrderedIds.isNotEmpty()) {
             // Use the user's configured addon order: map each stream's addonId to its
@@ -203,7 +202,7 @@ fun StreamSelector(
             addonTabs.mapIndexed { index, tab -> tab.id to index }.toMap()
         }
     }
-    val sortedPresentations = remember(presentations, addonOrder) {
+    val recommendedPresentations = remember(presentations, addonOrder) {
         presentations.sortedWith(compareByDescending<SourcePresentation> { it.sortCached }
             .thenByDescending { it.sortDirect }
             .thenBy { addonOrder[sourceTabId(it.stream)] ?: Int.MAX_VALUE }
@@ -212,15 +211,27 @@ fun StreamSelector(
             .thenByDescending { it.sizeBytes }
             .thenBy { it.title.lowercase() })
     }
+    val sizeSortedPresentations = remember(presentations) {
+        presentations.sortedWith(compareByDescending<SourcePresentation> { it.sizeBytes }
+            .thenByDescending { it.resolutionScore }
+            .thenByDescending { it.releaseScore }
+            .thenBy { it.title.lowercase() })
+    }
 
     // Filter streams by selected tab
-    val filteredPresentations = remember(sortedPresentations, selectedTabIndex, selectedFilterIndex, addonTabs) {
+    val filteredPresentations = remember(
+        recommendedPresentations,
+        sizeSortedPresentations,
+        selectedTabIndex,
+        selectedFilterIndex,
+        addonTabs
+    ) {
         val selectedFilter = sourceFilters.getOrNull(selectedFilterIndex)?.label ?: "All"
         val addonFiltered = if (selectedTabIndex == 0) {
-            sortedPresentations // All sources
+            sizeSortedPresentations // All sources are easiest to compare by file size.
         } else {
             val selectedAddonId = addonTabs.getOrNull(selectedTabIndex - 1)?.id ?: ""
-            sortedPresentations.filter {
+            recommendedPresentations.filter {
                 sourceTabId(it.stream) == selectedAddonId
             }
         }
@@ -245,7 +256,7 @@ fun StreamSelector(
         if (flatStreams.isNotEmpty() && focusedIndex < flatStreams.size) {
             val visibleItems = listState.layoutInfo.visibleItemsInfo
             if (visibleItems.isEmpty()) {
-                listState.scrollToItem((focusedIndex - 1).coerceAtLeast(0))
+                listState.animateScrollToItem((focusedIndex - 1).coerceAtLeast(0))
             } else {
                 val firstVisible = visibleItems.first().index
                 val lastVisible = visibleItems.last().index
@@ -256,7 +267,7 @@ fun StreamSelector(
                     else -> null
                 }
                 if (targetIndex != null) {
-                    listState.scrollToItem(targetIndex)
+                    listState.animateScrollToItem(targetIndex)
                 }
             }
         }
@@ -278,10 +289,6 @@ fun StreamSelector(
     val count1080 = remember(streams) {
         streams.count { it.quality.contains("1080p", ignoreCase = true) }
     }
-    val countReady = remember(presentations) {
-        presentations.count { it.sortCached }
-    }
-
     AnimatedVisibility(
         visible = isVisible,
         enter = fadeIn(tween(200)) + slideInVertically(tween(300)) { it / 4 },
@@ -402,7 +409,6 @@ fun StreamSelector(
                     streamsFocused = focusZone == "streams",
                     count4K = count4K,
                     count1080 = count1080,
-                    countReady = countReady,
                     isLoading = isLoading,
                     hasStreamingAddons = hasStreamingAddons,
                     completedAddons = completedAddons,
@@ -585,11 +591,11 @@ fun StreamSelector(
                                 .weight(1f)
                                 .arvioDpadFocusGroup()
                         ) {
-                            items(flatStreams) { stream ->
+                            items(flatPresentations) { presentation ->
                                 MobileStreamCard(
-                                    presentation = presentSource(stream),
-                                    isSelected = stream == selectedStream,
-                                    onClick = { onSelect(stream) }
+                                    presentation = presentation,
+                                    isSelected = presentation.stream == selectedStream,
+                                    onClick = { onSelect(presentation.stream) }
                                 )
                             }
                         }
@@ -621,7 +627,6 @@ private fun OledSourceSelectorTv(
     streamsFocused: Boolean,
     count4K: Int,
     count1080: Int,
-    countReady: Int,
     isLoading: Boolean,
     hasStreamingAddons: Boolean,
     completedAddons: Int,
@@ -636,7 +641,6 @@ private fun OledSourceSelectorTv(
             .padding(start = 30.dp, top = 26.dp, end = 30.dp, bottom = 24.dp)
             .clip(RoundedCornerShape(24.dp))
             .background(Color.White.copy(alpha = 0.032f), RoundedCornerShape(24.dp))
-            .border(1.dp, OledMutedBorder, RoundedCornerShape(24.dp))
     ) {
         Row(
             modifier = Modifier
@@ -763,13 +767,6 @@ private fun OledSourceSelectorTv(
             }
         }
 
-        Box(
-            modifier = Modifier
-                .width(1.dp)
-                .fillMaxHeight()
-                .background(Color.White.copy(alpha = 0.07f))
-        )
-
         SourceAddonRail(
             tabLabels = tabLabels,
             selectedTabIndex = selectedTabIndex,
@@ -778,7 +775,6 @@ private fun OledSourceSelectorTv(
             totalSources = streams.size,
             count4K = count4K,
             count1080 = count1080,
-            countReady = countReady,
             completedAddons = completedAddons,
             totalAddons = totalAddons,
             onSelect = onAddonSelected
@@ -801,20 +797,44 @@ private data class SourcePresentation(
     val transportLabel: String?,
     val multiSourceLabel: String?,
     val languageLabel: String?,
-    val statusLabel: String?,
     val chips: List<String>,
     val qualityColor: Color,
     val sizeBytes: Long,
     val sortCached: Boolean,
     val sortDirect: Boolean,
-    val description: String? = null,
-    val detailRows: List<SourceDetailRow> = emptyList()
+    val description: String? = null
 )
 
-private data class SourceDetailRow(
-    val label: String,
-    val value: String
+private data class SourceBadge(
+    val text: String,
+    val imageUrl: String? = null
 )
+
+private object SourceBadgeImages {
+    private const val WHITE_TAGS =
+        "https://raw.githubusercontent.com/nobnobz/Omni-Template-Bot-Bid-Raiser/main/Other/white%20regex%20tags"
+
+    const val UHD_4K = "$WHITE_TAGS/white_4k.png"
+    const val FULL_HD_1080 = "$WHITE_TAGS/white_1080p.png"
+    const val HD_720 = "$WHITE_TAGS/white_720p.png"
+    const val REMUX = "https://raw.githubusercontent.com/9mousaa/BetterFormatter/main/images/mono-remux.png"
+    const val BLURAY = "https://raw.githubusercontent.com/9mousaa/BetterFormatter/main/images/mono-bluray.png"
+    const val IMAX = "$WHITE_TAGS/white_imax.png"
+    const val DOLBY_VISION = "$WHITE_TAGS/white_DV.png"
+    const val HDR10_PLUS = "$WHITE_TAGS/white_HDR10Plus.png"
+    const val HDR10 = "$WHITE_TAGS/white_HDR10.png"
+    const val HDR = "$WHITE_TAGS/white_HDR.png"
+    const val ATMOS = "$WHITE_TAGS/white_Atmos.png"
+    const val TRUEHD = "$WHITE_TAGS/white_TrueHD.png"
+    const val DOLBY_DIGITAL_PLUS = "$WHITE_TAGS/white_DDPLUS.png"
+    const val DOLBY_DIGITAL = "$WHITE_TAGS/white_DD.png"
+    const val DTS_X = "$WHITE_TAGS/white_dtsx.png"
+    const val DTS_HD_MA = "$WHITE_TAGS/white_dtsHDMA.png"
+    const val DTS_HD = "$WHITE_TAGS/white_dtsHD.png"
+    const val DTS = "$WHITE_TAGS/white_dts.png"
+    const val AUDIO_7_1 = "$WHITE_TAGS/white_71.png"
+    const val AUDIO_5_1 = "$WHITE_TAGS/white_51.png"
+}
 
 
 
@@ -831,11 +851,18 @@ private object StreamRegexes {
     val ATMOS = Regex("""\bATMOS\b""", RegexOption.IGNORE_CASE)
     val TRUEHD = Regex("""\bTRUEHD\b""", RegexOption.IGNORE_CASE)
     val DTS = Regex("""\b(DTS[- .]?HD|DTS|DDP|EAC3|AC3|AAC)\b""", RegexOption.IGNORE_CASE)
+    val DTS_X = Regex("""\bDTS[-_.: ]?X\b""", RegexOption.IGNORE_CASE)
+    val DTS_HD_MA = Regex("""\bDTS[-_. ]?(?:HD[-_. ]?)?(?:MA|MASTER)\b""", RegexOption.IGNORE_CASE)
+    val DTS_HD_ONLY = Regex("""\bDTS[-_. ]?HD\b""", RegexOption.IGNORE_CASE)
+    val DD_PLUS = Regex("""\b(DDP|DD\+|EAC-?3|E-?AC-?3)\b""", RegexOption.IGNORE_CASE)
+    val DD = Regex("""\b(AC-?3|DD(?:[ ._-]?5[ ._-]?1)?|DOLBY[ ._-]?DIGITAL)\b""", RegexOption.IGNORE_CASE)
     val CH71 = Regex("""\b7[ .]?1\b""", RegexOption.IGNORE_CASE)
     val CH51 = Regex("""\b5[ .]?1\b""", RegexOption.IGNORE_CASE)
     val MULTI_AUDIO = Regex("""\b(MULTI|DUAL[ .-]?AUDIO|MULTI[ .-]?AUDIO)\b""", RegexOption.IGNORE_CASE)
     val LANGUAGE_HINT = Regex("""\b(ENG|ENGLISH|HIN|HINDI|TAM|TAMIL|TEL|TELUGU|JPN|JAPANESE|KOR|KOREAN|SPA|SPANISH|FRE|FRENCH|GER|GERMAN|ITA|ITALIAN)\b""", RegexOption.IGNORE_CASE)
     val DV = Regex("""\b(DV|DoVi|Dolby[\s._-]*Vision)\b""", RegexOption.IGNORE_CASE)
+    val HDR10_PLUS = Regex("""\b(HDR10\+|HDR10\s*PLUS|HDR\s*10\s*\+)\b""", RegexOption.IGNORE_CASE)
+    val HDR10 = Regex("""\bHDR10\b""", RegexOption.IGNORE_CASE)
     val HDR = Regex("""\bHDR(10\+?|10)?\b""", RegexOption.IGNORE_CASE)
     val IMAX = Regex("""\bIMAX\b""", RegexOption.IGNORE_CASE)
     val WHITESPACE = Regex("""\s+""")
@@ -883,9 +910,6 @@ private fun isDebridLikeSource(stream: StreamSource, blob: String? = null): Bool
         text.contains("torbox", ignoreCase = true)
 }
 
-private fun isReadySource(stream: StreamSource, blob: String? = null): Boolean =
-    stream.behaviorHints?.cached == true || isDebridLikeSource(stream, blob)
-
 private fun sourceFilterMatches(presentation: SourcePresentation, selectedFilter: String): Boolean {
     val stream = presentation.stream
     val blob = buildString {
@@ -902,7 +926,6 @@ private fun sourceFilterMatches(presentation: SourcePresentation, selectedFilter
     return when (selectedFilter) {
         "4K" -> presentation.resolutionLabel == "4K"
         "1080p" -> presentation.resolutionLabel == "1080p"
-        "Ready", "Cached" -> isReadySource(stream, blob)
         "Debrid" -> isDebridLikeSource(stream, blob)
         "Direct" -> presentation.sortDirect
         else -> true
@@ -1039,11 +1062,6 @@ private fun presentSource(stream: StreamSource): SourcePresentation {
         isIptvVod && hasDirectHttpUrl -> "VOD"
         else -> null
     }
-    val statusLabel = when {
-        stream.behaviorHints?.cached == true -> "Best Match"
-        else -> null
-    }
-
     val multiSourceLabel = when {
         stream.sources.size > 1 -> "${stream.sources.size} sources"
         stream.sources.size == 1 -> "1 source"
@@ -1088,23 +1106,12 @@ private fun presentSource(stream: StreamSource): SourcePresentation {
         transportLabel = transportLabel,
         multiSourceLabel = multiSourceLabel,
         languageLabel = languageLabel,
-        statusLabel = statusLabel,
         chips = chips.distinct(),
         qualityColor = qualityColor,
         sizeBytes = getSizeBytes(stream),
         sortCached = isReady,
         sortDirect = !stream.url.isNullOrBlank() && stream.url.startsWith("http", true),
-        description = cleanStreamDescription(stream.description, rawTitle),
-        detailRows = sourceDetailRows(
-            stream = stream,
-            rawTitle = rawTitle,
-            addonLabel = addonLabel,
-            releaseLabel = releaseLabel,
-            codecLabel = codecLabel,
-            audioLabel = audioLabel,
-            transportLabel = transportLabel,
-            languageLabel = languageLabel
-        )
+        description = cleanStreamDescription(stream.description, rawTitle)
     )
 }
 
@@ -1127,81 +1134,95 @@ private fun cleanStreamDescription(raw: String?, title: String): String? {
     return cleaned.takeIf { it.isNotBlank() }
 }
 
-private fun cleanAddonDetailText(raw: String?, rawTitle: String): String? {
-    if (raw.isNullOrBlank()) return null
-    val mdNoise = Regex("""[`*_]{1,4}""")
-    val cleaned = raw.lines()
-        .map { it.trim().replace(mdNoise, "").trim() }
-        .filter { it.isNotBlank() && !it.equals(rawTitle, ignoreCase = true) }
-        .distinct()
-        .joinToString(" | ")
-        .replace(StreamRegexes.WHITESPACE, " ")
-        .trim()
-    return cleaned.takeIf { it.isNotBlank() }?.take(260)
-}
-
-private fun sourceDetailRows(
-    stream: StreamSource,
-    rawTitle: String,
-    addonLabel: String,
-    releaseLabel: String?,
-    codecLabel: String?,
-    audioLabel: String?,
-    transportLabel: String?,
-    languageLabel: String?
-): List<SourceDetailRow> {
-    val technical = listOfNotNull(
-        releaseLabel,
-        codecLabel,
-        audioLabel,
-        languageLabel,
-        transportLabel,
-        stream.size.takeIf { it.isNotBlank() },
-        stream.multiSourceCountLabel()
-    ).distinct().joinToString(" - ")
-
-    return buildList {
-        add(SourceDetailRow("Addon", addonLabel))
-        if (technical.isNotBlank()) add(SourceDetailRow("Details", technical))
-        add(SourceDetailRow("File", rawTitle))
-        cleanAddonDetailText(stream.description, rawTitle)?.let {
-            add(SourceDetailRow("Addon text", it))
-        }
-        if (stream.url?.startsWith("magnet:", ignoreCase = true) == true) {
-            add(SourceDetailRow("Type", "Magnet link"))
-        }
-        if (stream.behaviorHints?.notWebReady == true) {
-            add(SourceDetailRow("Status", "Needs resolving before playback"))
-        }
-    }.take(6)
-}
-
 private fun StreamSource.multiSourceCountLabel(): String? = when {
     sources.size > 1 -> "${sources.size} sources"
     sources.size == 1 -> "1 source"
     else -> null
 }
 
-private fun sourceBadges(presentation: SourcePresentation): List<String> = buildList {
-    add(presentation.resolutionLabel)
-    presentation.transportLabel?.let(::add)
-    presentation.releaseLabel?.let(::add)
-    presentation.codecLabel?.let(::add)
-    if (presentation.chips.any { it.equals("HDR", ignoreCase = true) }) add("HDR")
-    if (presentation.chips.any { it.equals("DV", ignoreCase = true) }) add("DV")
-    presentation.audioLabel?.let(::add)
-    if (presentation.stream.size.isNotBlank()) add(presentation.stream.size)
-}.distinct()
+private fun sourceBadges(presentation: SourcePresentation): List<SourceBadge> = buildList {
+    val blob = buildString {
+        append(presentation.rawTitle)
+        append(' ')
+        append(presentation.stream.source)
+        append(' ')
+        append(presentation.stream.quality)
+        append(' ')
+        append(presentation.chips.joinToString(" "))
+    }
+
+    when (presentation.resolutionLabel) {
+        "4K" -> add(SourceBadge("4K", SourceBadgeImages.UHD_4K))
+        "1080p" -> add(SourceBadge("1080p", SourceBadgeImages.FULL_HD_1080))
+        "720p" -> add(SourceBadge("720p", SourceBadgeImages.HD_720))
+        "480p" -> add(SourceBadge("480p"))
+        else -> add(SourceBadge(presentation.resolutionLabel))
+    }
+
+    presentation.transportLabel?.let { add(SourceBadge(it)) }
+
+    when (presentation.releaseLabel) {
+        "REMUX" -> add(SourceBadge("REMUX", SourceBadgeImages.REMUX))
+        "BluRay" -> add(SourceBadge("BluRay", SourceBadgeImages.BLURAY))
+        "WEB-DL" -> add(SourceBadge("WEB-DL"))
+        "WEBRip" -> add(SourceBadge("WEBRip"))
+        "HDTV" -> add(SourceBadge("HDTV"))
+        "CAM" -> add(SourceBadge("CAM"))
+    }
+
+    when (presentation.codecLabel) {
+        "HEVC" -> add(SourceBadge("HEVC"))
+        "H.264" -> add(SourceBadge("AVC"))
+        "AV1" -> add(SourceBadge("AV1"))
+    }
+
+    when {
+        StreamRegexes.DV.containsMatchIn(blob) -> add(SourceBadge("DV", SourceBadgeImages.DOLBY_VISION))
+        StreamRegexes.HDR10_PLUS.containsMatchIn(blob) -> add(SourceBadge("HDR10+", SourceBadgeImages.HDR10_PLUS))
+        StreamRegexes.HDR10.containsMatchIn(blob) -> add(SourceBadge("HDR10", SourceBadgeImages.HDR10))
+        StreamRegexes.HDR.containsMatchIn(blob) -> add(SourceBadge("HDR", SourceBadgeImages.HDR))
+    }
+    if (StreamRegexes.IMAX.containsMatchIn(blob)) {
+        add(SourceBadge("IMAX", SourceBadgeImages.IMAX))
+    }
+
+    when {
+        presentation.audioLabel.equals("Atmos", ignoreCase = true) -> add(SourceBadge("Atmos", SourceBadgeImages.ATMOS))
+        presentation.audioLabel.equals("TrueHD", ignoreCase = true) -> add(SourceBadge("TrueHD", SourceBadgeImages.TRUEHD))
+        presentation.audioLabel.equals("7.1", ignoreCase = true) -> add(SourceBadge("7.1", SourceBadgeImages.AUDIO_7_1))
+        presentation.audioLabel.equals("5.1", ignoreCase = true) -> add(SourceBadge("5.1", SourceBadgeImages.AUDIO_5_1))
+        StreamRegexes.DTS_X.containsMatchIn(blob) -> add(SourceBadge("DTS:X", SourceBadgeImages.DTS_X))
+        StreamRegexes.DTS_HD_MA.containsMatchIn(blob) -> add(SourceBadge("DTS-HD MA", SourceBadgeImages.DTS_HD_MA))
+        StreamRegexes.DTS_HD_ONLY.containsMatchIn(blob) -> add(SourceBadge("DTS-HD", SourceBadgeImages.DTS_HD))
+        presentation.audioLabel?.contains("DTS", ignoreCase = true) == true -> add(SourceBadge("DTS", SourceBadgeImages.DTS))
+        StreamRegexes.DD_PLUS.containsMatchIn(blob) -> add(SourceBadge("DD+", SourceBadgeImages.DOLBY_DIGITAL_PLUS))
+        StreamRegexes.DD.containsMatchIn(blob) -> add(SourceBadge("DD", SourceBadgeImages.DOLBY_DIGITAL))
+    }
+
+}.distinctBy { it.text }
 
 private fun rowSubtitle(presentation: SourcePresentation): String {
-    return listOfNotNull(
-        presentation.addonLabel,
-        presentation.transportLabel,
-        presentation.releaseLabel,
-        presentation.codecLabel,
-        presentation.audioLabel,
-        presentation.languageLabel
-    ).distinct().joinToString(" - ")
+    return presentation.addonLabel
+}
+
+private fun languageBadgeText(language: String?): String? {
+    if (language.isNullOrBlank()) return null
+    val normalized = language.trim().uppercase()
+    return when {
+        normalized.contains("MULTI") || normalized.contains("LANG") -> "🌐 MULTI"
+        normalized in setOf("EN", "ENG", "ENGLISH") -> "🇬🇧 EN"
+        normalized in setOf("NL", "NLD", "DUT", "DUTCH", "NEDERLANDS") -> "🇳🇱 NL"
+        normalized in setOf("JA", "JPN", "JAPANESE") -> "🇯🇵 JA"
+        normalized in setOf("KO", "KOR", "KOREAN") -> "🇰🇷 KO"
+        normalized in setOf("ES", "SPA", "SPANISH") -> "🇪🇸 ES"
+        normalized in setOf("FR", "FRE", "FRA", "FRENCH") -> "🇫🇷 FR"
+        normalized in setOf("DE", "GER", "DEU", "GERMAN") -> "🇩🇪 DE"
+        normalized in setOf("IT", "ITA", "ITALIAN") -> "🇮🇹 IT"
+        normalized in setOf("HI", "HIN", "HINDI") -> "🇮🇳 HI"
+        normalized in setOf("TA", "TAM", "TAMIL") -> "🇮🇳 TA"
+        normalized in setOf("TE", "TEL", "TELUGU") -> "🇮🇳 TE"
+        else -> normalized.take(6)
+    }
 }
 
 private fun bestMatchReason(presentation: SourcePresentation): String {
@@ -1213,19 +1234,6 @@ private fun bestMatchReason(presentation: SourcePresentation): String {
         presentation.codecLabel?.lowercase(),
         presentation.audioLabel?.lowercase()
     ).take(3).joinToString(" - ").ifBlank { "recommended source" }
-}
-
-private fun addonInitials(addonLabel: String): String {
-    val words = addonLabel
-        .replace('-', ' ')
-        .replace('_', ' ')
-        .split(' ')
-        .mapNotNull { it.trim().takeIf(String::isNotBlank) }
-    return when {
-        words.isEmpty() -> "?"
-        words.size == 1 -> words.first().take(2)
-        else -> words.take(2).joinToString("") { it.take(1) }
-    }.uppercase()
 }
 
 @Composable
@@ -1398,7 +1406,6 @@ private fun SourceAddonRail(
     totalSources: Int,
     count4K: Int,
     count1080: Int,
-    countReady: Int,
     completedAddons: Int,
     totalAddons: Int,
     onSelect: (Int) -> Unit
@@ -1432,7 +1439,6 @@ private fun SourceAddonRail(
         Spacer(modifier = Modifier.weight(1f))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             RailMetric(label = "Total", value = totalSources.toString())
-            RailMetric(label = "Ready", value = countReady.toString())
             RailMetric(label = "4K", value = count4K.toString())
             RailMetric(label = "1080p", value = count1080.toString())
             if (totalAddons > 0) {
@@ -1465,7 +1471,6 @@ private fun AddonRailItem(
                 1.dp,
                 when {
                     isFocused -> Color.White
-                    isSelected -> OledBorder
                     else -> Color.Transparent
                 },
                 RoundedCornerShape(11.dp)
@@ -1570,41 +1575,40 @@ private fun OledSourceRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .height(92.dp)
             .padding(horizontal = 3.dp, vertical = 1.dp)
             .clip(RoundedCornerShape(15.dp))
             .background(
                 when {
-                    isFocused -> Color.White.copy(alpha = 0.115f)
-                    isSelected -> Color.White.copy(alpha = 0.075f)
-                    else -> Color.White.copy(alpha = 0.04f)
+                    isFocused -> Color.White.copy(alpha = 0.11f)
+                    isSelected -> Color.White.copy(alpha = 0.07f)
+                    else -> Color.White.copy(alpha = 0.028f)
                 },
                 RoundedCornerShape(15.dp)
             )
-            .border(
-                width = if (isFocused) 2.dp else 1.dp,
-                color = when {
-                    isFocused -> OledFocus
-                    isSelected -> Color.White.copy(alpha = 0.38f)
-                    else -> OledMutedBorder
-                },
-                shape = RoundedCornerShape(15.dp)
+            .then(
+                if (isFocused) {
+                    Modifier.border(1.5.dp, Color.White.copy(alpha = 0.96f), RoundedCornerShape(15.dp))
+                } else {
+                    Modifier
+                }
             )
             .clickable { onClick() }
             .padding(horizontal = 11.dp, vertical = 7.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ProviderMark(presentation.addonLabel, isFocused)
-            Spacer(modifier = Modifier.width(11.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = presentation.title,
+                        text = if (isFocused) presentation.rawTitle else presentation.title,
                         style = ArflixTypography.body.copy(
-                            fontSize = 13.sp,
-                            lineHeight = 16.sp,
+                            fontSize = if (isFocused) 12.sp else 13.sp,
+                            lineHeight = 15.sp,
                             fontWeight = if (isFocused) FontWeight.Bold else FontWeight.SemiBold
                         ),
                         color = TextPrimary,
@@ -1622,52 +1626,97 @@ private fun OledSourceRow(
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(5.dp))
                 Text(
                     text = rowSubtitle(presentation),
-                    style = ArflixTypography.caption.copy(fontSize = 9.sp),
+                    style = ArflixTypography.caption.copy(
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium
+                    ),
                     color = OledMutedText,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(modifier = Modifier.width(8.dp))
-            OledBadgeRow(presentation = presentation, maxBadges = 4)
-        }
-
-        AnimatedVisibility(
-            visible = isFocused && presentation.detailRows.isNotEmpty(),
-            enter = fadeIn(tween(120)),
-            exit = fadeOut(tween(90))
-        ) {
-            AddonDetailsPanel(presentation)
+            Spacer(modifier = Modifier.width(10.dp))
+            SourceBadgeTray(presentation = presentation, maxBadges = 4)
         }
     }
 }
 
 @Composable
-private fun ProviderMark(addonLabel: String, isFocused: Boolean) {
+private fun SourceBadgeTray(
+    presentation: SourcePresentation,
+    maxBadges: Int,
+    compact: Boolean = false,
+    inverted: Boolean = false
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OledBadgeRow(presentation = presentation, maxBadges = maxBadges, inverted = inverted)
+        SourceLanguageBadge(language = presentation.languageLabel, compact = compact, inverted = inverted)
+        SourceSizeBadge(size = presentation.stream.size, compact = compact, inverted = inverted)
+    }
+}
+
+@Composable
+private fun SourceLanguageBadge(
+    language: String?,
+    compact: Boolean = false,
+    inverted: Boolean = false
+) {
+    val display = languageBadgeText(language) ?: return
     Box(
         modifier = Modifier
-            .size(34.dp)
             .background(
-                if (isFocused) Color.White else Color.White.copy(alpha = 0.08f),
-                RoundedCornerShape(10.dp)
+                if (inverted) Color.Transparent else Color.Black.copy(alpha = 0.9f),
+                RoundedCornerShape(6.dp)
             )
-            .border(
-                1.dp,
-                if (isFocused) Color.White else OledMutedBorder,
-                RoundedCornerShape(10.dp)
-            ),
-        contentAlignment = Alignment.Center
+            .padding(
+                horizontal = if (compact) 6.dp else 8.dp,
+                vertical = if (compact) 3.dp else 4.dp
+            )
     ) {
         Text(
-            text = addonInitials(addonLabel),
+            text = display,
             style = ArflixTypography.caption.copy(
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Black
+                fontSize = if (compact) 9.sp else 10.sp,
+                fontWeight = FontWeight.Bold
             ),
-            color = if (isFocused) Color.Black else TextPrimary
+            color = if (inverted) Color.Black else Color.White,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun SourceSizeBadge(
+    size: String,
+    compact: Boolean = false,
+    inverted: Boolean = false
+) {
+    if (size.isBlank()) return
+    Box(
+        modifier = Modifier
+            .background(
+                if (inverted) Color.Transparent else Color.Black.copy(alpha = 0.9f),
+                RoundedCornerShape(6.dp)
+            )
+            .padding(
+                horizontal = if (compact) 6.dp else 8.dp,
+                vertical = if (compact) 3.dp else 4.dp
+            )
+    ) {
+        Text(
+            text = size,
+            style = ArflixTypography.caption.copy(
+                fontSize = if (compact) 9.sp else 10.sp,
+                fontWeight = FontWeight.Bold
+            ),
+            color = if (inverted) Color.Black else Color.White,
+            maxLines = 1
         )
     }
 }
@@ -1675,34 +1724,70 @@ private fun ProviderMark(addonLabel: String, isFocused: Boolean) {
 @Composable
 private fun OledBadgeRow(
     presentation: SourcePresentation,
-    maxBadges: Int
+    maxBadges: Int,
+    inverted: Boolean = false
 ) {
     Row(
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         sourceBadges(presentation).take(maxBadges).forEach { badge ->
-            OledBadge(
-                text = badge,
-                strong = badge == "Cached" ||
-                    badge == "Debrid" ||
-                    badge == presentation.resolutionLabel
-            )
+            SourceBadgeView(badge, inverted = inverted)
         }
     }
 }
 
 @Composable
-private fun OledBadge(text: String, strong: Boolean = false) {
+private fun SourceBadgeView(
+    badge: SourceBadge,
+    inverted: Boolean = false
+) {
+    if (badge.imageUrl != null && !inverted) {
+        AsyncImage(
+            model = badge.imageUrl,
+            contentDescription = badge.text,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .width(sourceBadgeWidth(badge.text))
+                .height(20.dp)
+        )
+    } else {
+        OledTextBadge(text = badge.text, inverted = inverted)
+    }
+}
+
+private fun sourceBadgeWidth(text: String) = when {
+    text.equals("4K", ignoreCase = true) -> 42.dp
+    text.equals("1080p", ignoreCase = true) -> 56.dp
+    text.equals("720p", ignoreCase = true) -> 50.dp
+    text.equals("REMUX", ignoreCase = true) -> 62.dp
+    text.equals("BluRay", ignoreCase = true) -> 62.dp
+    text.equals("Atmos", ignoreCase = true) -> 66.dp
+    text.equals("TrueHD", ignoreCase = true) -> 62.dp
+    text.equals("DTS-HD MA", ignoreCase = true) -> 78.dp
+    text.equals("DTS-HD", ignoreCase = true) -> 64.dp
+    text.equals("DTS:X", ignoreCase = true) -> 58.dp
+    text.equals("DD+", ignoreCase = true) -> 48.dp
+    text.equals("DD", ignoreCase = true) -> 42.dp
+    text.equals("DV", ignoreCase = true) -> 76.dp
+    text.equals("IMAX", ignoreCase = true) -> 54.dp
+    text.equals("7.1", ignoreCase = true) -> 40.dp
+    text.equals("5.1", ignoreCase = true) -> 40.dp
+    text.equals("HDR10+", ignoreCase = true) -> 64.dp
+    text.equals("HDR10", ignoreCase = true) -> 58.dp
+    text.equals("HDR", ignoreCase = true) -> 48.dp
+    else -> 52.dp
+}
+
+@Composable
+private fun OledTextBadge(
+    text: String,
+    inverted: Boolean = false
+) {
     Box(
         modifier = Modifier
             .background(
-                if (strong) Color.White else Color.White.copy(alpha = 0.055f),
-                RoundedCornerShape(6.dp)
-            )
-            .border(
-                1.dp,
-                if (strong) Color.White else OledMutedBorder,
+                if (inverted) Color.Transparent else Color.Black.copy(alpha = 0.9f),
                 RoundedCornerShape(6.dp)
             )
             .padding(horizontal = 7.dp, vertical = 3.dp)
@@ -1713,49 +1798,9 @@ private fun OledBadge(text: String, strong: Boolean = false) {
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Bold
             ),
-            color = if (strong) Color.Black else TextPrimary.copy(alpha = 0.82f),
+            color = if (inverted) Color.Black else Color.White,
             maxLines = 1
         )
-    }
-}
-
-@Composable
-private fun AddonDetailsPanel(presentation: SourcePresentation) {
-    Column(
-        modifier = Modifier
-            .padding(top = 7.dp, start = 45.dp)
-            .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.04f), RoundedCornerShape(10.dp))
-            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 7.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp)
-    ) {
-        presentation.detailRows.forEach { row ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Top
-            ) {
-                Text(
-                    text = row.label,
-                    style = ArflixTypography.caption.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
-                    color = OledMutedText,
-                    modifier = Modifier.width(68.dp),
-                    maxLines = 1
-                )
-                Text(
-                    text = row.value,
-                    style = ArflixTypography.caption.copy(fontSize = 10.sp, lineHeight = 13.sp),
-                    color = TextPrimary.copy(alpha = 0.84f),
-                    maxLines = when (row.label) {
-                        "File" -> 3
-                        "Addon text" -> 2
-                        else -> 1
-                    },
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
     }
 }
 
@@ -1771,31 +1816,49 @@ private fun MobileStreamCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(
-                if (isSelected) Pink.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.045f)
+                if (isSelected) Color.White.copy(alpha = 0.09f) else Color.White.copy(alpha = 0.04f)
             )
             .clickable { onClick() }
-            .padding(14.dp),
+            .padding(horizontal = 13.dp, vertical = 12.dp),
         verticalAlignment = Alignment.Top
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     text = presentation.title,
-                    style = ArflixTypography.body.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
+                    style = ArflixTypography.body.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold),
                     color = TextPrimary,
                     modifier = Modifier.weight(1f),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                PremiumQualityPill(presentation)
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
-            SourceMetadataChips(presentation = presentation, compact = true)
+            Spacer(modifier = Modifier.height(5.dp))
+            Text(
+                text = rowSubtitle(presentation),
+                style = ArflixTypography.caption.copy(fontSize = 10.sp),
+                color = OledMutedText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(7.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                sourceBadges(presentation).take(5).forEach { badge ->
+                    SourceBadgeView(badge)
+                }
+                SourceLanguageBadge(language = presentation.languageLabel, compact = true)
+                SourceSizeBadge(size = presentation.stream.size, compact = true)
+            }
             if (!presentation.description.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
@@ -1813,7 +1876,7 @@ private fun MobileStreamCard(
             Box(
                 modifier = Modifier
                     .size(20.dp)
-                    .background(Pink, CircleShape),
+                    .background(Color.White, CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
