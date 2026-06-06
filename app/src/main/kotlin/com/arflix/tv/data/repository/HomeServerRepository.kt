@@ -1888,34 +1888,65 @@ class HomeServerRepository @Inject constructor(
                 .distinctBy { it.identityKey() }
         }
         return sources
-            .mapNotNull { mediaSource ->
-                val url = mediaSource.playbackUrl(connection, item.id) ?: return@mapNotNull null
-                val quality = qualityLabel(mediaSource)
-                val serverLabel = connection.displayLabel()
-                val labelParts = listOfNotNull(
-                    serverLabel,
-                    quality.takeIf { it.isNotBlank() },
-                    mediaSource.container.takeIf { it.isNotBlank() }?.uppercase(Locale.US)
+            .flatMap { mediaSource ->
+                val directUrl = mediaSource.playbackUrl(connection, item.id) ?: return@flatMap emptyList()
+                val directSource = mediaSource.toStreamSource(
+                    connection = connection,
+                    item = item,
+                    url = directUrl
                 )
-                StreamSource(
-                    source = labelParts.joinToString(" "),
-                    addonName = serverLabel,
-                    addonId = ADDON_ID,
-                    quality = quality.ifBlank { "Unknown" },
-                    size = formatBytes(mediaSource.sizeBytes),
-                    sizeBytes = mediaSource.sizeBytes.takeIf { it > 0L },
-                    url = url,
-                    behaviorHints = StreamBehaviorHints(
-                        cached = true,
-                        filename = mediaSource.name.ifBlank { item.name },
-                        videoSize = mediaSource.sizeBytes.takeIf { it > 0L },
-                        proxyHeaders = ProxyHeaders(request = playbackHeaders(connection))
-                    )
+                if (connection.serverKind != HomeServerKind.PLEX || !mediaSource.needsPlexCompatiblePlayback()) {
+                    return@flatMap listOf(directSource)
+                }
+
+                val compatibleUrl = mediaSource.plexCompatiblePlaybackUrl(connection, item.id)
+                    ?: return@flatMap listOf(directSource)
+                val compatibleSource = mediaSource.toStreamSource(
+                    connection = connection,
+                    item = item,
+                    url = compatibleUrl,
+                    sourceSuffix = "Compatible"
                 )
+
+                // Put the Plex-compatible HLS path first only for known-risk files. These
+                // are usually direct-playable in Plex's own player, but ExoPlayer can hang
+                // on the raw MKV while time still advances.
+                listOf(compatibleSource, directSource)
             }
             .distinctBy { "${it.url?.trim().orEmpty()}|${it.source}" }
             .sortedWith(compareByDescending<StreamSource> { qualityRank(it.quality) }
                 .thenByDescending { it.sizeBytes ?: 0L })
+    }
+
+    private fun HomeServerMediaSource.toStreamSource(
+        connection: HomeServerConnection,
+        item: HomeServerItem,
+        url: String,
+        sourceSuffix: String? = null
+    ): StreamSource {
+        val quality = qualityLabel(this)
+        val serverLabel = connection.displayLabel()
+        val labelParts = listOfNotNull(
+            serverLabel,
+            sourceSuffix?.takeIf { it.isNotBlank() },
+            quality.takeIf { it.isNotBlank() },
+            container.takeIf { it.isNotBlank() }?.uppercase(Locale.US)
+        )
+        return StreamSource(
+            source = labelParts.joinToString(" "),
+            addonName = serverLabel,
+            addonId = ADDON_ID,
+            quality = quality.ifBlank { "Unknown" },
+            size = formatBytes(sizeBytes),
+            sizeBytes = sizeBytes.takeIf { it > 0L },
+            url = url,
+            behaviorHints = StreamBehaviorHints(
+                cached = true,
+                filename = name.ifBlank { item.name },
+                videoSize = sizeBytes.takeIf { it > 0L },
+                proxyHeaders = ProxyHeaders(request = playbackHeaders(connection))
+            )
+        )
     }
 
     private fun HomeServerMediaSource.identityKey(): String {
@@ -1979,6 +2010,44 @@ class HomeServerRepository @Inject constructor(
         val parsed = rawUrl.toHttpUrlOrNull() ?: return rawUrl
         if (!parsed.queryParameter("X-Plex-Token").isNullOrBlank()) return rawUrl
         return parsed.newBuilder()
+            .addQueryParameter("X-Plex-Token", connection.accessToken)
+            .build()
+            .toString()
+    }
+
+    private fun HomeServerMediaSource.needsPlexCompatiblePlayback(): Boolean {
+        val normalizedContainer = container.lowercase(Locale.US)
+        val normalizedVideoCodec = videoCodec.lowercase(Locale.US)
+        val normalizedVideoProfile = videoProfile.lowercase(Locale.US)
+        val normalizedAudioCodec = audioCodec.lowercase(Locale.US)
+        val normalizedAudioProfile = audioProfile.lowercase(Locale.US)
+        val isMatroska = normalizedContainer in setOf("mkv", "matroska")
+        val isHevc = normalizedVideoCodec in setOf("hevc", "h265", "h.265")
+        val isMain10 = videoBitDepth >= 10 || "main 10" in normalizedVideoProfile || "main10" in normalizedVideoProfile
+        val isHeAac = normalizedAudioCodec == "aac" &&
+            ("he" in normalizedAudioProfile || "sbr" in normalizedAudioProfile)
+        return isMatroska && ((isHevc && isMain10) || isHeAac)
+    }
+
+    private fun HomeServerMediaSource.plexCompatiblePlaybackUrl(
+        connection: HomeServerConnection,
+        itemId: String
+    ): String? {
+        if (itemId.isBlank()) return null
+        val base = connection.serverUrl.toHttpUrlOrNull() ?: return null
+        return base.newBuilder()
+            .encodedPath("/video/:/transcode/universal/start.m3u8")
+            .addQueryParameter("path", "/library/metadata/$itemId")
+            .addQueryParameter("mediaIndex", mediaIndex.toString())
+            .addQueryParameter("partIndex", partIndex.toString())
+            .addQueryParameter("protocol", "hls")
+            .addQueryParameter("directPlay", "0")
+            .addQueryParameter("directStream", "0")
+            .addQueryParameter("videoQuality", "100")
+            .addQueryParameter("maxVideoBitrate", "20000")
+            .addQueryParameter("subtitleSize", "100")
+            .addQueryParameter("audioBoost", "100")
+            .addQueryParameter("session", "arvio-${deviceId()}-$itemId-${id.ifBlank { partIndex.toString() }}")
             .addQueryParameter("X-Plex-Token", connection.accessToken)
             .build()
             .toString()
@@ -2119,7 +2188,11 @@ class HomeServerRepository @Inject constructor(
                 parentIndexNumber = int("parentIndex"),
                 mediaSources = array("Media")
                     .mapNotNull { it.asJsonObjectOrNull() }
-                    .flatMap { media -> media.array("Part").mapNotNull { it.asJsonObjectOrNull()?.toMediaSource(kind, media) } }
+                    .flatMapIndexed { mediaIndex, media ->
+                        media.array("Part").mapIndexedNotNull { partIndex, part ->
+                            part.asJsonObjectOrNull()?.toMediaSource(kind, media, mediaIndex, partIndex)
+                        }
+                    }
             )
         }
 
@@ -2140,10 +2213,22 @@ class HomeServerRepository @Inject constructor(
         )
     }
 
-    private fun JsonObject.toMediaSource(kind: HomeServerKind, parentMedia: JsonObject? = null): HomeServerMediaSource {
+    private fun JsonObject.toMediaSource(
+        kind: HomeServerKind,
+        parentMedia: JsonObject? = null,
+        mediaIndex: Int = 0,
+        partIndex: Int = 0
+    ): HomeServerMediaSource {
         if (kind == HomeServerKind.PLEX) {
             val width = parentMedia?.int("width") ?: int("width") ?: 0
             val height = parentMedia?.int("height") ?: int("height") ?: 0
+            val streams = array("Stream").mapNotNull { it.asJsonObjectOrNull() }
+            val videoStream = streams.firstOrNull { stream ->
+                stream.string("streamType") == "1" || stream.string("type").equals("video", ignoreCase = true)
+            }
+            val audioStream = streams.firstOrNull { stream ->
+                stream.string("streamType") == "2" || stream.string("type").equals("audio", ignoreCase = true)
+            }
             return HomeServerMediaSource(
                 id = string("id"),
                 key = string("key"),
@@ -2156,7 +2241,14 @@ class HomeServerRepository @Inject constructor(
                 sizeBytes = long("size") ?: 0L,
                 transcodingUrl = "",
                 videoWidth = width,
-                videoHeight = height
+                videoHeight = height,
+                videoCodec = videoStream?.string("codec").orEmpty().ifBlank { parentMedia?.string("videoCodec").orEmpty() },
+                videoProfile = videoStream?.string("profile").orEmpty().ifBlank { parentMedia?.string("videoProfile").orEmpty() },
+                audioCodec = audioStream?.string("codec").orEmpty().ifBlank { parentMedia?.string("audioCodec").orEmpty() },
+                audioProfile = audioStream?.string("profile").orEmpty().ifBlank { parentMedia?.string("audioProfile").orEmpty() },
+                videoBitDepth = videoStream?.int("bitDepth") ?: parentMedia?.int("bitDepth") ?: int("bitDepth") ?: 0,
+                mediaIndex = mediaIndex,
+                partIndex = partIndex
             )
         }
 
@@ -2299,7 +2391,14 @@ class HomeServerRepository @Inject constructor(
         val sizeBytes: Long,
         val transcodingUrl: String,
         val videoWidth: Int,
-        val videoHeight: Int
+        val videoHeight: Int,
+        val videoCodec: String = "",
+        val videoProfile: String = "",
+        val audioCodec: String = "",
+        val audioProfile: String = "",
+        val videoBitDepth: Int = 0,
+        val mediaIndex: Int = 0,
+        val partIndex: Int = 0
     )
 
 }
