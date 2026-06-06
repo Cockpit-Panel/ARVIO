@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.arflix.tv.data.model.Addon
+import com.arflix.tv.data.model.AddonType
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.Profile
 import com.arflix.tv.data.repository.ContinueWatchingItem
@@ -36,6 +37,37 @@ import org.json.JSONObject
 import kotlin.math.max
 import javax.inject.Inject
 import javax.inject.Singleton
+
+internal fun mergeCloudAddonsPreservingLocalDirectAddons(
+    cloudAddons: List<Addon>,
+    localAddons: List<Addon>
+): Pair<List<Addon>, Boolean> {
+    val merged = LinkedHashMap<String, Addon>()
+    cloudAddons.forEach { addon ->
+        val id = addon.id.trim()
+        if (id.isNotBlank()) {
+            merged[id] = addon
+        }
+    }
+
+    var preservedLocalAddon = false
+    localAddons.forEach { addon ->
+        val id = addon.id.trim()
+        val shouldPreserve = id.isNotBlank() &&
+            id !in merged &&
+            id != "opensubtitles" &&
+            addon.isInstalled &&
+            addon.type == AddonType.CUSTOM &&
+            !addon.url.isNullOrBlank()
+
+        if (shouldPreserve) {
+            merged[id] = addon
+            preservedLocalAddon = true
+        }
+    }
+
+    return merged.values.toList() to preservedLocalAddon
+}
 
 /**
  * Shared cloud sync logic used by both SettingsViewModel (full push/pull on
@@ -1019,22 +1051,32 @@ class CloudSyncRepository @Inject constructor(
 
         // ── Addons ──
         runCatching {
+            var preservedLocalAddon = false
             root.optJSONObject("addonsByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
                 val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, Addon::class.java).type).type
                 val map: Map<String, List<Addon>> = gson.fromJson(json, type) ?: emptyMap()
                 val sharedAddons = mergeAddonsForSharedRestore(map.values)
-                if (sharedAddons.isNotEmpty()) {
-                    streamRepository.replaceSharedAddonsFromCloud(sharedAddons)
+                val localAddons = streamRepository.installedAddons.first()
+                val (resolvedAddons, preserved) = mergeCloudAddonsPreservingLocalDirectAddons(sharedAddons, localAddons)
+                preservedLocalAddon = preservedLocalAddon || preserved
+                if (resolvedAddons.isNotEmpty()) {
+                    streamRepository.replaceSharedAddonsFromCloud(resolvedAddons)
                 }
             }
             root.optJSONArray("addons")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
                 if (!root.has("addonsByProfile")) {
                     val type = TypeToken.getParameterized(List::class.java, Addon::class.java).type
                     val addons: List<Addon> = gson.fromJson(json, type) ?: emptyList()
-                    if (addons.isNotEmpty()) {
-                        streamRepository.replaceSharedAddonsFromCloud(addons)
+                    val localAddons = streamRepository.installedAddons.first()
+                    val (resolvedAddons, preserved) = mergeCloudAddonsPreservingLocalDirectAddons(addons, localAddons)
+                    preservedLocalAddon = preservedLocalAddon || preserved
+                    if (resolvedAddons.isNotEmpty()) {
+                        streamRepository.replaceSharedAddonsFromCloud(resolvedAddons)
                     }
                 }
+            }
+            if (preservedLocalAddon) {
+                markLocalStateDirty()
             }
         }.onFailure { AppLogger.recordException(it, mapOf("error_area" to "CloudSync", "cloud_flow" to "apply_addons")) }
 
