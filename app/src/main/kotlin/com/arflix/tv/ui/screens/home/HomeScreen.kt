@@ -131,6 +131,7 @@ import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.CollectionTileShape
 import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.data.model.isPortrait
 import com.arflix.tv.network.OkHttpProvider
 import com.arflix.tv.ui.components.MediaCard as ArvioMediaCard
 import com.arflix.tv.ui.components.TrailerPlayer
@@ -2643,7 +2644,8 @@ private fun MobileHomeRowsLayer(
             val isCollectionRow = category.id.startsWith("collection_row_")
             val rowKey = remember(category.id) { "home:${category.id}" }
             val rowUsePosterCards = rememberCatalogueRowLayoutMode(rowKey) == CardLayoutMode.POSTER
-            val rowMobileItemWidth = if (rowUsePosterCards) 120.dp else 200.dp
+            val isPortrait = category.isPortrait(rowUsePosterCards)
+            val rowMobileItemWidth = if (isPortrait) 120.dp else 200.dp
             val rowState = rememberLazyListState()
 
             LaunchedEffect(rowState, category.id) {
@@ -2678,12 +2680,7 @@ private fun MobileHomeRowsLayer(
                     )
                 }
 
-                val rowHasMore = categoryHasMoreMap[category.id] == true
-                val isPortrait = if (isCollectionRow) {
-                    category.items.firstOrNull()?.collectionTileShape == CollectionTileShape.POSTER
-                } else {
-                    rowUsePosterCards
-                }
+                val rowHasMore = !isCollectionRow && categoryHasMoreMap[category.id] == true
                 val skeletonCount = if (isPortrait) 12 else 7
                 val itemsToRender = remember(category.items, rowHasMore, isPortrait) {
                     if (rowHasMore) {
@@ -2745,11 +2742,10 @@ private fun MobileHomeRowsLayer(
                                 modifier = Modifier.width(rowMobileItemWidth)
                             ) {
                                 val cardLogoUrl = if (isCollectionRow) null else cardLogoUrls["${item.mediaType}_${item.id}"]
-                                val collectionLandscape = item.collectionTileShape != CollectionTileShape.POSTER
                                 ArvioMediaCard(
                                     item = item,
                                     width = rowMobileItemWidth,
-                                    isLandscape = if (isCollectionRow) collectionLandscape else !rowUsePosterCards,
+                                    isLandscape = !isPortrait,
                                     logoImageUrl = cardLogoUrl,
                                     showProgress = false,
                                     showTitle = !item.collectionHideTitle,
@@ -2771,11 +2767,10 @@ private fun MobileHomeRowsLayer(
                             }
                         } else {
                             val cardLogoUrl = if (isCollectionRow) null else cardLogoUrls["${item.mediaType}_${item.id}"]
-                            val collectionLandscape = item.collectionTileShape != CollectionTileShape.POSTER
                             ArvioMediaCard(
                                 item = item,
                                 width = rowMobileItemWidth,
-                                isLandscape = if (isCollectionRow) collectionLandscape else !rowUsePosterCards,
+                                isLandscape = !isPortrait,
                                 logoImageUrl = cardLogoUrl,
                                 showProgress = isContinueWatching,
                                 showTitle = !item.collectionHideTitle,
@@ -3225,6 +3220,7 @@ private fun ContentRow(
     onItemFocused: (MediaItem, Int) -> Unit
 ) {
     val isCollectionRow = category.id.startsWith("collection_row_")
+    val effectiveCategoryHasMore = !isCollectionRow && categoryHasMore
     val rowState = rememberLazyListState()
     val density = LocalDensity.current
     val isContinueWatching = category.id == "continue_watching"
@@ -3355,8 +3351,8 @@ private fun ContentRow(
         }
 
         val skeletonCount = if (effectivePosterMode) 12 else 7
-        val itemsToRender = remember(category.items, categoryHasMore, effectivePosterMode) {
-            if (categoryHasMore) {
+        val itemsToRender = remember(category.items, effectiveCategoryHasMore, effectivePosterMode) {
+            if (effectiveCategoryHasMore) {
                 category.items + List(skeletonCount) { idx ->
                     MediaItem(
                         id = -1000 - idx,
@@ -3408,7 +3404,7 @@ private fun ContentRow(
                     LaunchedEffect(item.id) {
                         onLoadMore()
                     }
-                } else if (categoryHasMore && index >= category.items.size - 5) {
+                } else if (effectiveCategoryHasMore && index >= category.items.size - 5) {
                     LaunchedEffect(category.items.size) {
                         onLoadMore()
                     }
