@@ -51,6 +51,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.blur
 import com.arflix.tv.util.settingsDataStore
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
@@ -184,7 +185,6 @@ import androidx.compose.ui.res.stringResource
 
 
 private object DetailsScreenRegexes {
-    val FOUR_K_REGEX = Regex("""\b4[kK]\b""")
     val YEAR_REGEX = Regex("""\d{4}""")
 }
 
@@ -239,6 +239,7 @@ fun DetailsScreen(
     var showTrailerPlayer by remember { mutableStateOf(false) }
     KeepScreenOn(active = showTrailerPlayer)
     var pendingAutoPlayRequest by remember { mutableStateOf<PendingAutoPlayRequest?>(null) }
+    var autoPlayWaitTick by remember { mutableIntStateOf(0) }
 
     // Episode Context Menu state
     var showEpisodeContextMenu by remember { mutableStateOf(false) }
@@ -251,10 +252,12 @@ fun DetailsScreen(
     fun requestFastAutoPlay(imdbId: String?, season: Int?, episode: Int?, startPositionMs: Long?) {
         showStreamSelector = false
         viewModel.loadStreams(imdbId, season, episode)
+        autoPlayWaitTick = 0
         pendingAutoPlayRequest = PendingAutoPlayRequest(
             season = season,
             episode = episode,
-            startPositionMs = startPositionMs
+            startPositionMs = startPositionMs,
+            requestedAtMs = SystemClock.elapsedRealtime()
         )
     }
 
@@ -324,15 +327,30 @@ fun DetailsScreen(
         suppressSelectUntilMs = SystemClock.elapsedRealtime() + 150L
     }
 
-    LaunchedEffect(pendingAutoPlayRequest, uiState.isLoadingStreams, uiState.streams) {
+    LaunchedEffect(
+        pendingAutoPlayRequest,
+        uiState.isLoadingStreams,
+        uiState.completedAddons,
+        uiState.totalAddons,
+        uiState.streams,
+        uiState.autoPlayMinQuality,
+        autoPlayWaitTick
+    ) {
         val request = pendingAutoPlayRequest ?: return@LaunchedEffect
 
         val validStreams = uiState.streams.filter(::isAutoPlayableStream)
         val minThreshold = minQualityThreshold(uiState.autoPlayMinQuality)
         val selectedStream = bestAutoPlayStream(validStreams, minThreshold)
+        val shouldWaitForSources = shouldWaitForAutoPlaySources(
+            completedAddons = uiState.completedAddons,
+            totalAddons = uiState.totalAddons,
+            isLoadingStreams = uiState.isLoadingStreams,
+            hasCandidateStreams = validStreams.isNotEmpty(),
+            elapsedMs = SystemClock.elapsedRealtime() - request.requestedAtMs
+        )
 
         when {
-            selectedStream != null -> {
+            selectedStream != null && !shouldWaitForSources -> {
                 onNavigateToPlayer(
                     mediaType,
                     mediaId,
@@ -345,6 +363,10 @@ fun DetailsScreen(
                     request.startPositionMs
                 )
                 pendingAutoPlayRequest = null
+            }
+            shouldWaitForSources -> {
+                delay(AUTOPLAY_SOURCE_RECHECK_MS)
+                autoPlayWaitTick += 1
             }
             uiState.isLoadingStreams -> Unit
             validStreams.isNotEmpty() || uiState.streams.isNotEmpty() -> {
@@ -1039,92 +1061,9 @@ private enum class FocusSection {
 private data class PendingAutoPlayRequest(
     val season: Int?,
     val episode: Int?,
-    val startPositionMs: Long?
+    val startPositionMs: Long?,
+    val requestedAtMs: Long
 )
-
-/** Score quality from ALL stream text (source + quality + addonName) for more accurate detection */
-private fun qualityScoreForStream(stream: com.arflix.tv.data.model.StreamSource): Int {
-    val combined = listOfNotNull(stream.quality, stream.source, stream.addonName).joinToString(" ")
-    return when {
-        combined.contains("2160p", ignoreCase = true) || DetailsScreenRegexes.FOUR_K_REGEX.containsMatchIn(combined) -> 4
-        combined.contains("1080p", ignoreCase = true) -> 3
-        combined.contains("720p", ignoreCase = true) -> 2
-        combined.contains("480p", ignoreCase = true) -> 1
-        else -> 0 // Truly unknown
-    }
-}
-
-private fun bestAutoPlayStream(
-    streams: List<com.arflix.tv.data.model.StreamSource>,
-    minQualityScore: Int
-): com.arflix.tv.data.model.StreamSource? {
-    return streams
-        .asSequence()
-        .filter { stream ->
-            stream.behaviorHints?.notWebReady != true &&
-                qualityScoreForStream(stream) >= minQualityScore
-        }
-        .sortedWith(
-            compareByDescending<com.arflix.tv.data.model.StreamSource> { qualityScoreForStream(it) }
-                .thenByDescending { if (it.behaviorHints?.cached == true) 1 else 0 }
-                .thenByDescending { autoPlaySizeBytes(it) }
-                .thenBy { it.addonName.lowercase() }
-                .thenBy { it.source.lowercase() }
-        )
-        .firstOrNull()
-}
-
-private fun autoPlaySizeBytes(stream: com.arflix.tv.data.model.StreamSource): Long {
-    stream.sizeBytes?.let { return it }
-    val raw = stream.size.trim()
-    if (raw.isBlank()) return 0L
-    val match = Regex("""(?i)(\d+(?:[\.,]\d+)?)\s*(TB|GB|MB|KB|B|GiB|MiB|KiB)?""")
-        .find(raw)
-        ?: return 0L
-    val value = match.groupValues[1].replace(',', '.').toDoubleOrNull() ?: return 0L
-    val unit = match.groupValues.getOrNull(2)?.uppercase(Locale.US).orEmpty()
-    val multiplier = when (unit) {
-        "TB" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
-        "GB", "GIB" -> 1024.0 * 1024.0 * 1024.0
-        "MB", "MIB" -> 1024.0 * 1024.0
-        "KB", "KIB" -> 1024.0
-        else -> 1.0
-    }
-    return (value * multiplier).toLong()
-}
-
-private fun minQualityThreshold(value: String): Int {
-    return when (value.trim().lowercase()) {
-        "720p", "hd" -> 2
-        "1080p", "fullhd", "fhd" -> 3
-        "4k", "2160p", "uhd" -> 4
-        else -> 0
-    }
-}
-
-private fun isAutoPlayableStream(stream: com.arflix.tv.data.model.StreamSource): Boolean {
-    val url = stream.url?.trim().orEmpty()
-    if (!url.startsWith("http", ignoreCase = true)) return false
-    return !isPendingDebridStream(stream)
-}
-
-private fun isPendingDebridStream(stream: com.arflix.tv.data.model.StreamSource): Boolean {
-    val text = listOfNotNull(stream.source, stream.addonName, stream.quality, stream.url)
-        .joinToString(" ")
-        .lowercase()
-    return listOf(
-        "torrent being downloaded",
-        "being downloaded",
-        "still downloading",
-        "queued",
-        "not cached",
-        "uncached",
-        "cache pending",
-        "caching",
-        "processing torrent",
-        "download in progress"
-    ).any { text.contains(it) }
-}
 
 private fun handleLeft(
     section: FocusSection,
