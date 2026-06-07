@@ -1110,6 +1110,13 @@ class CatalogRepository @Inject constructor(
         val normalizedRef = config.sourceRef?.trim().takeUnless { it.isNullOrBlank() }
         val bundledPreinstalled = isBundledPreinstalledCatalogId(config.id)
         val sourceRefAddon = parseAddonSourceRef(normalizedRef)
+        val sourceTypeName = runCatching { config.sourceType.name }
+            .getOrDefault(CatalogSourceType.PREINSTALLED.name)
+        val configKind = runCatching { config.kind.name }
+            .mapCatching { CatalogKind.valueOf(it) }
+            .getOrDefault(CatalogKind.STANDARD)
+        val safeCollectionSources = config.collectionSources.orEmpty()
+        val safeRequiredAddonUrls = config.requiredAddonUrls.orEmpty()
         val normalizedCollectionTileShape = runCatching {
             CollectionTileShape.valueOf(config.collectionTileShape.name)
         }.getOrDefault(CollectionTileShape.LANDSCAPE)
@@ -1121,14 +1128,14 @@ class CatalogRepository @Inject constructor(
             ?: sourceRefAddon?.third
         val normalizedAddonName = config.addonName?.trim().takeUnless { it.isNullOrBlank() }
         val inferredType = parseSourceTypeCompat(
-            raw = config.sourceType.name,
+            raw = sourceTypeName,
             sourceUrl = normalizedUrl,
             sourceRef = normalizedRef
         )
         val normalizedKind = when {
-            config.kind == CatalogKind.COLLECTION_RAIL -> CatalogKind.COLLECTION_RAIL
-            config.collectionSources.isNotEmpty() -> CatalogKind.COLLECTION
-            else -> config.kind
+            configKind == CatalogKind.COLLECTION_RAIL -> CatalogKind.COLLECTION_RAIL
+            safeCollectionSources.isNotEmpty() -> CatalogKind.COLLECTION
+            else -> configKind
         }
         val normalizedPreinstalled = when {
             bundledPreinstalled -> true
@@ -1153,10 +1160,11 @@ class CatalogRepository @Inject constructor(
             collectionHeroImageUrl = config.collectionHeroImageUrl?.trim().takeUnless { it.isNullOrBlank() },
             collectionHeroGifUrl = config.collectionHeroGifUrl?.trim().takeUnless { it.isNullOrBlank() },
             collectionHeroVideoUrl = config.collectionHeroVideoUrl?.trim().takeUnless { it.isNullOrBlank() },
+            collectionClearLogoUrl = config.collectionClearLogoUrl?.trim().takeUnless { it.isNullOrBlank() },
             collectionTileShape = normalizedCollectionTileShape,
             collectionHideTitle = config.collectionHideTitle,
-            collectionSources = config.collectionSources,
-            requiredAddonUrls = config.requiredAddonUrls.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+            collectionSources = safeCollectionSources,
+            requiredAddonUrls = safeRequiredAddonUrls.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         )
     }
 

@@ -2635,7 +2635,7 @@ private fun MobileHomeRowsLayer(
 
         itemsIndexed(
             items = categories,
-            key = { _, category -> category.id },
+            key = { index, category -> "mobile_home_row_${category.id}_$index" },
             contentType = { _, _ -> "mobile_home_category_row" }
         ) { _, category ->
             val isContinueWatching = category.id == "continue_watching"
@@ -2713,11 +2713,11 @@ private fun MobileHomeRowsLayer(
                 ) {
                     itemsIndexed(
                         itemsToRender,
-                        key = { _, item ->
+                        key = { index, item ->
                             if (item.isPlaceholder) "placeholder_${category.id}_${item.id}"
                             else {
                                 val episodeSuffix = if (item.nextEpisode != null) "_S${item.nextEpisode.seasonNumber}E${item.nextEpisode.episodeNumber}" else ""
-                                "${item.mediaType.name}-${item.id}${episodeSuffix}"
+                                "${item.mediaType.name}-${item.id}${episodeSuffix}_$index"
                             }
                         },
                         contentType = { _, item -> if (item.isPlaceholder) "placeholder_card" else "${item.mediaType.name}_mobile_card" }
@@ -2965,7 +2965,7 @@ private fun TvHomeRowsLayer(
             ) {
                 itemsIndexed(
                     items = renderedCategories,
-                    key = { _, category -> category.id },
+                    key = { index, category -> "tv_home_row_${category.id}_${rowWindowStart + index}" },
                     contentType = { _, category ->
                         when {
                             category.id.startsWith("collection_row_") -> "home_collection_row"
@@ -3391,9 +3391,9 @@ private fun ContentRow(
             ) {
                 itemsIndexed(
                     itemsToRender,
-                    key = { _, item ->
+                    key = { index, item ->
                         if (item.isPlaceholder) "placeholder_${category.id}_${item.id}"
-                        else homeRowItemKey(item)
+                        else "${homeRowItemKey(item)}_$index"
                     },
                     contentType = { index, item ->
                         when {

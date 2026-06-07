@@ -7,10 +7,8 @@ import android.graphics.Bitmap
 import android.os.Build
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
-import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -246,14 +244,9 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
      * Schedule periodic Trakt data sync
      */
     fun scheduleTraktSyncIfNeeded() {
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-
         // Use INCREMENTAL sync on startup for fast app launch
         // Full sync only happens on periodic schedule or explicit user action
         val oneTimeRequest = OneTimeWorkRequestBuilder<TraktSyncWorker>()
-            .setConstraints(constraints)
             // Defer startup sync to keep first-run navigation and scrolling smooth.
             .setInitialDelay(2, TimeUnit.MINUTES)
             .setInputData(
@@ -265,7 +258,6 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
         val syncRequest = PeriodicWorkRequestBuilder<TraktSyncWorker>(
             TraktSyncWorker.SYNC_INTERVAL_HOURS, TimeUnit.HOURS
         )
-            .setConstraints(constraints)
             .addTag(TraktSyncWorker.TAG)
             .build()
 
