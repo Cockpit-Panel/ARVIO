@@ -35,7 +35,7 @@ class CloudSyncCoordinator @Inject constructor(
             if (!started.compareAndSet(false, true)) return
             collectorJob = scope.launch {
                 invalidationBus.events.collectLatest { invalidation ->
-                    val userId = runCatching { authRepository.getCurrentUserId() }.getOrNull()
+                    val userId = runCatching { authRepository.getCurrentUserIdForSync() }.getOrNull()
                     if (userId.isNullOrBlank()) {
                         cloudSyncRepository.markLocalStateDirtyNow()
                         CloudSyncWorker.enqueueRecovery(context)
@@ -76,7 +76,7 @@ class CloudSyncCoordinator @Inject constructor(
                 }
                 delay(backoffMs)
 
-                val userId = runCatching { authRepository.getCurrentUserId() }.getOrNull()
+                val userId = runCatching { authRepository.getCurrentUserIdForSync() }.getOrNull()
                 if (userId.isNullOrBlank()) {
                     cloudSyncRepository.markLocalStateDirtyNow()
                     CloudSyncWorker.enqueueRecovery(context)

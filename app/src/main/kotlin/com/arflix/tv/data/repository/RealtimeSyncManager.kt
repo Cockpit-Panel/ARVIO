@@ -151,16 +151,15 @@ class RealtimeSyncManager @Inject constructor(
     private fun connectWebSocket() {
         if (!isRunning.get()) return
 
-        val userId = authRepository.getCurrentUserId()
-        if (userId.isNullOrBlank()) {
-            Log.w(TAG, "Not logged in, skipping WebSocket connection")
-            _syncStatusFlow.value = CloudSyncStatus.NOT_SIGNED_IN
-            scheduleReconnect()
-            return
-        }
-
         _syncStatusFlow.value = CloudSyncStatus.RECONNECTING
         scope.launch {
+            val userId = authRepository.getCurrentUserIdForSync()
+            if (userId.isNullOrBlank()) {
+                Log.w(TAG, "Not logged in, skipping WebSocket connection")
+                _syncStatusFlow.value = CloudSyncStatus.NOT_SIGNED_IN
+                scheduleReconnect()
+                return@launch
+            }
             val accessToken = authRepository.getAccessToken()
             if (accessToken.isNullOrBlank()) {
                 Log.w(TAG, "No access token, skipping WebSocket connection")

@@ -2,6 +2,7 @@ package com.arflix.tv.data.repository
 
 import android.content.Context
 import android.util.Base64
+import android.util.Log
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
@@ -100,6 +101,11 @@ private data class UserSettingsAccountSyncUpdate(
 )
 
 @Serializable
+private data class UserSettingsSettingsUpdate(
+    val settings: JsonObject
+)
+
+@Serializable
 private data class ProfileAccountSyncRow(
     val addons: String? = null
 )
@@ -144,6 +150,14 @@ internal fun accountSyncPayloadRestoreRank(payload: String): Int {
         profileCount == null -> 20
         else -> 10
     }
+}
+
+internal fun accountSyncPayloadSaveSucceeded(
+    accountSyncSaved: Boolean,
+    userSettingsSaved: Boolean,
+    profileAddonsSaved: Boolean
+): Boolean {
+    return accountSyncSaved || userSettingsSaved || profileAddonsSaved
 }
 
 private fun com.google.gson.JsonObject.isPlaceholderCloudProfile(): Boolean {
@@ -817,7 +831,7 @@ class AuthRepository @Inject constructor(
         }
     }
 
-    private suspend fun getCurrentUserIdForSync(): String? {
+    suspend fun getCurrentUserIdForSync(): String? {
         getCurrentUserId()?.takeIf { it.isNotBlank() }?.let { return it }
 
         val session = ensureValidSession()
@@ -1208,18 +1222,7 @@ class AuthRepository @Inject constructor(
 
     suspend fun saveAccountSyncPayload(payload: String): Result<Unit> {
         val userId = getCurrentUserIdForSync() ?: return Result.failure(Exception("Not logged in"))
-        val accountSyncResult = runCatching {
-            ensureValidSession()
-            supabase.postgrest
-                .from("account_sync_state")
-                .upsert(
-                    mapOf(
-                        "user_id" to userId,
-                        "payload" to payload,
-                        "updated_at" to Clock.System.now().toString()
-                    )
-                )
-        }
+        val accountSyncResult = saveAccountSyncPayloadToAccountSyncState(userId, payload)
         val userSettingsResult = saveAccountSyncPayloadToUserSettings(userId, payload)
         val profileAddonsResult = saveAccountSyncPayloadToProfileAddons(userId, payload)
 
@@ -1238,6 +1241,22 @@ class AuthRepository @Inject constructor(
             message = "primary_save_failed fallback_user_settings=${userSettingsResult.isSuccess} fallback_profile_addons=${profileAddonsResult.isSuccess}",
             severity = "warning"
         )
+        Log.w(
+            TAG,
+            "Primary account sync save failed; fallback_user_settings=${userSettingsResult.isSuccess} " +
+                "fallback_profile_addons=${profileAddonsResult.isSuccess}",
+            accountSyncResult.exceptionOrNull()
+        )
+
+        if (
+            accountSyncPayloadSaveSucceeded(
+                accountSyncSaved = false,
+                userSettingsSaved = userSettingsResult.isSuccess,
+                profileAddonsSaved = profileAddonsResult.isSuccess
+            )
+        ) {
+            return Result.success(Unit)
+        }
 
         return Result.failure(
             accountSyncResult.exceptionOrNull()
@@ -1245,6 +1264,45 @@ class AuthRepository @Inject constructor(
                 ?: profileAddonsResult.exceptionOrNull()
                 ?: Exception("Cloud sync save failed")
         )
+    }
+
+    private suspend fun saveAccountSyncPayloadToAccountSyncState(userId: String, payload: String): Result<Unit> {
+        return try {
+            ensureValidSession()
+            val updatedAt = Clock.System.now().toString()
+            val existing = supabase.postgrest
+                .from("account_sync_state")
+                .select {
+                    filter { eq("user_id", userId) }
+                }
+                .decodeSingleOrNull<AccountSyncStateRow>()
+
+            if (existing != null) {
+                supabase.postgrest
+                    .from("account_sync_state")
+                    .update(
+                        mapOf(
+                            "payload" to payload,
+                            "updated_at" to updatedAt
+                        )
+                    ) {
+                        filter { eq("user_id", userId) }
+                    }
+            } else {
+                supabase.postgrest
+                    .from("account_sync_state")
+                    .insert(
+                        mapOf(
+                            "user_id" to userId,
+                            "payload" to payload,
+                            "updated_at" to updatedAt
+                        )
+                    )
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     private suspend fun loadAccountSyncPayloadFromUserSettings(): Result<AccountSyncPayloadCandidate?> {
@@ -1299,9 +1357,17 @@ class AuthRepository @Inject constructor(
                 put(ACCOUNT_SYNC_UPDATED_AT_KEY, JsonPrimitive(Clock.System.now().toString()))
             }
 
-            supabase.postgrest
-                .from("user_settings")
-                .upsert(UserSettingsAccountSyncUpdate(user_id = userId, settings = updatedSettings))
+            if (existingSettings != null) {
+                supabase.postgrest
+                    .from("user_settings")
+                    .update(UserSettingsSettingsUpdate(settings = updatedSettings)) {
+                        filter { eq("user_id", userId) }
+                    }
+            } else {
+                supabase.postgrest
+                    .from("user_settings")
+                    .insert(UserSettingsAccountSyncUpdate(user_id = userId, settings = updatedSettings))
+            }
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)

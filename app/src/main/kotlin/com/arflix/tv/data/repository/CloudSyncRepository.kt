@@ -136,6 +136,24 @@ class CloudSyncRepository @Inject constructor(
         return hasMeaningfulLocalProfiles(profileRepository.getProfiles())
     }
 
+    private fun shouldRestoreRemoteBeforePush(localPayload: String, remotePayload: String): Boolean {
+        val localRank = accountSyncPayloadRestoreRank(localPayload)
+        val remoteRank = accountSyncPayloadRestoreRank(remotePayload)
+        val localProfileCount = cloudPayloadProfileCount(localPayload)
+        val remoteProfileCount = cloudPayloadProfileCount(remotePayload)
+
+        if (
+            localProfileCount != null &&
+            remoteProfileCount != null &&
+            remoteProfileCount > localProfileCount &&
+            remoteRank >= localRank
+        ) {
+            return true
+        }
+
+        return remoteRank >= 70 && localRank < 70
+    }
+
     private fun mergeAddonsForSharedRestore(addonLists: Iterable<List<Addon>>): List<Addon> {
         val merged = LinkedHashMap<String, Addon>()
         addonLists.flatten().forEach { addon ->
@@ -647,7 +665,9 @@ class CloudSyncRepository @Inject constructor(
         }
         lastPushAttemptAt = now
 
-        if (authRepository.getCurrentUserId().isNullOrBlank()) {
+        val userId = authRepository.getCurrentUserIdForSync()
+        if (userId.isNullOrBlank()) {
+            Log.w(TAG, "Push skipped: no valid cloud user session dirty=$isPushDirty force=$force")
             AppLogger.breadcrumb(
                 tag = "CloudSync",
                 message = "push_skipped_not_logged_in dirty=$isPushDirty",
@@ -667,6 +687,45 @@ class CloudSyncRepository @Inject constructor(
                 )
             )
             return Result.failure(it)
+        }
+
+        val existingRemotePayload = authRepository.loadAccountSyncPayload()
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+        if (
+            existingRemotePayload != null &&
+            shouldRestoreRemoteBeforePush(payload, existingRemotePayload)
+        ) {
+            val localProfileCount = cloudPayloadProfileCount(payload)
+            val remoteProfileCount = cloudPayloadProfileCount(existingRemotePayload)
+            Log.w(
+                TAG,
+                "Push blocked because remote snapshot is richer; local_profiles=$localProfileCount remote_profiles=$remoteProfileCount"
+            )
+            AppLogger.breadcrumb(
+                tag = "CloudSync",
+                message = "push_blocked_remote_richer local_profiles=$localProfileCount remote_profiles=$remoteProfileCount",
+                severity = "warning"
+            )
+            return runCatching {
+                invalidationBus.suppressDuringRemoteApply {
+                    clearStaleLocalDirtyBeforeRemoteRestore()
+                    applyCloudPayload(existingRemotePayload)
+                }
+                markCloudPayloadApplied(existingRemotePayload, existingRemotePayload.hashCode())
+                clearLocalDirtyAfterSuccessfulPush()
+            }.fold(
+                onSuccess = {
+                    Log.i(TAG, "Restored richer remote snapshot before push")
+                    Result.success(Unit)
+                },
+                onFailure = { error ->
+                    markPushFailedDirty()
+                    pushFailureCount++
+                    Log.w(TAG, "Failed to restore richer remote snapshot before push: ${error.message}", error)
+                    Result.failure(error)
+                }
+            )
         }
 
         val payloadHash = runCatching {
@@ -690,7 +749,7 @@ class CloudSyncRepository @Inject constructor(
             Log.i(TAG, "Push succeeded size=${payloadSizeBucket(payload)}")
             AppLogger.breadcrumb(
                 tag = "CloudSync",
-                message = "push_success size=${payloadSizeBucket(payload)}",
+                message = "push_success size=${payloadSizeBucket(payload)} user=${userId.take(8)}",
                 severity = "info"
             )
             onPushCompleted?.invoke()

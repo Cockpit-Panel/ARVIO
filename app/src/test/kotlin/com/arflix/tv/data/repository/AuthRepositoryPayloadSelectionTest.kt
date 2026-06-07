@@ -100,4 +100,22 @@ class AuthRepositoryPayloadSelectionTest {
                 accountSyncPayloadRestoreRank(newerAccountSyncSnapshot)
         )
     }
+
+    @Test
+    fun `fallback mirror save counts when canonical account sync is blocked`() {
+        assertTrue(
+            accountSyncPayloadSaveSucceeded(
+                accountSyncSaved = false,
+                userSettingsSaved = true,
+                profileAddonsSaved = false
+            )
+        )
+        assertTrue(
+            accountSyncPayloadSaveSucceeded(
+                accountSyncSaved = false,
+                userSettingsSaved = false,
+                profileAddonsSaved = true
+            )
+        )
+    }
 }

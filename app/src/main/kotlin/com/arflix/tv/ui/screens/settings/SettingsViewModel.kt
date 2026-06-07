@@ -2624,7 +2624,7 @@ class SettingsViewModel @Inject constructor(
             if (pushResult == null) {
                 _uiState.value = _uiState.value.copy(
                     isForceCloudSyncing = false,
-                    toastMessage = "Cloud sync upload timed out — try again",
+                    toastMessage = "Cloud sync upload timed out - try again",
                     toastType = ToastType.ERROR
                 )
                 return@launch
@@ -2679,14 +2679,14 @@ class SettingsViewModel @Inject constructor(
     }
 
     private suspend fun ensureCloudSyncSession(): Boolean {
-        if (authRepository.getCurrentUserId().isNullOrBlank()) {
+        if (authRepository.getCurrentUserIdForSync().isNullOrBlank()) {
             authRepository.checkAuthState()
         }
-        if (authRepository.getCurrentUserId().isNullOrBlank()) {
+        if (authRepository.getCurrentUserIdForSync().isNullOrBlank()) {
             authRepository.getAccessToken()
             authRepository.checkAuthState()
         }
-        return authRepository.getCurrentUserId().isNullOrBlank().not()
+        return authRepository.getCurrentUserIdForSync().isNullOrBlank().not()
     }
 
     private suspend fun restoreCloudStateToLocalInternal(
