@@ -250,10 +250,25 @@ fun PlayerScreen(
     // since the Chromecast default receiver fetches the URL directly without those headers.
     val streamNeedsHeaders = uiState.selectedStream
         ?.behaviorHints?.proxyHeaders?.request?.isNotEmpty() == true
-    val isConstrainedPlaybackDevice = remember(context, deviceType) {
-        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    val playbackActivityManager = remember(context) {
+        context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    }
+    val playbackMemoryClassMb = remember(playbackActivityManager) {
+        playbackActivityManager?.memoryClass ?: 384
+    }
+    val isLowRamPlaybackDevice = remember(playbackActivityManager) {
+        playbackActivityManager?.isLowRamDevice == true
+    }
+    val isConstrainedPlaybackDevice = remember(deviceType, isLowRamPlaybackDevice, playbackMemoryClassMb) {
         deviceType == com.arflix.tv.util.DeviceType.TV &&
-            (activityManager?.isLowRamDevice == true || (activityManager?.memoryClass ?: Int.MAX_VALUE) <= 384)
+            (isLowRamPlaybackDevice || playbackMemoryClassMb <= 384)
+    }
+    val playbackBufferProfile = remember(isLowRamPlaybackDevice, playbackMemoryClassMb, deviceType) {
+        buildPlaybackBufferProfile(
+            memoryClassMb = playbackMemoryClassMb,
+            isLowRamDevice = isLowRamPlaybackDevice,
+            isTvDevice = deviceType == com.arflix.tv.util.DeviceType.TV
+        )
     }
     val preferExtensionDecoder = remember(deviceType) {
         deviceType == com.arflix.tv.util.DeviceType.TV &&
@@ -733,9 +748,9 @@ fun PlayerScreen(
             .setDataSourceFactory(cacheDataSourceFactory)
     }
 
-    // ExoPlayer - tuned for both small and very large (70GB+) files.
-    // Byte cap is authoritative (prioritize size over time) so high-bitrate streams
-    // cannot exhaust memory on TV devices with limited heap (384-512 MB).
+    // ExoPlayer - tuned for both small and very large files. The byte cap scales
+    // with the device heap so 4K/debrid streams get breathing room without pushing
+    // low-RAM TVs into GC pressure.
     val aiRenderersFactory = remember {
         AiSubtitleRenderersFactory(
             context = context,
@@ -743,22 +758,17 @@ fun PlayerScreen(
             scope = coroutineScope
         )
     }
-    val exoPlayer = remember(isConstrainedPlaybackDevice, preferExtensionDecoder) {
-        val targetBufferBytes = if (isConstrainedPlaybackDevice) {
-            48 * 1024 * 1024
-        } else {
-            80 * 1024 * 1024
-        }
+    val exoPlayer = remember(isConstrainedPlaybackDevice, preferExtensionDecoder, playbackBufferProfile) {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                12_000,    // minBufferMs
-                45_000,    // maxBufferMs
-                150,       // bufferForPlaybackMs
-                1_500      // bufferForPlaybackAfterRebufferMs
+                playbackBufferProfile.minBufferMs,
+                playbackBufferProfile.maxBufferMs,
+                playbackBufferProfile.bufferForPlaybackMs,
+                playbackBufferProfile.bufferForPlaybackAfterRebufferMs
             )
-            .setTargetBufferBytes(targetBufferBytes)
+            .setTargetBufferBytes(playbackBufferProfile.targetBufferBytes)
             .setPrioritizeTimeOverSizeThresholds(false) // byte cap is authoritative
-            .setBackBuffer(3_000, false)                // minimal back buffer
+            .setBackBuffer(playbackBufferProfile.backBufferMs, false)
             .build()
 
         ExoPlayer.Builder(context)
@@ -1429,8 +1439,8 @@ fun PlayerScreen(
             } else {
                 exoPlayer.setMediaSource(mediaSource)
             }
-            // Let ExoPlayer's LoadControl handle buffering (bufferForPlaybackMs = 150ms).
-            // No manual startup gate — trust the CDN/debrid to deliver fast enough.
+            // Let ExoPlayer's RAM-aware LoadControl handle startup buffering.
+            // No manual startup gate - trust the CDN/debrid while keeping enough safety margin.
             exoPlayer.playWhenReady = true
             exoPlayer.prepare()
             playbackStartupDiag(
@@ -4829,6 +4839,66 @@ private fun subtitleMimeTypeFromUrl(url: String): String {
         // parse failures when the actual content is SRT.
         else -> MimeTypes.APPLICATION_SUBRIP
     }
+}
+
+private data class PlaybackBufferProfile(
+    val minBufferMs: Int,
+    val maxBufferMs: Int,
+    val bufferForPlaybackMs: Int,
+    val bufferForPlaybackAfterRebufferMs: Int,
+    val targetBufferBytes: Int,
+    val backBufferMs: Int
+)
+
+private fun buildPlaybackBufferProfile(
+    memoryClassMb: Int,
+    isLowRamDevice: Boolean,
+    isTvDevice: Boolean
+): PlaybackBufferProfile {
+    val heapMb = memoryClassMb.coerceAtLeast(256)
+    val targetMb = when {
+        isLowRamDevice || heapMb <= 256 -> 64
+        heapMb <= 384 -> 96
+        heapMb <= 512 -> 128
+        heapMb <= 768 -> 192
+        else -> 256
+    }
+    val minBufferMs = when {
+        isLowRamDevice || heapMb <= 256 -> 18_000
+        heapMb <= 384 -> 22_000
+        heapMb <= 512 -> 28_000
+        else -> 32_000
+    }
+    val maxBufferMs = when {
+        isLowRamDevice || heapMb <= 256 -> 60_000
+        heapMb <= 384 -> 80_000
+        heapMb <= 512 -> 105_000
+        else -> 135_000
+    }
+    val startBufferMs = when {
+        isTvDevice && (isLowRamDevice || heapMb <= 384) -> 550
+        isTvDevice -> 450
+        else -> 350
+    }
+    val rebufferMs = when {
+        isLowRamDevice || heapMb <= 256 -> 3_000
+        heapMb <= 384 -> 3_500
+        else -> 4_000
+    }
+    val backBufferMs = when {
+        isLowRamDevice || heapMb <= 256 -> 2_000
+        heapMb <= 384 -> 3_000
+        else -> 5_000
+    }
+
+    return PlaybackBufferProfile(
+        minBufferMs = minBufferMs,
+        maxBufferMs = maxBufferMs,
+        bufferForPlaybackMs = startBufferMs,
+        bufferForPlaybackAfterRebufferMs = rebufferMs,
+        targetBufferBytes = targetMb * 1024 * 1024,
+        backBufferMs = backBufferMs
+    )
 }
 
 private fun estimateInitialStartupTimeoutMs(

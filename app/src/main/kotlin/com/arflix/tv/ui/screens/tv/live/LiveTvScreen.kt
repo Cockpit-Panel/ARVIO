@@ -3,6 +3,7 @@
 package com.arflix.tv.ui.screens.tv.live
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
@@ -1251,17 +1252,24 @@ fun LiveTvScreen(
         DefaultMediaSourceFactory(context)
             .setDataSourceFactory(iptvDataSourceFactory)
     }
-    val exoPlayer = remember {
+    val livePlaybackBufferProfile = remember(context) {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        buildLiveTvBufferProfile(
+            memoryClassMb = activityManager?.memoryClass ?: 384,
+            isLowRamDevice = activityManager?.isLowRamDevice == true
+        )
+    }
+    val exoPlayer = remember(livePlaybackBufferProfile) {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                20_000,
-                120_000,
-                1_000,
-                3_000
+                livePlaybackBufferProfile.minBufferMs,
+                livePlaybackBufferProfile.maxBufferMs,
+                livePlaybackBufferProfile.bufferForPlaybackMs,
+                livePlaybackBufferProfile.bufferForPlaybackAfterRebufferMs
             )
-            .setTargetBufferBytes(80 * 1024 * 1024)
+            .setTargetBufferBytes(livePlaybackBufferProfile.targetBufferBytes)
             .setPrioritizeTimeOverSizeThresholds(true)
-            .setBackBuffer(10_000, true)
+            .setBackBuffer(livePlaybackBufferProfile.backBufferMs, true)
             .build()
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -2341,6 +2349,41 @@ private fun classifyPlaybackError(error: PlaybackException): String {
         "decoder" in name || "audio" in name || "video" in name -> "device codec issue"
         else -> "source did not start"
     }
+}
+
+private data class LiveTvBufferProfile(
+    val minBufferMs: Int,
+    val maxBufferMs: Int,
+    val bufferForPlaybackMs: Int,
+    val bufferForPlaybackAfterRebufferMs: Int,
+    val targetBufferBytes: Int,
+    val backBufferMs: Int,
+)
+
+private fun buildLiveTvBufferProfile(
+    memoryClassMb: Int,
+    isLowRamDevice: Boolean,
+): LiveTvBufferProfile {
+    val heapMb = memoryClassMb.coerceAtLeast(256)
+    val targetMb = when {
+        isLowRamDevice || heapMb <= 256 -> 64
+        heapMb <= 384 -> 96
+        heapMb <= 512 -> 128
+        else -> 160
+    }
+    val minBufferMs = if (isLowRamDevice || heapMb <= 384) 20_000 else 25_000
+    val maxBufferMs = if (isLowRamDevice || heapMb <= 384) 120_000 else 150_000
+    val rebufferMs = if (isLowRamDevice || heapMb <= 384) 3_000 else 4_000
+    val backBufferMs = if (isLowRamDevice || heapMb <= 384) 10_000 else 15_000
+
+    return LiveTvBufferProfile(
+        minBufferMs = minBufferMs,
+        maxBufferMs = maxBufferMs,
+        bufferForPlaybackMs = 1_000,
+        bufferForPlaybackAfterRebufferMs = rebufferMs,
+        targetBufferBytes = targetMb * 1024 * 1024,
+        backBufferMs = backBufferMs,
+    )
 }
 
 private fun httpResponseCode(error: PlaybackException): Int? {

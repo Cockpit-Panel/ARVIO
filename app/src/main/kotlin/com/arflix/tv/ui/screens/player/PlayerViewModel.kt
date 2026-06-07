@@ -1683,6 +1683,7 @@ class PlayerViewModel @Inject constructor(
 
     private fun prewarmTopStreams(streams: List<StreamSource>, preferredLanguage: String) {
         if (streams.isEmpty()) return
+        if (!_uiState.value.selectedStreamUrl.isNullOrBlank()) return
         val topStreams = sortStreamsByQualityAndSize(streams, preferredLanguage).take(3)
         val prewarmKey = topStreams.joinToString("|") { stream ->
             "${stream.addonId}:${stream.source}:${stream.url?.substringBefore('|')?.substringBefore('#')}"

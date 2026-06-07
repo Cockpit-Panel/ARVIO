@@ -3,6 +3,7 @@
 
 package com.arflix.tv.ui.screens.tv
 
+import android.app.ActivityManager
 import android.content.Context
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
@@ -198,16 +199,21 @@ private fun createTvExoPlayer(
     context: Context,
     mediaSourceFactory: DefaultMediaSourceFactory
 ): ExoPlayer {
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    val bufferProfile = buildLegacyTvBufferProfile(
+        memoryClassMb = activityManager?.memoryClass ?: 384,
+        isLowRamDevice = activityManager?.isLowRamDevice == true
+    )
     val loadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
-            20_000,
-            120_000,
-            1_000,
-            3_000
+            bufferProfile.minBufferMs,
+            bufferProfile.maxBufferMs,
+            bufferProfile.bufferForPlaybackMs,
+            bufferProfile.bufferForPlaybackAfterRebufferMs
         )
-        .setTargetBufferBytes(80 * 1024 * 1024)
+        .setTargetBufferBytes(bufferProfile.targetBufferBytes)
         .setPrioritizeTimeOverSizeThresholds(true)
-        .setBackBuffer(10_000, true)
+        .setBackBuffer(bufferProfile.backBufferMs, true)
         .build()
 
     return ExoPlayer.Builder(context)
@@ -218,6 +224,41 @@ private fun createTvExoPlayer(
             playWhenReady = true
             videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
         }
+}
+
+private data class LegacyTvBufferProfile(
+    val minBufferMs: Int,
+    val maxBufferMs: Int,
+    val bufferForPlaybackMs: Int,
+    val bufferForPlaybackAfterRebufferMs: Int,
+    val targetBufferBytes: Int,
+    val backBufferMs: Int,
+)
+
+private fun buildLegacyTvBufferProfile(
+    memoryClassMb: Int,
+    isLowRamDevice: Boolean,
+): LegacyTvBufferProfile {
+    val heapMb = memoryClassMb.coerceAtLeast(256)
+    val targetMb = when {
+        isLowRamDevice || heapMb <= 256 -> 64
+        heapMb <= 384 -> 96
+        heapMb <= 512 -> 128
+        else -> 160
+    }
+    val minBufferMs = if (isLowRamDevice || heapMb <= 384) 20_000 else 25_000
+    val maxBufferMs = if (isLowRamDevice || heapMb <= 384) 120_000 else 150_000
+    val rebufferMs = if (isLowRamDevice || heapMb <= 384) 3_000 else 4_000
+    val backBufferMs = if (isLowRamDevice || heapMb <= 384) 10_000 else 15_000
+
+    return LegacyTvBufferProfile(
+        minBufferMs = minBufferMs,
+        maxBufferMs = maxBufferMs,
+        bufferForPlaybackMs = 1_000,
+        bufferForPlaybackAfterRebufferMs = rebufferMs,
+        targetBufferBytes = targetMb * 1024 * 1024,
+        backBufferMs = backBufferMs,
+    )
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)
