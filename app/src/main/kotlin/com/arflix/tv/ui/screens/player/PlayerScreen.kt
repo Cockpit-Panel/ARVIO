@@ -449,6 +449,7 @@ fun PlayerScreen(
     var midPlaybackRecoveryAttempts by remember { mutableIntStateOf(0) }
     var blackVideoRecoveryStage by remember { mutableIntStateOf(0) } // 0=none, 1=HEVC forced, 2=AVC forced
     var blackVideoReadySinceMs by remember { mutableStateOf<Long?>(null) }
+    var readyPlayingSinceMs by remember { mutableStateOf<Long?>(null) }
     val heavyStartupMaxRetries = 1
     var rebufferRecoverAttempted by remember { mutableStateOf(false) }
     var longRebufferCount by remember { mutableIntStateOf(0) }
@@ -574,6 +575,7 @@ fun PlayerScreen(
         triedStreamIndexes = emptySet()
         isAutoAdvancing = false
         userSelectedSourceManually = false
+        readyPlayingSinceMs = null
         viewModel.loadMedia(
             mediaType = mediaType,
             mediaId = mediaId,
@@ -1339,6 +1341,7 @@ fun PlayerScreen(
             val prepareStartMs = streamSelectedTime ?: System.currentTimeMillis()
             bufferingStartTime = null
             hasPlaybackStarted = false  // Reset for new stream
+            readyPlayingSinceMs = null
             playbackIssueReported = false
             rebufferRecoverAttempted = false
             longRebufferCount = 0
@@ -1671,13 +1674,22 @@ fun PlayerScreen(
             }
             isPlaying = exoPlayer.isPlaying
             isBuffering = exoPlayer.playbackState == Player.STATE_BUFFERING
+            val loopNowMs = System.currentTimeMillis()
+            val readyAndPlaying = exoPlayer.playbackState == Player.STATE_READY && exoPlayer.isPlaying
+            if (readyAndPlaying) {
+                if (readyPlayingSinceMs == null) {
+                    readyPlayingSinceMs = loopNowMs
+                }
+            } else {
+                readyPlayingSinceMs = null
+            }
 
             // Buffering watchdog - detect long buffering but do not force a source error popup.
             if (isBuffering && hasPlaybackStarted) {
                 if (bufferingStartTime == null) {
-                    bufferingStartTime = System.currentTimeMillis()
+                    bufferingStartTime = loopNowMs
                 } else {
-                    val bufferingDuration = System.currentTimeMillis() - (bufferingStartTime ?: 0L)
+                    val bufferingDuration = loopNowMs - (bufferingStartTime ?: 0L)
                     if (bufferingDuration > bufferingTimeoutMs) {
                         bufferingStartTime = null
                         longRebufferCount += 1
@@ -1708,7 +1720,7 @@ fun PlayerScreen(
             val startupPending = uiState.selectedStreamUrl != null && !hasPlaybackStarted
             if (startupPending) {
                 val selectedAt = streamSelectedTime ?: System.currentTimeMillis()
-                val startupBufferDuration = System.currentTimeMillis() - selectedAt
+                val startupBufferDuration = loopNowMs - selectedAt
                 val isHeavyStartupSource = isLikelyHeavyStream(uiState.selectedStream)
                 if (!startupRecoverAttempted && startupBufferDuration > initialBufferingTimeoutMs) {
                     startupRecoverAttempted = true
@@ -1761,9 +1773,9 @@ fun PlayerScreen(
                     !hasVideoOutput
             if (blackVideoState) {
                 if (blackVideoReadySinceMs == null) {
-                    blackVideoReadySinceMs = System.currentTimeMillis()
+                    blackVideoReadySinceMs = loopNowMs
                 } else {
-                    val stuckMs = System.currentTimeMillis() - (blackVideoReadySinceMs ?: 0L)
+                    val stuckMs = loopNowMs - (blackVideoReadySinceMs ?: 0L)
                     val thresholdMs = if (blackVideoRecoveryStage == 0) 6_500L else 9_000L
                     if (stuckMs >= thresholdMs && blackVideoRecoveryStage < 2) {
                         val selector = exoPlayer.trackSelector as? androidx.media3.exoplayer.trackselection.DefaultTrackSelector
@@ -1785,7 +1797,7 @@ fun PlayerScreen(
                         exoPlayer.prepare()
                         exoPlayer.playWhenReady = keepPlaying
                         blackVideoRecoveryStage += 1
-                        blackVideoReadySinceMs = System.currentTimeMillis()
+                        blackVideoReadySinceMs = loopNowMs
                     }
                 }
             } else {
@@ -1793,12 +1805,18 @@ fun PlayerScreen(
             }
 
             // Mark playback as started as soon as the player is actually playing.
+            val readyPlayingGraceElapsed = readyPlayingSinceMs?.let { loopNowMs - it >= 900L } == true
             if (!hasPlaybackStarted &&
-                exoPlayer.playbackState == Player.STATE_READY &&
-                exoPlayer.isPlaying &&
-                (!hasVideoTrack || hasVideoOutput)
+                readyAndPlaying &&
+                (!hasVideoTrack || hasVideoOutput || readyPlayingGraceElapsed)
             ) {
-                markPlaybackStarted("ready_playing_poll")
+                markPlaybackStarted(
+                    if (readyPlayingGraceElapsed && hasVideoTrack && !hasVideoOutput) {
+                        "ready_playing_grace"
+                    } else {
+                        "ready_playing_poll"
+                    }
+                )
             }
 
             if (currentPosition > 0 && duration > 0) {

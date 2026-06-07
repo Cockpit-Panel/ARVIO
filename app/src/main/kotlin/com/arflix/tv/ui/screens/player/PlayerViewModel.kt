@@ -1413,13 +1413,19 @@ class PlayerViewModel @Inject constructor(
 
     fun onPlaybackStarted(startupMs: Long, startupRetries: Int, autoFailovers: Int) {
         playbackErrorReportJob?.cancel()
-        if (_uiState.value.error != null) {
-            _uiState.value = _uiState.value.copy(
+        val currentState = _uiState.value
+        if (
+            currentState.isLoading ||
+            currentState.isLoadingStreams ||
+            currentState.streamProgress != null ||
+            currentState.streamLoadPhase != null ||
+            currentState.error != null
+        ) {
+            _uiState.value = currentState.copy(
                 isLoading = false,
                 isLoadingStreams = false,
                 streamProgress = null,
                 streamLoadPhase = null,
-                sourceSearchActive = false,
                 error = null
             )
         }
@@ -1500,8 +1506,8 @@ class PlayerViewModel @Inject constructor(
             context.settingsDataStore.data.first()[defaultAudioLanguageKey()]
         }.getOrNull().orEmpty().trim()
 
-        // "None" disables language preference entirely: no forced audio language and
-        // autoplay keeps the scraping addon's own ordering (top result wins).
+        // "None" disables language preference entirely: no forced audio language,
+        // while autoplay still uses the same quality/size ordering as the source picker.
         if (setting.equals("None", ignoreCase = true)) return "none"
 
         if (setting.isNotBlank() && !setting.equals("Auto", ignoreCase = true) && !setting.equals("Auto (Original)", ignoreCase = true)) {
@@ -1555,7 +1561,7 @@ class PlayerViewModel @Inject constructor(
     }
 
     private fun autoplaySelectBest(streams: List<StreamSource>, preferredLanguage: String) {
-        val healthyStreams = streams
+        val healthyStreams = sortStreamsByQualityAndSize(streams, preferredLanguage)
         val hasExplicitPreferred =
             !currentPreferredBingeGroup.isNullOrBlank() ||
                 !currentPreferredAddonId.isNullOrBlank() ||
@@ -1633,21 +1639,17 @@ class PlayerViewModel @Inject constructor(
         streams: List<StreamSource>,
         preferredLanguage: String
     ): List<StreamSource> {
-        // "None" preference: trust the scraping addon's ordering (like Nuvio) and keep
-        // the list as returned so the addon's top result is the one autoplay picks.
-        if (preferredLanguage.equals("none", ignoreCase = true)) return streams
+        val useLanguagePreference = !preferredLanguage.equals("none", ignoreCase = true)
 
         return streams.sortedWith(
-            // Preferred audio language is the primary criterion so a release in the
-            // user's language wins over a larger / higher-quality release in another
-            // language (e.g. Polish over a bigger Russian rip). Quality and size only
-            // decide between sources that match the language preference equally.
-            compareByDescending<StreamSource> { streamLanguageScore(it, preferredLanguage) }
+            // Autoplay must match the visible source picker: stable/reachable sources first,
+            // then the highest quality and largest file. Language is only a tie-breaker.
+            compareBy<StreamSource> { streamRepository.getPlaybackHostHealthPenalty(it) }
+                .thenBy { if (it.behaviorHints?.notWebReady == true) 1 else 0 }
                 .thenByDescending { playbackPriorityScore(it) }
-                .thenBy { streamRepository.getPlaybackHostHealthPenalty(it) }
                 .thenByDescending { parseSize(it.size) }
                 .thenByDescending { if (it.behaviorHints?.cached == true) 1 else 0 }
-                .thenBy { if (it.behaviorHints?.notWebReady == true) 1 else 0 }
+                .thenByDescending { if (useLanguagePreference) streamLanguageScore(it, preferredLanguage) else 1 }
                 .thenByDescending { streamRepository.getAddonHealthBias(it.addonId) }
         )
     }
@@ -1897,6 +1899,15 @@ class PlayerViewModel @Inject constructor(
             val requestedResumePosition = resumePositionMs?.coerceAtLeast(0L)
             val selectedOriginal = stream
             playbackDiag("selectStream request=${streamDiag(stream)}")
+            _uiState.value = _uiState.value.copy(
+                selectedStream = stream,
+                isLoading = true,
+                isLoadingStreams = false,
+                streamProgress = null,
+                streamLoadPhase = "Preparing stream",
+                error = null,
+                isSetupError = false
+            )
             val resolvedResult = runCatching {
                 streamRepository.resolveStreamForPlayback(stream)
             }
