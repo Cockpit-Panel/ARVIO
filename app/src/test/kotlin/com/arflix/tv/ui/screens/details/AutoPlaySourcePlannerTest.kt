@@ -39,23 +39,41 @@ class AutoPlaySourcePlannerTest {
     }
 
     @Test
-    fun `autoplay waits while addons are still checking and stops waiting after grace`() {
+    fun `autoplay does not wait for addon completion when strong source is ready`() {
+        val strong = stream(source = "Movie 2160p REMUX", quality = "4K", size = "52 GB")
+
         assertTrue(
             shouldWaitForAutoPlaySources(
-                completedAddons = 1,
-                totalAddons = 2,
                 isLoadingStreams = false,
-                hasCandidateStreams = true,
-                elapsedMs = AUTOPLAY_SOURCE_COMPLETION_GRACE_MS - 1
+                selectedStream = strong,
+                elapsedMs = AUTOPLAY_STRONG_SOURCE_SETTLE_MS - 1
             )
         )
         assertFalse(
             shouldWaitForAutoPlaySources(
-                completedAddons = 1,
-                totalAddons = 2,
                 isLoadingStreams = false,
-                hasCandidateStreams = true,
-                elapsedMs = AUTOPLAY_SOURCE_COMPLETION_GRACE_MS
+                selectedStream = strong,
+                elapsedMs = AUTOPLAY_STRONG_SOURCE_SETTLE_MS
+            )
+        )
+    }
+
+    @Test
+    fun `autoplay gives weak source only a short settle window`() {
+        val weak = stream(source = "Movie 720p WEB-DL", quality = "720p", size = "780 MB")
+
+        assertTrue(
+            shouldWaitForAutoPlaySources(
+                isLoadingStreams = false,
+                selectedStream = weak,
+                elapsedMs = AUTOPLAY_WEAK_SOURCE_SETTLE_MS - 1
+            )
+        )
+        assertFalse(
+            shouldWaitForAutoPlaySources(
+                isLoadingStreams = false,
+                selectedStream = weak,
+                elapsedMs = AUTOPLAY_WEAK_SOURCE_SETTLE_MS
             )
         )
     }

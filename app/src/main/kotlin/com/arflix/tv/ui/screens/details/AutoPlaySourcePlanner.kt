@@ -3,8 +3,9 @@ package com.arflix.tv.ui.screens.details
 import com.arflix.tv.data.model.StreamSource
 import java.util.Locale
 
-internal const val AUTOPLAY_SOURCE_COMPLETION_GRACE_MS = 12_000L
-internal const val AUTOPLAY_SOURCE_RECHECK_MS = 350L
+internal const val AUTOPLAY_STRONG_SOURCE_SETTLE_MS = 180L
+internal const val AUTOPLAY_WEAK_SOURCE_SETTLE_MS = 900L
+internal const val AUTOPLAY_SOURCE_RECHECK_MS = 120L
 
 private val fourKRegex = Regex("""\b4[kK]\b""")
 private val sizeRegex = Regex("""(?i)(\d+(?:[\.,]\d+)?)\s*(TB|GB|MB|KB|B|GiB|MiB|KiB)?""")
@@ -53,6 +54,14 @@ internal fun bestAutoPlayStream(
                 .thenBy { it.source.lowercase() }
         )
         .firstOrNull()
+}
+
+internal fun isStrongAutoPlaySource(stream: StreamSource): Boolean {
+    val quality = qualityScoreForAutoPlay(stream)
+    val size = autoPlaySizeBytes(stream)
+    return quality >= 4 ||
+        (quality >= 3 && size >= 7L * 1024L * 1024L * 1024L) ||
+        size >= 14L * 1024L * 1024L * 1024L
 }
 
 /**
@@ -110,13 +119,13 @@ internal fun isPendingDebridStream(stream: StreamSource): Boolean {
 }
 
 internal fun shouldWaitForAutoPlaySources(
-    completedAddons: Int,
-    totalAddons: Int,
     isLoadingStreams: Boolean,
-    hasCandidateStreams: Boolean,
+    selectedStream: StreamSource?,
     elapsedMs: Long
 ): Boolean {
-    if (!hasCandidateStreams) return isLoadingStreams
-    if (elapsedMs >= AUTOPLAY_SOURCE_COMPLETION_GRACE_MS) return false
-    return totalAddons > 0 && completedAddons.coerceAtLeast(0) < totalAddons
+    if (selectedStream == null) return isLoadingStreams
+    if (isStrongAutoPlaySource(selectedStream)) {
+        return elapsedMs < AUTOPLAY_STRONG_SOURCE_SETTLE_MS
+    }
+    return elapsedMs < AUTOPLAY_WEAK_SOURCE_SETTLE_MS
 }
