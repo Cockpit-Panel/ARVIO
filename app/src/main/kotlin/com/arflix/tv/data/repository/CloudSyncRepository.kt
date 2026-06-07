@@ -111,6 +111,31 @@ class CloudSyncRepository @Inject constructor(
         else -> "gte_1mb"
     }
 
+    private fun cloudPayloadProfileCount(payload: String): Int? {
+        if (payload.isBlank()) return null
+        return runCatching {
+            val root = JSONObject(payload)
+            if (!root.has("profiles")) null else root.optJSONArray("profiles")?.length() ?: 0
+        }.getOrNull()
+    }
+
+    private fun hasMeaningfulLocalProfiles(profiles: List<Profile>): Boolean {
+        if (profiles.isEmpty()) return false
+        if (profiles.size > 1) return true
+
+        val profile = profiles.first()
+        return !profile.name.equals("Profile 1", ignoreCase = true) ||
+            profile.avatarId != 0 ||
+            profile.avatarImageVersion > 0L ||
+            profile.isKidsProfile ||
+            profile.isLocked ||
+            !profile.pin.isNullOrBlank()
+    }
+
+    suspend fun hasMeaningfulLocalProfiles(): Boolean {
+        return hasMeaningfulLocalProfiles(profileRepository.getProfiles())
+    }
+
     private fun mergeAddonsForSharedRestore(addonLists: Iterable<List<Addon>>): List<Addon> {
         val merged = LinkedHashMap<String, Addon>()
         addonLists.flatten().forEach { addon ->
@@ -743,6 +768,49 @@ class CloudSyncRepository @Inject constructor(
                 tag = "CloudSync",
                 message = "pull_no_backup",
                 severity = "info"
+            )
+            return@withLock RestoreResult.NO_BACKUP
+        }
+
+        val cloudProfileCount = cloudPayloadProfileCount(payload)
+        if (!pushPendingLocalFirst && cloudProfileCount != null && cloudProfileCount <= 0) {
+            val localProfiles = profileRepository.getProfiles()
+            if (hasMeaningfulLocalProfiles(localProfiles)) {
+                AppLogger.breadcrumb(
+                    tag = "CloudSync",
+                    message = "pull_remote_profiles_empty_seed_local local_profiles=${localProfiles.size}",
+                    severity = "warning"
+                )
+                val pushResult = pushToCloudLocked()
+                return@withLock if (pushResult.isSuccess) RestoreResult.RESTORED else RestoreResult.FAILED
+            }
+
+            Log.i(TAG, "Pull found cloud backup without usable profiles")
+            AppLogger.breadcrumb(
+                tag = "CloudSync",
+                message = "pull_remote_profiles_empty_no_restore local_profiles=${localProfiles.size}",
+                severity = "warning"
+            )
+            return@withLock RestoreResult.NO_BACKUP
+        }
+
+        if (!pushPendingLocalFirst && cloudProfileCount == null) {
+            val localProfiles = profileRepository.getProfiles()
+            if (hasMeaningfulLocalProfiles(localProfiles)) {
+                AppLogger.breadcrumb(
+                    tag = "CloudSync",
+                    message = "pull_remote_profiles_missing_seed_local local_profiles=${localProfiles.size}",
+                    severity = "warning"
+                )
+                val pushResult = pushToCloudLocked()
+                return@withLock if (pushResult.isSuccess) RestoreResult.RESTORED else RestoreResult.FAILED
+            }
+
+            Log.i(TAG, "Pull found legacy cloud backup without profile list")
+            AppLogger.breadcrumb(
+                tag = "CloudSync",
+                message = "pull_remote_profiles_missing_no_restore local_profiles=${localProfiles.size}",
+                severity = "warning"
             )
             return@withLock RestoreResult.NO_BACKUP
         }

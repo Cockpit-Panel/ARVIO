@@ -1572,7 +1572,10 @@ class SettingsViewModel @Inject constructor(
                         pushPendingLocalFirst = false
                     )
                     // Only seed cloud when there is truly no backup yet.
-                    if (restoreResult == CloudRestoreResult.NO_BACKUP) {
+                    if (
+                        restoreResult == CloudRestoreResult.NO_BACKUP &&
+                        cloudSyncRepository.hasMeaningfulLocalProfiles()
+                    ) {
                         syncLocalStateToCloud(silent = true, force = true)
                     }
                     if (pendingProfileSwitchAfterCloudLogin) {
