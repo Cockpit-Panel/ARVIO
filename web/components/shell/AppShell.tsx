@@ -16,13 +16,13 @@ import { Toast } from "./Toast";
 import { TopNav } from "./TopNav";
 
 export function AppShell() {
-  const { view, section } = useApp();
+  const { view, section, settings } = useApp();
 
   if (view === "login") return <LoginScreen />;
   if (view === "profiles") return <ProfileSelectionScreen />;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${settings.oledBlack ? "oled" : ""}`}>
       <TopNav />
 
       <section className="content">

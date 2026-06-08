@@ -13,7 +13,12 @@ const nav = [
 ] satisfies Array<{ id: NavSection; label: string; icon: typeof Home }>;
 
 export function TopNav() {
-  const { section, setSection, switchProfile, activeProfile, avatarImages } = useApp();
+  const { section, setSection, switchProfile, activeProfile, avatarImages, settings } = useApp();
+  const clock = new Intl.DateTimeFormat([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: settings.clockFormat === "12h"
+  }).format(new Date());
 
   return (
     <aside className="sidebar" aria-label="ARVIO navigation">
@@ -46,9 +51,7 @@ export function TopNav() {
         >
           <Settings size={26} />
         </button>
-        <span className="top-clock">
-          {new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" }).format(new Date())}
-        </span>
+        <span className="top-clock">{clock}</span>
       </div>
     </aside>
   );

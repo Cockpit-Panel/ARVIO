@@ -1726,3 +1726,90 @@ input:focus {
   cursor: pointer;
 }
 .player-next:hover { background: rgba(255, 255, 255, 0.2); }
+
+/* ============================================================
+   Phase 5 — Settings (sidebar + sections)
+   ============================================================ */
+
+.app-shell.oled { background: #000 !important; }
+
+.settings-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 18vw) 1fr;
+  gap: 24px;
+  min-height: 100vh;
+  padding: clamp(96px, 12vh, 130px) 3.35vw 80px;
+  align-items: start;
+}
+.settings-sidebar {
+  position: sticky;
+  top: clamp(96px, 12vh, 130px);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-sidebar h2 {
+  margin: 0 0 14px;
+  font-size: clamp(26px, 2.2vw, 38px);
+}
+.settings-section-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.settings-section-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.06); }
+.settings-section-btn.is-active { color: #fff; background: var(--chip-focus); }
+
+.settings-content {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+  max-width: 920px;
+}
+.settings-panel-card {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 18px;
+  padding: 24px;
+}
+.settings-panel-card h2 {
+  margin: 0 0 18px;
+  font-size: 24px;
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 56px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.set-row:last-child { border-bottom: 0; }
+.set-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 16px;
+  color: var(--text);
+}
+.set-label em {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--soft);
+}
+.set-control { display: flex; align-items: center; }
+.set-control input[type="checkbox"] { width: 22px; height: 22px; min-height: 0; }
+.set-control input[type="number"], .set-control input[type="text"], .set-control input:not([type]),
+.set-control input[type="password"], .set-control input[type="color"] { min-height: 42px; width: clamp(140px, 16vw, 220px); }
+.set-control select { min-height: 42px; }

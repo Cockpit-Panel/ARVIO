@@ -272,23 +272,65 @@ export interface IptvSnapshot {
   loadedAt: number;
 }
 
+export interface HomeServerConfig {
+  id: string;
+  type: "plex" | "jellyfin" | "emby";
+  name: string;
+  url: string;
+  token?: string;
+  username?: string;
+  enabled: boolean;
+}
+
 export interface AppSettings {
+  // Playback
+  autoPlayNext: boolean;
+  autoPlaySingleSource: boolean;
+  autoPlayMinQuality: "any" | "hd" | "fhd" | "4k";
+  trailerAutoPlay: boolean;
+  trailerSound: boolean;
+  trailerDelaySeconds: number;
+  // Language & audio
+  language: string;
   defaultSubtitle: string;
   secondarySubtitle: string;
+  audioLanguage: string;
+  // Subtitles
   subtitleSize: number;
   subtitleColor: string;
   subtitleOffsetMs: number;
+  subtitleStyle: "outline" | "shadow" | "background" | "raised";
+  subtitleStylized: boolean;
+  filterSubtitlesByLanguage: boolean;
   removeHearingImpaired: boolean;
+  // AI subtitles
   aiSubtitlesEnabled: boolean;
   aiSubtitleModel: "off" | "groq" | "gemini";
-  autoPlayNext: boolean;
+  aiAutoSelect: boolean;
+  aiApiKey: string;
+  // Appearance
+  cardLayoutMode: "landscape" | "poster";
+  deviceModeOverride: "auto" | "tv" | "desktop";
+  oledBlack: boolean;
+  clockFormat: "12h" | "24h";
+  showBudget: boolean;
+  smoothScrolling: boolean;
+  spoilerBlur: boolean;
+  accentColor: string;
+  // Network
+  dnsProvider: "system" | "cloudflare" | "google" | "quad9";
+  showLoadingStats: boolean;
+  customUserAgent: string;
+  // Profiles
   skipProfileSelection: boolean;
   cardDensity: "comfortable" | "compact";
-  language: string;
-  dnsProvider: "system" | "cloudflare" | "google" | "quad9";
+  // Catalogs / addons
   catalogs: CatalogConfig[];
   hiddenCatalogIds: string[];
   disabledAddonIds: string[];
+  // Home servers
+  homeServers: HomeServerConfig[];
+  // IPTV
   iptvPlaylists: IptvPlaylistEntry[];
   favoriteChannelIds: string[];
   favoriteGroupIds: string[];
