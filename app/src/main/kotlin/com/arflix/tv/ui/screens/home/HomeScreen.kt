@@ -2684,20 +2684,7 @@ private fun MobileHomeRowsLayer(
                 } else {
                     rowUsePosterCards
                 }
-                val skeletonCount = if (isPortrait) 12 else 7
-                val itemsToRender = remember(category.items, rowHasMore, isPortrait) {
-                    if (rowHasMore) {
-                        category.items + List(skeletonCount) { idx ->
-                            MediaItem(
-                                id = -1000 - idx,
-                                title = "",
-                                isPlaceholder = true
-                            )
-                        }
-                    } else {
-                        category.items
-                    }
-                }
+                val itemsToRender = category.items
 
                 // Horizontal card row with touch scrolling
                 LazyRow(
@@ -3354,20 +3341,7 @@ private fun ContentRow(
             )
         }
 
-        val skeletonCount = if (effectivePosterMode) 12 else 7
-        val itemsToRender = remember(category.items, categoryHasMore, effectivePosterMode) {
-            if (categoryHasMore) {
-                category.items + List(skeletonCount) { idx ->
-                    MediaItem(
-                        id = -1000 - idx,
-                        title = "",
-                        isPlaceholder = true
-                    )
-                }
-            } else {
-                category.items
-            }
-        }
+        val itemsToRender = category.items
 
         // Cards row - clipped to hide previous items when scrolling
         val clipModifier = if (isContinueWatching) Modifier else Modifier.clipToBounds()
