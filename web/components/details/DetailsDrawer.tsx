@@ -16,7 +16,7 @@ export function DetailsDrawer() {
 }
 
 function DetailsDrawerView({ item }: { item: MediaItem }) {
-  const { streams, selectedEpisode, loadEpisodeStreams, closeDetails, openDetails, playStream } = useApp();
+  const { streams, selectedEpisode, loadEpisodeStreams, closeDetails, openDetails, playStream, playTrailer } = useApp();
   const [reviews, setReviews] = useState<ReviewInfo[]>([]);
 
   useEffect(() => {
@@ -64,9 +64,9 @@ function DetailsDrawerView({ item }: { item: MediaItem }) {
         </div>
 
         {item.trailerUrl && (
-          <a className="trailer-link" href={item.trailerUrl} target="_blank" rel="noreferrer">
+          <button className="trailer-link" onClick={() => void playTrailer(item)}>
             <Play size={18} fill="currentColor" /> Watch trailer
-          </a>
+          </button>
         )}
 
         {isTv && item.seasons?.length ? (
