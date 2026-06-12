@@ -402,6 +402,7 @@ fun StreamSelector(
                     hasStreamingAddons = hasStreamingAddons,
                     completedAddons = completedAddons,
                     totalAddons = totalAddons,
+                    elapsedSeconds = elapsedSeconds,
                     pluginScrapersLoading = pluginScrapersLoading,
                     loadingPluginNames = loadingPluginNames,
                     onFilterSelected = { index ->
@@ -529,6 +530,7 @@ fun StreamSelector(
                                     Spacer(modifier = Modifier.height(12.dp))
                                     Text(
                                         text = buildString {
+                                            if (elapsedSeconds > 0) append("${elapsedSeconds}s \u2022 ")
                                             if (loadingPluginNames.isNotEmpty()) append(stringResource(R.string.plugins_loading, loadingPluginNames.joinToString(", ")))
                                             else if (pluginScrapersLoading) append(stringResource(R.string.plugins_loading, "..."))
                                             else if (totalAddons > 0) append("Searching addons ($completedAddons/$totalAddons)...")
@@ -627,6 +629,7 @@ private fun OledSourceSelectorTv(
     hasStreamingAddons: Boolean,
     completedAddons: Int,
     totalAddons: Int,
+    elapsedSeconds: Int = 0,
     pluginScrapersLoading: Boolean,
     loadingPluginNames: Set<String>,
     onFilterSelected: (Int) -> Unit,
@@ -671,7 +674,8 @@ private fun OledSourceSelectorTv(
                             sourceCount = streams.size,
                             completedAddons = completedAddons,
                             totalAddons = totalAddons,
-                            isLoading = isLoading
+                            isLoading = isLoading,
+                            elapsedSeconds = elapsedSeconds
                         ),
                         style = ArflixTypography.caption.copy(fontSize = 13.sp),
                         color = OledMutedText,
@@ -737,6 +741,7 @@ private fun OledSourceSelectorTv(
                     completedAddons = completedAddons,
                     totalAddons = totalAddons,
                     hasStreamingAddons = hasStreamingAddons,
+                    elapsedSeconds = elapsedSeconds,
                     pluginScrapersLoading = pluginScrapersLoading,
                     loadingPluginNames = loadingPluginNames
                 )
@@ -957,13 +962,15 @@ private fun sourceStatusText(
     sourceCount: Int,
     completedAddons: Int,
     totalAddons: Int,
-    isLoading: Boolean
+    isLoading: Boolean,
+    elapsedSeconds: Int = 0
 ): String {
     val remaining = (totalAddons - completedAddons).coerceAtLeast(0)
+    val elapsed = if (elapsedSeconds > 0 && isLoading) "${elapsedSeconds}s \u2022 " else ""
     return when {
         isLoading && totalAddons > 0 && remaining > 0 ->
-            "$sourceCount found - still checking $remaining ${if (remaining == 1) "addon" else "addons"}"
-        isLoading -> "$sourceCount found - searching sources"
+            "${elapsed}$sourceCount found - still checking $remaining ${if (remaining == 1) "addon" else "addons"}"
+        isLoading -> "${elapsed}$sourceCount found - searching sources"
         totalAddons > 0 -> "$sourceCount found - $completedAddons/$totalAddons addons checked"
         else -> "$sourceCount found"
     }
@@ -1539,6 +1546,7 @@ private fun SourceEmptyState(
     completedAddons: Int,
     totalAddons: Int,
     hasStreamingAddons: Boolean,
+    elapsedSeconds: Int = 0,
     pluginScrapersLoading: Boolean = false,
     loadingPluginNames: Set<String> = emptySet(),
     message: String? = null
@@ -1560,6 +1568,7 @@ private fun SourceEmptyState(
                 Spacer(modifier = Modifier.height(14.dp))
                 Text(
                     text = buildString {
+                        if (elapsedSeconds > 0) append("${elapsedSeconds}s \u2022 ")
                         if (loadingPluginNames.isNotEmpty()) append(stringResource(R.string.plugins_loading, loadingPluginNames.joinToString(", ")))
                         else if (pluginScrapersLoading) append(stringResource(R.string.plugins_loading, "..."))
                         else if (totalAddons > 0) append("Searching addons ($completedAddons/$totalAddons)...")

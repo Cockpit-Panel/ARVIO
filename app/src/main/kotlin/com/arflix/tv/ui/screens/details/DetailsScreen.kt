@@ -211,6 +211,7 @@ fun DetailsScreen(
     onSwitchProfile: () -> Unit = {},
     onBack: () -> Unit
 ) {
+    val isRtlLayoutDirection = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val usePosterCards = rememberCatalogueRowLayoutMode("details:similar") == CardLayoutMode.POSTER
     val context = LocalContext.current
@@ -540,7 +541,17 @@ fun DetailsScreen(
                         return@onPreviewKeyEvent false // Let the modal handle it
                     }
 
-                    when (event.key) {
+                    val isRtl = isRtlLayoutDirection
+                    val actualKey = event.key
+                    val logicalKey = if (isRtl) {
+                        when (actualKey) {
+                            Key.DirectionLeft -> Key.DirectionRight
+                            Key.DirectionRight -> Key.DirectionLeft
+                            else -> actualKey
+                        }
+                    } else actualKey
+
+                    when (logicalKey) {
                         Key.Back, Key.Escape -> {
                             if (showTrailerPlayer) { showTrailerPlayer = false; true }
                             else { onBack(); true }

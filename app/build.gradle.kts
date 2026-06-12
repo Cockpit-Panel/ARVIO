@@ -153,6 +153,7 @@ android {
 
     packaging {
         resources {
+            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
             excludes += setOf(
                 "/META-INF/{AL2.0,LGPL2.1}",
                 "/META-INF/LICENSE*",
@@ -455,6 +456,34 @@ detekt {
 
     // Don't fail build on issues (use baseline instead)
     ignoreFailures = true
+}
+
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        freeCompilerArgs.add("-Xskip-metadata-version-check")
+    }
+}
+
+dependencies {
+    ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
+    annotationProcessor("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
+
+    // Plugin system dependencies (Sideload flavor only)
+    add("sideloadImplementation", files("libs/quickjs-kt-android-1.0.5-nuvio.aar"))
+    add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.17.0")
+    add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.17.0")
+    add("sideloadImplementation", "com.github.Blatzar:NiceHttp:0.4.11")
+    add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.5.3")
+    add("sideloadImplementation", "com.github.recloudstream.cloudstream:library-android:v4.7.0") {
+        exclude(group = "org.mozilla", module = "rhino")
+    }
+    add("sideloadImplementation", "org.webjars.npm:crypto-js:4.2.0")
+    
+    // Runtime helpers used by the sideload plugin extractor stack.
+    add("sideloadImplementation", "org.mozilla:rhino:1.8.1")
+    add("sideloadImplementation", "com.google.re2j:re2j:1.8")
 }
 
 

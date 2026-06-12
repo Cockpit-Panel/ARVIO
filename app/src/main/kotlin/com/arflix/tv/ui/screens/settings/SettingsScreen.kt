@@ -295,6 +295,7 @@ fun SettingsScreen(
     val isTouchDevice = LocalDeviceType.current.isTouchDevice()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val isRtlLayoutDirection = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
 
     val sections = remember {
         buildList {
@@ -687,7 +688,18 @@ fun SettingsScreen(
                     } else {
                         2
                     }
-                    when (event.key) {
+
+                    val isRtl = isRtlLayoutDirection
+                    val actualKey = event.key
+                    val logicalKey = if (isRtl) {
+                        when (actualKey) {
+                            Key.DirectionLeft -> Key.DirectionRight
+                            Key.DirectionRight -> Key.DirectionLeft
+                            else -> actualKey
+                        }
+                    } else actualKey
+
+                    when (logicalKey) {
                         Key.Back, Key.Escape -> {
                             when (activeZone) {
                                 Zone.SIDEBAR -> onBack()

@@ -1478,7 +1478,17 @@ class DetailsViewModel @Inject constructor(
                     } catch (e: Exception) {
                         Log.w(TAG, "[PluginScrapers] streaming execution failed: ${e.message}")
                     } finally {
-                        _uiState.value = _uiState.value.copy(pluginScrapersLoading = false, loadingPluginNames = emptySet())
+                        val current = _uiState.value
+                        val stillLoading = loadStreamsJob?.isActive == true ||
+                                           vodAppendJob?.isActive == true ||
+                                           homeServerAppendJob?.isActive == true
+                        val newLoading = current.isLoadingStreams && current.streams.isEmpty() && stillLoading
+
+                        _uiState.value = current.copy(
+                            pluginScrapersLoading = false,
+                            loadingPluginNames = emptySet(),
+                            isLoadingStreams = newLoading
+                        )
                     }
                 }
 

@@ -186,7 +186,13 @@ fun ContinueWatchingCard(
 
         Text(
             text = item.title,
-            style = ArvioSkin.typography.cardTitle,
+            style = ArvioSkin.typography.cardTitle.copy(
+                shadow = androidx.compose.ui.graphics.Shadow(
+                    color = androidx.compose.ui.graphics.Color.Black,
+                    offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                    blurRadius = 6f
+                )
+            ),
             color = if (isFocused) ArvioSkin.colors.textPrimary else ArvioSkin.colors.textMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -196,7 +202,13 @@ fun ContinueWatchingCard(
         if (meta != null) {
             Text(
                 text = meta,
-                style = ArvioSkin.typography.caption,
+                style = ArvioSkin.typography.caption.copy(
+                    shadow = androidx.compose.ui.graphics.Shadow(
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                        blurRadius = 4f
+                    )
+                ),
                 color = ArvioSkin.colors.textMuted.copy(alpha = 0.85f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -274,7 +286,13 @@ fun ContinueWatchingCardCompact(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = item.title,
-                    style = ArvioSkin.typography.cardTitle,
+                    style = ArvioSkin.typography.cardTitle.copy(
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = androidx.compose.ui.graphics.Color.Black,
+                            offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                            blurRadius = 6f
+                        )
+                    ),
                     color = ArvioSkin.colors.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -282,7 +300,13 @@ fun ContinueWatchingCardCompact(
                 if (episodeInfo != null) {
                     Text(
                         text = episodeInfo,
-                        style = ArvioSkin.typography.caption,
+                        style = ArvioSkin.typography.caption.copy(
+                            shadow = androidx.compose.ui.graphics.Shadow(
+                                color = androidx.compose.ui.graphics.Color.Black,
+                                offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                                blurRadius = 4f
+                            )
+                        ),
                         color = ArvioSkin.colors.textMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,

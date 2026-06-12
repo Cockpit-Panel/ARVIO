@@ -100,6 +100,9 @@ class MediaRepository @Inject constructor(
     /** TMDB content language (e.g. "en-US", "fr-FR", "nl-NL"). Null = TMDB default (English). */
     @Volatile
     var contentLanguage: String? = null
+        set(value) {
+            field = value?.replace("iw", "he")?.replace('_', '-')
+        }
 
     // === IN-MEMORY CACHE FOR PERFORMANCE ===
     private data class CacheEntry<T>(val data: T, val timestamp: Long)

@@ -448,8 +448,20 @@ fun MediaCard(
 
             Text(
                 text = item.title,
-                style = if (isMobile) ArvioSkin.typography.cardTitle.copy(fontSize = 14.sp)
-                        else ArvioSkin.typography.cardTitle,
+                style = if (isMobile) ArvioSkin.typography.cardTitle.copy(
+                    fontSize = 14.sp,
+                    shadow = androidx.compose.ui.graphics.Shadow(
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                        blurRadius = 6f
+                    )
+                ) else ArvioSkin.typography.cardTitle.copy(
+                    shadow = androidx.compose.ui.graphics.Shadow(
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                        blurRadius = 6f
+                    )
+                ),
                 color = if (visualFocused) {
                     ArvioSkin.colors.textPrimary
                 } else {
@@ -475,7 +487,13 @@ fun MediaCard(
             }
             Text(
                 text = subtitle,
-                style = ArvioSkin.typography.caption,
+                style = ArvioSkin.typography.caption.copy(
+                    shadow = androidx.compose.ui.graphics.Shadow(
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                        blurRadius = 4f
+                    )
+                ),
                 color = ArvioSkin.colors.textMuted.copy(alpha = 0.85f),
                 maxLines = subtitleMaxLines,
                 overflow = TextOverflow.Ellipsis,
@@ -621,7 +639,13 @@ fun PosterCard(
 
             Text(
                 text = item.title,
-                style = ArvioSkin.typography.caption,
+                style = ArvioSkin.typography.caption.copy(
+                    shadow = androidx.compose.ui.graphics.Shadow(
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                        blurRadius = 4f
+                    )
+                ),
                 color = ArvioSkin.colors.textPrimary,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -630,7 +654,13 @@ fun PosterCard(
             if (item.year.isNotBlank()) {
                 Text(
                     text = item.year,
-                    style = ArvioSkin.typography.caption,
+                    style = ArvioSkin.typography.caption.copy(
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = androidx.compose.ui.graphics.Color.Black,
+                            offset = androidx.compose.ui.geometry.Offset(2f, 2f),
+                            blurRadius = 4f
+                        )
+                    ),
                     color = ArvioSkin.colors.textMuted.copy(alpha = 0.65f),
                 )
             }

@@ -293,6 +293,8 @@ private fun localizedCategoryTitle(category: Category): String = when (category.
     "collection_row_franchise" -> stringResource(R.string.franchises)
     "collection_row_network"   -> stringResource(R.string.networks)
     "collection_row_featured"  -> stringResource(R.string.featured)
+    "top10_movies_today"       -> if (androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl) "10 הסרטים הנצפים היום" else "Top 10 Movies Today"
+    "top10_shows_today"        -> if (androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl) "10 הסדרות הנצפות היום" else "Top 10 Shows Today"
     else                       -> category.title
 }
 
@@ -1723,24 +1725,28 @@ private fun HomeHeroLayer(
         val buttonsBottomPadding = contentRowTopPadding - 10.dp
         val heroBottomPadding = buttonsBottomPadding + if (configuration.screenHeightDp < 720) 34.dp else 34.dp
 
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = AppTopBarContentTopInset)
-                .zIndex(3f)
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr
         ) {
-            heroItem?.let { item ->
-                if (!item.status.orEmpty().startsWith("collection:")) {
-                    HeroSection(
-                        item = item,
-                        logoUrl = heroLogoUrl,
-                        overviewOverride = heroOverviewOverride,
-                        showBudget = showBudget,
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(start = contentStartPadding, end = 400.dp)
-                            .offset(y = -heroBottomPadding)
-                    )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = AppTopBarContentTopInset)
+                    .zIndex(3f)
+            ) {
+                heroItem?.let { item ->
+                    if (!item.status.orEmpty().startsWith("collection:")) {
+                        HeroSection(
+                            item = item,
+                            logoUrl = heroLogoUrl,
+                            overviewOverride = heroOverviewOverride,
+                            showBudget = showBudget,
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(start = contentStartPadding, end = 400.dp)
+                                .offset(y = -heroBottomPadding)
+                        )
+                    }
                 }
             }
         }
@@ -2174,6 +2180,7 @@ private fun HomeInputLayer(
     onOpenContextMenu: (MediaItem, Boolean) -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
+    val isRtl = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
     var selectPressedInHome by remember { mutableStateOf(false) }
     var selectDownAtMs by remember { mutableLongStateOf(0L) }
     var rootHasFocus by remember { mutableStateOf(false) }
@@ -2295,6 +2302,42 @@ private fun HomeInputLayer(
             ) {
                 return@onPreviewKeyEvent true
             }
+
+            val moveNext = {
+                if (focusState.isSidebarFocused) {
+                    if (focusState.sidebarFocusIndex < maxSidebarIndex) {
+                        focusState.sidebarFocusIndex++
+                        focusState.lastNavEventTime = SystemClock.elapsedRealtime()
+                    }
+                    true
+                } else {
+                    val maxItems = categories.getOrNull(focusState.currentRowIndex)?.items?.size ?: 0
+                    if (focusState.currentItemIndex < maxItems - 1) {
+                        focusState.currentItemIndex++
+                        focusState.lastNavEventTime = SystemClock.elapsedRealtime()
+                    }
+                    true
+                }
+            }
+
+            val movePrev = {
+                if (!focusState.isSidebarFocused) {
+                    if (focusState.currentItemIndex == 0) {
+                        true
+                    } else {
+                        focusState.currentItemIndex--
+                        focusState.lastNavEventTime = SystemClock.elapsedRealtime()
+                        true
+                    }
+                } else {
+                    if (focusState.sidebarFocusIndex > 0) {
+                        focusState.sidebarFocusIndex--
+                        focusState.lastNavEventTime = SystemClock.elapsedRealtime()
+                    }
+                    true
+                }
+            }
+
             when (event.type) {
                 KeyEventType.KeyDown -> when (event.key) {
                     Key.Enter, Key.DirectionCenter -> {
@@ -2322,44 +2365,18 @@ private fun HomeInputLayer(
                         }
                         true
                     }
+
                     Key.DirectionLeft -> {
                         selectPressedInHome = false
                         selectDownAtMs = 0L
                         focusState.userHasNavigated = true
-                        if (!focusState.isSidebarFocused) {
-                            if (focusState.currentItemIndex == 0) {
-                                true
-                            } else {
-                                focusState.currentItemIndex--
-                                focusState.lastNavEventTime = SystemClock.elapsedRealtime()
-                                true
-                            }
-                        } else {
-                            if (focusState.sidebarFocusIndex > 0) {
-                                focusState.sidebarFocusIndex--
-                                focusState.lastNavEventTime = SystemClock.elapsedRealtime()
-                            }
-                            true
-                        }
+                        if (isRtl) moveNext() else movePrev()
                     }
                     Key.DirectionRight -> {
                         selectPressedInHome = false
                         selectDownAtMs = 0L
                         focusState.userHasNavigated = true
-                        if (focusState.isSidebarFocused) {
-                            if (focusState.sidebarFocusIndex < maxSidebarIndex) {
-                                focusState.sidebarFocusIndex++
-                                focusState.lastNavEventTime = SystemClock.elapsedRealtime()
-                            }
-                            true
-                        } else {
-                            val maxItems = categories.getOrNull(focusState.currentRowIndex)?.items?.size ?: 0
-                            if (focusState.currentItemIndex < maxItems - 1) {
-                                focusState.currentItemIndex++
-                                focusState.lastNavEventTime = SystemClock.elapsedRealtime()
-                            }
-                            true
-                        }
+                        if (isRtl) movePrev() else moveNext()
                     }
                     Key.DirectionUp -> {
                         selectPressedInHome = false
@@ -2696,7 +2713,12 @@ private fun MobileHomeRowsLayer(
                         text = localizedCategoryTitle(category),
                         style = ArflixTypography.sectionTitle.copy(
                             fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
+                            shadow = Shadow(
+                                color = Color.Black.copy(alpha = 0.8f),
+                                offset = androidx.compose.ui.geometry.Offset(1f, 1f),
+                                blurRadius = 4f
+                            )
                         ),
                         color = Color.White
                     )
@@ -3404,7 +3426,15 @@ private fun ContentRow(
         ) {
             Text(
                 text = localizedCategoryTitle(category),
-                style = ArflixTypography.sectionTitle.copy(fontSize = 18.sp, fontWeight = FontWeight.Bold),
+                style = ArflixTypography.sectionTitle.copy(
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.8f),
+                        offset = androidx.compose.ui.geometry.Offset(1f, 1f),
+                        blurRadius = 4f
+                    )
+                ),
                 color = Color.White
             )
         }
