@@ -3,6 +3,7 @@ package com.arflix.tv.ui.screens.login
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -20,6 +21,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
@@ -33,8 +35,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.tv.material3.Button
-import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.arflix.tv.R
@@ -480,11 +480,27 @@ private fun GradientButton(
 ) {
     val focusedBackground = Color(0xFFE9FFFB)
     val focusedText = ArcticBlack
-    val noScale = ButtonDefaults.scale(1f, 1f, 1f, 1f, 1f)
 
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
+            .onPreviewKeyEvent { event ->
+                if (
+                    enabled &&
+                    event.type == KeyEventType.KeyDown &&
+                    (event.key == Key.Enter || event.key == Key.NumPadEnter || event.key == Key.DirectionCenter)
+                ) {
+                    onClick()
+                    true
+                } else {
+                    false
+                }
+            }
+            .clickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClick = onClick
+            )
             .then(
                 if (isPrimary) {
                     if (isFocused) {
@@ -520,25 +536,17 @@ private fun GradientButton(
             ),
         contentAlignment = if (isPrimary) Alignment.Center else Alignment.CenterStart
     ) {
-        Button(
-            onClick = onClick,
-            enabled = enabled,
-            modifier = Modifier.fillMaxSize(),
-            colors = ButtonDefaults.colors(
-                containerColor = Color.Transparent,
-                focusedContainerColor = Color.Transparent,
-                disabledContainerColor = Color.Transparent
-            ),
-            scale = noScale,
-            shape = ButtonDefaults.shape(RoundedCornerShape(12.dp))
-        ) {}
-
         Text(
             text = text,
             modifier = Modifier.padding(horizontal = if (isPrimary) 0.dp else 18.dp),
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
-            color = if (isFocused) focusedText else if (isPrimary) TextPrimary else TextSecondary,
+            color = when {
+                !enabled -> TextTertiary
+                isFocused -> focusedText
+                isPrimary -> TextPrimary
+                else -> TextSecondary
+            },
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
