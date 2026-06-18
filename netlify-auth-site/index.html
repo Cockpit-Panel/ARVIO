@@ -507,6 +507,7 @@
     const SUPABASE_URL = "https://zrdwvortcfnoykltzuqf.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpyZHd2b3J0Y2Zub3lrbHR6dXFmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY3NDU4NzMsImV4cCI6MjA4MjMyMTg3M30.YfKZbSwxGs6_xMd6jkDtn1PKkfuyOHo9qVhUvFRddGU";
 
+    const FUNCTION_BASE = "/.netlify/functions";
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     const qs = new URLSearchParams(window.location.search);
     const pairCode = (qs.get("code") || "").trim();
@@ -685,7 +686,7 @@
         throw new Error("No active session for TV pairing.");
       }
 
-      const resp = await fetch(`${SUPABASE_URL}/functions/v1/tv-auth-approve`, {
+      const resp = await fetch(`${FUNCTION_BASE}/tv-auth-approve`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -702,9 +703,13 @@
     async function approveTvViaServer(email, password) {
       if (!pairCode) return;
       const normalizedEmail = requireValidEmail(email, false);
-      const resp = await fetch(`${SUPABASE_URL}/functions/v1/tv-auth-web`, {
+      const resp = await fetch(`${FUNCTION_BASE}/tv-auth-web`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
         body: JSON.stringify({
           action: "signin",
           code: pairCode,
@@ -720,7 +725,7 @@
       if (!pairCode) return;
       const normalizedEmail = requireValidEmail(email);
       enforceEmailSendCooldown("signup", normalizedEmail);
-      const resp = await fetch(`${SUPABASE_URL}/functions/v1/tv-auth-complete`, {
+      const resp = await fetch(`${FUNCTION_BASE}/tv-auth-complete`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -741,7 +746,7 @@
     async function createAccountViaServer(email, password) {
       const normalizedEmail = requireValidEmail(email);
       enforceEmailSendCooldown("signup", normalizedEmail);
-      const resp = await fetch(`${SUPABASE_URL}/functions/v1/cloud-auth-email`, {
+      const resp = await fetch(`${FUNCTION_BASE}/cloud-auth-email`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -787,7 +792,7 @@
       const email = requireValidEmail(emailEl.value);
       enforceEmailSendCooldown("reset", email);
       const redirectTo = "https://auth.arvio.tv/?mode=recovery";
-      const resp = await fetch(`${SUPABASE_URL}/functions/v1/cloud-auth-reset`, {
+      const resp = await fetch(`${FUNCTION_BASE}/cloud-auth-reset`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

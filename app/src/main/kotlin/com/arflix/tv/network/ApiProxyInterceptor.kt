@@ -8,7 +8,7 @@ import okhttp3.Request
 import okhttp3.Response
 
 /**
- * Intercepts API calls to TMDB and Trakt and routes them through Supabase Edge Functions.
+ * Intercepts API calls to TMDB and Trakt and routes them through backend proxy Functions.
  * This keeps API keys secure on the server - they never exist in the app.
  */
 class ApiProxyInterceptor : Interceptor {
@@ -25,7 +25,7 @@ class ApiProxyInterceptor : Interceptor {
             "api.themoviedb.org" -> {
                 // TMDB browsing is very high-volume. Proxy it only when the
                 // build explicitly opts in; otherwise use the direct API key
-                // and OkHttp cache to avoid runaway Edge Function billing.
+                // and OkHttp cache to avoid runaway Function billing.
                 if (BuildConfig.ENABLE_TMDB_EDGE_PROXY) {
                     val proxyRequest = rewriteForTmdbProxy(originalRequest) ?: originalRequest
                     chain.proceed(proxyRequest)
@@ -36,7 +36,7 @@ class ApiProxyInterceptor : Interceptor {
             "api.trakt.tv" -> {
                 // Trakt catalog/watchlist/scrobble traffic can also be noisy.
                 // Keep proxy support available for future secret-only builds,
-                // but do not route all user traffic through Supabase by default.
+                // but do not route all user traffic through backend functions by default.
                 if (BuildConfig.ENABLE_TRAKT_EDGE_PROXY) {
                     val proxyRequest = rewriteForTraktProxy(originalRequest) ?: originalRequest
                     chain.proceed(proxyRequest)
@@ -121,6 +121,9 @@ class ApiProxyInterceptor : Interceptor {
     }
 
     private fun hasProxyConfig(): Boolean {
+        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+            return Constants.NETLIFY_BACKEND_URL.startsWith("https://")
+        }
         val supabaseUrl = Constants.SUPABASE_URL.trim()
         val anonKey = Constants.SUPABASE_ANON_KEY.trim()
         return supabaseUrl.startsWith("https://") &&
