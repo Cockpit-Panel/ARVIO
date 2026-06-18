@@ -25,19 +25,12 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Prepare local properties
-        env:
-          LOCAL_PROPERTIES_BASE64: ${{ secrets.LOCAL_PROPERTIES_BASE64 }}
-        run: |
-          if [ -n "$LOCAL_PROPERTIES_BASE64" ]; then
-            printf '%s' "$LOCAL_PROPERTIES_BASE64" | base64 --decode > local.properties
-          fi
+      - name: Build release APK
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon
 
-      - name: Create CI keystore
-        run: |
-          keytool -genkeypair -keystore arvio.jks -alias arvio \
-            -keyalg RSA -keysize 2048 -validity 1 \
-            -dname "CN=CI" -storepass 815787 -keypass 815787
-
-      - name: Build
-        run: ./gradlew assembleSideloadDebug --no-daemon
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pull-request-release-apk
+          path: app/build/outputs/apk/sideload/release/*.apk
+          if-no-files-found: error

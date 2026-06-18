@@ -21,6 +21,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: read
 
 concurrency:
   group: sync-upstream-${{ inputs.target_branch }}
@@ -56,6 +57,23 @@ jobs:
           git merge --no-ff --no-edit "upstream/${{ inputs.upstream_branch }}"
           git push origin "$branch"
           echo "SYNC_BRANCH=$branch" >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Build release APK from merged branch
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon
+
+      - name: Upload merged release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-sync-release-apk
+          path: app/build/outputs/apk/sideload/release/*.apk
+          if-no-files-found: error
 
       - name: Open pull request
         env:
