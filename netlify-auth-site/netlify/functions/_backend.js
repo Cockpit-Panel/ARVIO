@@ -194,6 +194,508 @@ function validateEmail(email, rejectDisposable = true) {
   return "";
 }
 
+const AUTH_ISSUER = "arvio-netlify";
+const ACCESS_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
+const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const PASSWORD_SETUP_TTL_MS = 60 * 60 * 1000;
+
+function authSecret() {
+  const secret = process.env.ARVIO_AUTH_SECRET || "";
+  if (!secret || secret.length < 32) {
+    const error = new Error("ARVIO_AUTH_SECRET is not configured");
+    error.statusCode = 503;
+    throw error;
+  }
+  return secret;
+}
+
+function base64urlJson(value) {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function randomToken(bytes = 32) {
+  return crypto.randomBytes(bytes).toString("base64url");
+}
+
+function authStores(event) {
+  connectLambda(event);
+  return getStore("arvio-auth");
+}
+
+function accountKeyForEmail(email) {
+  return `accounts/email/${sha256(normalizeEmail(email))}.json`;
+}
+
+function refreshKeyForToken(token) {
+  return `refresh/${sha256(token)}.json`;
+}
+
+function passwordSetupKeyForToken(token) {
+  return `password-setup/${sha256(token)}.json`;
+}
+
+function legacyAccountIdForEmail(email) {
+  return `legacy_${sha256(normalizeEmail(email))}`;
+}
+
+function signArvioAccessToken(account) {
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: "HS256", typ: "JWT" };
+  const payload = {
+    iss: AUTH_ISSUER,
+    sub: account.accountId,
+    email: normalizeEmail(account.email),
+    iat: now,
+    exp: now + ACCESS_TOKEN_TTL_SECONDS
+  };
+  const signingInput = `${base64urlJson(header)}.${base64urlJson(payload)}`;
+  const signature = crypto
+    .createHmac("sha256", authSecret())
+    .update(signingInput)
+    .digest("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+function verifyArvioAccessToken(accessToken) {
+  const parts = String(accessToken || "").split(".");
+  if (parts.length !== 3) {
+    throw new Error("Invalid ARVIO token");
+  }
+  const signingInput = `${parts[0]}.${parts[1]}`;
+  const expected = crypto
+    .createHmac("sha256", authSecret())
+    .update(signingInput)
+    .digest("base64url");
+  const actual = parts[2];
+  const expectedBuffer = Buffer.from(expected);
+  const actualBuffer = Buffer.from(actual);
+  if (
+    expectedBuffer.length !== actualBuffer.length ||
+    !crypto.timingSafeEqual(expectedBuffer, actualBuffer)
+  ) {
+    throw new Error("Invalid ARVIO token signature");
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  } catch {
+    throw new Error("Invalid ARVIO token payload");
+  }
+  if (payload.iss !== AUTH_ISSUER || !payload.sub || !payload.email) {
+    throw new Error("Invalid ARVIO token claims");
+  }
+  if (Number(payload.exp || 0) <= Math.floor(Date.now() / 1000)) {
+    throw new Error("ARVIO token expired");
+  }
+  return {
+    supabaseUserId: String(payload.sub),
+    email: normalizeEmail(payload.email),
+    authProvider: "netlify"
+  };
+}
+
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("base64url");
+  const n = 16384;
+  const r = 8;
+  const p = 1;
+  const hash = await new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, 64, { N: n, r, p }, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey.toString("base64url"));
+    });
+  });
+  return `scrypt:${n}:${r}:${p}:${salt}:${hash}`;
+}
+
+async function verifyPassword(password, encoded) {
+  const parts = String(encoded || "").split(":");
+  if (parts.length !== 6 || parts[0] !== "scrypt") return false;
+  const [, nRaw, rRaw, pRaw, salt, expected] = parts;
+  const n = Number(nRaw);
+  const r = Number(rRaw);
+  const p = Number(pRaw);
+  if (!n || !r || !p || !salt || !expected) return false;
+  const actual = await new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, 64, { N: n, r, p }, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey.toString("base64url"));
+    });
+  });
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(expected);
+  return actualBuffer.length === expectedBuffer.length &&
+    crypto.timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+async function loadAuthAccount(event, email) {
+  const store = authStores(event);
+  return getJSONOrNull(store, accountKeyForEmail(email));
+}
+
+async function saveAuthAccount(event, account) {
+  const store = authStores(event);
+  const normalizedEmail = normalizeEmail(account.email);
+  const saved = {
+    ...account,
+    email: normalizedEmail,
+    updatedAt: new Date().toISOString()
+  };
+  await store.setJSON(accountKeyForEmail(normalizedEmail), saved, {
+    metadata: {
+      accountId: saved.accountId,
+      email: normalizedEmail,
+      updatedAt: saved.updatedAt
+    }
+  });
+  return saved;
+}
+
+async function loadLegacySnapshotByEmail(event, email) {
+  const stores = snapshotStores(event);
+  return getJSONOrNull(stores.legacy, `email/${sha256(normalizeEmail(email))}.json`);
+}
+
+async function issueArvioSession(event, account) {
+  const normalizedAccount = {
+    ...account,
+    email: normalizeEmail(account.email)
+  };
+  const accessToken = signArvioAccessToken(normalizedAccount);
+  const refreshToken = randomToken(48);
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString();
+  const store = authStores(event);
+  await store.setJSON(refreshKeyForToken(refreshToken), {
+    accountId: normalizedAccount.accountId,
+    email: normalizedAccount.email,
+    createdAt: new Date().toISOString(),
+    expiresAt
+  }, {
+    metadata: {
+      accountId: normalizedAccount.accountId,
+      email: normalizedAccount.email,
+      expiresAt
+    }
+  });
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_in: ACCESS_TOKEN_TTL_SECONDS,
+    token_type: "bearer",
+    user: {
+      id: normalizedAccount.accountId,
+      email: normalizedAccount.email
+    }
+  };
+}
+
+async function refreshArvioSession(event, refreshToken) {
+  const store = authStores(event);
+  const session = await getJSONOrNull(store, refreshKeyForToken(refreshToken));
+  if (!session || !session.accountId || !session.email) {
+    const error = new Error("Invalid refresh token");
+    error.statusCode = 401;
+    throw error;
+  }
+  if (Date.now() > Date.parse(session.expiresAt || "")) {
+    const error = new Error("Refresh token expired");
+    error.statusCode = 401;
+    throw error;
+  }
+  const account = await loadAuthAccount(event, session.email) || {
+    accountId: session.accountId,
+    email: session.email
+  };
+  return issueArvioSession(event, account);
+}
+
+function emailProviderName() {
+  if (process.env.RESEND_API_KEY) return "resend";
+  if (process.env.POSTMARK_SERVER_TOKEN) return "postmark";
+  if (process.env.SENDGRID_API_KEY) return "sendgrid";
+  return "";
+}
+
+async function sendPasswordSetupEmail(email, setupUrl) {
+  const provider = emailProviderName();
+  if (!provider) {
+    const error = new Error("Password setup email is not configured yet");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const from = process.env.AUTH_EMAIL_FROM || "ARVIO <noreply@auth.arvio.tv>";
+  const subject = "Create your ARVIO Cloud password";
+  const text = [
+    "ARVIO Cloud moved to a new secure server.",
+    "To keep your account protected, create a new ARVIO Cloud password:",
+    setupUrl,
+    "This link expires in 1 hour."
+  ].join("\n\n");
+  const html = `
+    <p>ARVIO Cloud moved to a new secure server.</p>
+    <p>To keep your account protected, create a new ARVIO Cloud password:</p>
+    <p><a href="${setupUrl}">Create new password</a></p>
+    <p>This link expires in 1 hour.</p>
+  `;
+
+  if (provider === "resend") {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ from, to: [email], subject, html, text })
+    });
+    if (!response.ok) throw new Error(`Email delivery failed (${response.status})`);
+    return;
+  }
+
+  if (provider === "postmark") {
+    const response = await fetch("https://api.postmarkapp.com/email", {
+      method: "POST",
+      headers: {
+        "X-Postmark-Server-Token": process.env.POSTMARK_SERVER_TOKEN,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ From: from, To: email, Subject: subject, HtmlBody: html, TextBody: text })
+    });
+    if (!response.ok) throw new Error(`Email delivery failed (${response.status})`);
+    return;
+  }
+
+  if (provider === "sendgrid") {
+    const response = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${process.env.SENDGRID_API_KEY}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email }] }],
+        from: { email: from.replace(/^.*<(.+)>$/, "$1"), name: "ARVIO" },
+        subject,
+        content: [
+          { type: "text/plain", value: text },
+          { type: "text/html", value: html }
+        ]
+      })
+    });
+    if (!response.ok) throw new Error(`Email delivery failed (${response.status})`);
+  }
+}
+
+async function startPasswordSetup(event, email) {
+  const normalizedEmail = normalizeEmail(email);
+  const account = await loadAuthAccount(event, normalizedEmail);
+  const legacySnapshot = account ? null : await loadLegacySnapshotByEmail(event, normalizedEmail);
+  if (!account && !legacySnapshot) {
+    return { exists: false, emailSent: false };
+  }
+
+  const token = randomToken(48);
+  const expiresAt = new Date(Date.now() + PASSWORD_SETUP_TTL_MS).toISOString();
+  const pending = {
+    email: normalizedEmail,
+    accountId: account?.accountId || legacyAccountIdForEmail(normalizedEmail),
+    createdAt: new Date().toISOString(),
+    expiresAt
+  };
+  const store = authStores(event);
+  await store.setJSON(passwordSetupKeyForToken(token), pending, {
+    metadata: {
+      email: normalizedEmail,
+      accountId: pending.accountId,
+      expiresAt
+    }
+  });
+
+  const baseUrl = (process.env.SITE_URL || process.env.TV_AUTH_VERIFY_BASE_URL || "https://auth.arvio.tv").replace(/\/+$/, "");
+  const setupUrl = `${baseUrl}/?mode=set-password&token=${encodeURIComponent(token)}`;
+  await sendPasswordSetupEmail(normalizedEmail, setupUrl);
+  return { exists: true, emailSent: true };
+}
+
+async function completePasswordSetup(event, token, password) {
+  const store = authStores(event);
+  const pending = await getJSONOrNull(store, passwordSetupKeyForToken(token));
+  if (!pending || !pending.email || !pending.accountId) {
+    const error = new Error("Password setup link is invalid or expired");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (Date.now() > Date.parse(pending.expiresAt || "")) {
+    const error = new Error("Password setup link expired. Request a new one.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const existing = await loadAuthAccount(event, pending.email);
+  const account = await saveAuthAccount(event, {
+    ...(existing || {}),
+    accountId: existing?.accountId || pending.accountId,
+    email: pending.email,
+    passwordHash: await hashPassword(password),
+    migratedAt: existing?.migratedAt || new Date().toISOString(),
+    createdAt: existing?.createdAt || new Date().toISOString()
+  });
+  if (typeof store.delete === "function") {
+    await store.delete(passwordSetupKeyForToken(token)).catch(() => {});
+  }
+  return issueArvioSession(event, account);
+}
+
+async function authenticateNetlifyPassword(event, email, password) {
+  const account = await loadAuthAccount(event, email);
+  if (!account || !account.passwordHash) {
+    const migrated = await migrateSupabasePasswordIfValid(event, email, password);
+    if (migrated) return migrated;
+
+    const legacySnapshot = account ? null : await loadLegacySnapshotByEmail(event, email);
+    if (legacySnapshot || account) {
+      const error = new Error("ARVIO Cloud moved to a new secure server. To keep your data protected, create a new ARVIO Cloud password from the email we sent you.");
+      error.statusCode = 409;
+      error.code = "password_setup_required";
+      try {
+        const setup = await startPasswordSetup(event, email);
+        error.emailSent = !!setup.emailSent;
+      } catch (sendError) {
+        error.emailSent = false;
+        error.setupError = publicError(sendError, "Password setup email failed");
+      }
+      throw error;
+    }
+    const error = new Error("Invalid email or password");
+    error.statusCode = 401;
+    throw error;
+  }
+  const ok = await verifyPassword(password, account.passwordHash);
+  if (!ok) {
+    const error = new Error("Invalid email or password");
+    error.statusCode = 401;
+    throw error;
+  }
+  return issueArvioSession(event, account);
+}
+
+async function migrateSupabasePasswordIfValid(event, email, password) {
+  try {
+    const token = await supabasePasswordToken(email, password);
+    const userId = token.user?.id || legacyAccountIdForEmail(email);
+    const account = await saveAuthAccount(event, {
+      accountId: userId,
+      email,
+      passwordHash: await hashPassword(password),
+      migratedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      migrationSource: "supabase_password_bridge"
+    });
+    return issueArvioSession(event, account);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function createNetlifyAccount(event, email, password) {
+  const existing = await loadAuthAccount(event, email);
+  const legacySnapshot = existing ? null : await loadLegacySnapshotByEmail(event, email);
+  if (legacySnapshot && !existing?.passwordHash) {
+    const error = new Error("ARVIO Cloud moved to a new secure server. Create a new ARVIO Cloud password to keep your existing data.");
+    error.statusCode = 409;
+    error.code = "password_setup_required";
+    try {
+      const setup = await startPasswordSetup(event, email);
+      error.emailSent = !!setup.emailSent;
+    } catch (sendError) {
+      error.emailSent = false;
+      error.setupError = publicError(sendError, "Password setup email failed");
+    }
+    throw error;
+  }
+  if (existing?.passwordHash) {
+    const error = new Error("Account already exists. Sign in instead.");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const account = await saveAuthAccount(event, {
+    accountId: existing?.accountId || crypto.randomUUID(),
+    email,
+    passwordHash: await hashPassword(password),
+    createdAt: existing?.createdAt || new Date().toISOString()
+  });
+  return issueArvioSession(event, account);
+}
+
+async function handleAuthLogin(event) {
+  const preflight = options(event);
+  if (preflight) return preflight;
+  const wrongMethod = methodGuard(event, ["POST"]);
+  if (wrongMethod) return wrongMethod;
+  try {
+    assertAppRequest(event);
+    const body = parseBody(event);
+    const email = normalizeEmail(body.email);
+    const password = String(body.password || "");
+    const emailError = validateEmail(email, false);
+    if (emailError) return json(400, { error: emailError });
+    if (!password) return json(400, { error: "Password is required" });
+    const token = await authenticateNetlifyPassword(event, email, password);
+    return json(200, token);
+  } catch (error) {
+    if (error?.code === "password_setup_required") {
+      return json(409, {
+        code: "password_setup_required",
+        error: error.message,
+        email_sent: !!error.emailSent,
+        setup_error: error.setupError || null
+      });
+    }
+    return handlerError(event, error, "Sign in failed");
+  }
+}
+
+async function handleAuthPasswordStart(event) {
+  const preflight = options(event);
+  if (preflight) return preflight;
+  const wrongMethod = methodGuard(event, ["POST"]);
+  if (wrongMethod) return wrongMethod;
+  try {
+    assertAppRequest(event);
+    const body = parseBody(event);
+    const email = normalizeEmail(body.email);
+    const emailError = validateEmail(email, false);
+    if (emailError) return json(400, { error: emailError });
+    const setup = await startPasswordSetup(event, email);
+    return json(200, {
+      ok: true,
+      email_sent: !!setup.emailSent,
+      account_exists: !!setup.exists
+    });
+  } catch (error) {
+    return handlerError(event, error, "Password setup failed");
+  }
+}
+
+async function handleAuthPasswordComplete(event) {
+  const preflight = options(event);
+  if (preflight) return preflight;
+  const wrongMethod = methodGuard(event, ["POST"]);
+  if (wrongMethod) return wrongMethod;
+  try {
+    const body = parseBody(event);
+    const token = String(body.token || "").trim();
+    const password = String(body.password || "");
+    if (!token) return json(400, { error: "Password setup token is required" });
+    if (password.length < 6) return json(400, { error: "Password must be at least 6 characters" });
+    const session = await completePasswordSetup(event, token, password);
+    return json(200, session);
+  } catch (error) {
+    return handlerError(event, error, "Password setup failed");
+  }
+}
+
 async function supabasePasswordToken(email, password) {
   const { supabaseUrl, anonKey } = supabaseConfig();
   const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
@@ -348,16 +850,17 @@ async function handleCloudAuthEmail(event) {
     if (emailError) return json(400, { error: emailError });
     if (password.length < 6) return json(400, { error: "Password must be at least 6 characters" });
 
-    await createConfirmedSupabaseUser(email, password);
-    const token = await supabasePasswordToken(email, password);
-    return json(200, {
-      access_token: token.access_token,
-      refresh_token: token.refresh_token,
-      expires_in: token.expires_in,
-      token_type: token.token_type,
-      user: token.user
-    });
+    const token = await createNetlifyAccount(event, email, password);
+    return json(200, token);
   } catch (error) {
+    if (error?.code === "password_setup_required") {
+      return json(409, {
+        code: "password_setup_required",
+        error: error.message,
+        email_sent: !!error.emailSent,
+        setup_error: error.setupError || null
+      });
+    }
     return handlerError(event, error, "Account creation failed");
   }
 }
@@ -369,24 +872,12 @@ async function handleCloudAuthReset(event) {
   if (wrongMethod) return wrongMethod;
   try {
     assertAppRequest(event);
-    const { supabaseUrl, anonKey } = supabaseConfig();
     const body = parseBody(event);
     const email = normalizeEmail(body.email);
     const emailError = validateEmail(email, true);
     if (emailError) return json(400, { error: emailError });
-    const redirectTo = String(body.redirect_to || "https://auth.arvio.tv/?mode=recovery").trim();
-    const response = await fetch(`${supabaseUrl}/auth/v1/recover`, {
-      method: "POST",
-      headers: {
-        apikey: anonKey,
-        authorization: `Bearer ${anonKey}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ email, redirect_to: redirectTo })
-    });
-    const text = await response.text();
-    if (!response.ok) return json(response.status, { error: parseAuthError(text) || "Password reset failed" });
-    return json(200, { ok: true });
+    const setup = await startPasswordSetup(event, email);
+    return json(200, { ok: true, email_sent: !!setup.emailSent, account_exists: !!setup.exists });
   } catch (error) {
     return handlerError(event, error, "Password reset failed");
   }
@@ -401,14 +892,11 @@ async function handleAuthRefresh(event) {
     const body = parseBody(event);
     const refreshToken = String(body.refresh_token || "").trim();
     if (!refreshToken) return json(400, { error: "refresh_token is required" });
-    const token = await refreshSupabaseSession(refreshToken);
-    return json(200, {
-      access_token: token.access_token,
-      refresh_token: token.refresh_token,
-      expires_in: token.expires_in,
-      token_type: token.token_type,
-      user: token.user
+    const token = await refreshArvioSession(event, refreshToken).catch(async (netlifyError) => {
+      if (String(netlifyError?.message || "").includes("ARVIO_AUTH_SECRET")) throw netlifyError;
+      return refreshSupabaseSession(refreshToken);
     });
+    return json(200, token);
   } catch (error) {
     return handlerError(event, error, "Session refresh failed");
   }
@@ -495,7 +983,7 @@ async function handleTvAuthApprove(event) {
     assertAppRequest(event);
     const accessToken = bearerToken(event);
     if (!accessToken) return json(401, { error: "Missing user access token" });
-    const identity = await verifySupabaseToken(accessToken);
+    const identity = await resolveIdentity(event);
     const body = parseBody(event);
     const code = String(body.code || "").trim().toUpperCase();
     const refreshToken = String(body.refresh_token || "").trim();
@@ -538,10 +1026,9 @@ async function handleTvAuthComplete(event) {
     if (!session || isTvSessionExpired(session) || session.status !== "pending") {
       return json(400, { error: "Invalid or expired code" });
     }
-    if (intent === "signup") {
-      await createConfirmedSupabaseUser(email, password);
-    }
-    const token = await supabasePasswordToken(email, password);
+    const token = intent === "signup"
+      ? await createNetlifyAccount(event, email, password)
+      : await authenticateNetlifyPassword(event, email, password);
     if (!token.access_token || !token.refresh_token || !token.user?.id) {
       throw new Error("Auth response incomplete");
     }
@@ -556,6 +1043,14 @@ async function handleTvAuthComplete(event) {
     });
     return json(200, { ok: true });
   } catch (error) {
+    if (error?.code === "password_setup_required") {
+      return json(409, {
+        code: "password_setup_required",
+        error: error.message,
+        email_sent: !!error.emailSent,
+        setup_error: error.setupError || null
+      });
+    }
     const status = error?.statusCode === 400 ? 401 : (error?.statusCode || 500);
     return json(status, { error: status === 401 ? "Invalid email or password" : publicError(error, "TV pairing failed") });
   }
@@ -843,7 +1338,17 @@ async function resolveIdentity(event) {
   if (!token) {
     throw new Error("Missing Authorization bearer token");
   }
-  return verifySupabaseToken(token);
+  try {
+    return verifyArvioAccessToken(token);
+  } catch (netlifyError) {
+    try {
+      return await verifySupabaseToken(token);
+    } catch (supabaseError) {
+      const error = new Error(`Token rejected (${publicError(netlifyError)}; ${publicError(supabaseError)})`);
+      error.statusCode = 401;
+      throw error;
+    }
+  }
 }
 
 function snapshotStores(event) {
@@ -1054,6 +1559,9 @@ module.exports = {
   loadSnapshotFromBlobs,
   saveSnapshotToBlobs,
   appendSnapshotEvent,
+  handleAuthLogin,
+  handleAuthPasswordStart,
+  handleAuthPasswordComplete,
   handleAuthRefresh,
   handleCloudAuthEmail,
   handleCloudAuthReset,

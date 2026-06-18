@@ -7,8 +7,15 @@ exports.handler = async (event) => {
   return json(200, {
     backend: "netlify",
     cloudSync: "netlify_account_snapshot",
-    authSurface: "netlify_functions_supabase_auth_bridge",
+    authSurface: "netlify_native_auth",
     tvAuthStorage: "netlify_blobs",
+    migratedPasswordSetup: true,
+    emailProviderConfigured: !!(
+      process.env.RESEND_API_KEY ||
+      process.env.POSTMARK_SERVER_TOKEN ||
+      process.env.SENDGRID_API_KEY
+    ),
+    authSecretConfigured: !!process.env.ARVIO_AUTH_SECRET,
     proxies: {
       tmdb: true,
       trakt: true

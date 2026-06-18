@@ -524,8 +524,10 @@
     const forgotBtn = document.getElementById("forgot");
     const hashParams = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
     const queryMode = (qs.get("mode") || "").trim().toLowerCase();
+    const setupToken = (qs.get("token") || "").trim();
     const hashType = (hashParams.get("type") || "").trim().toLowerCase();
     const isRecoveryMode = queryMode === "recovery" || hashType === "recovery";
+    const isPasswordSetupMode = queryMode === "set-password" && !!setupToken;
 
     function setStatus(msg, type = "") {
       statusEl.textContent = msg || "";
@@ -676,7 +678,7 @@
       pairBox.style.display = "flex";
       pairCodeEl.textContent = pairCode;
     }
-    if (isRecoveryMode) applyRecoveryModeUi();
+    if (isRecoveryMode || isPasswordSetupMode) applyRecoveryModeUi();
 
     async function approveTvIfNeeded() {
       if (!pairCode) return;
@@ -763,11 +765,6 @@
       if (!json.access_token || !json.refresh_token) {
         throw new Error("Account created but sign-in response was incomplete.");
       }
-      const { error } = await supabase.auth.setSession({
-        access_token: json.access_token,
-        refresh_token: json.refresh_token
-      });
-      if (error) throw error;
       return normalizedEmail;
     }
 
@@ -775,8 +772,17 @@
       const email = requireValidEmail(emailEl.value, false);
       const password = passEl.value;
       if (!password) throw new Error("Password is required.");
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
+      const resp = await fetch(`${FUNCTION_BASE}/auth-login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({ email, password })
+      });
+      const json = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(json.error || "Sign in failed");
       return { email, password };
     }
 
@@ -811,6 +817,16 @@
     async function saveNewPassword() {
       const password = passEl.value;
       if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
+      if (setupToken) {
+        const resp = await fetch(`${FUNCTION_BASE}/auth-password-complete`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: setupToken, password })
+        });
+        const json = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(json.error || "Password setup failed");
+        return;
+      }
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       if (sessionError) throw sessionError;
       if (!session) throw new Error("Recovery link expired. Request a new password reset email.");
