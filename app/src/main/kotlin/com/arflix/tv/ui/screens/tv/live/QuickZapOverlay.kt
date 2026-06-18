@@ -131,7 +131,7 @@ fun QuickZapOverlay(
         if (visible) {
             originalCategoryId = selectedCategoryId
             categoryListFocused = false
-            focusRequester.requestFocus()
+            runCatching { focusRequester.requestFocus() }
         }
     }
 

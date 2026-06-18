@@ -366,7 +366,7 @@ private fun FullscreenGuideContent(
             } else {
                 itemsIndexed(
                     items = items,
-                    key = { _, item -> "${item.state}:${item.program.startUtcMillis}:${item.program.title}" },
+                    key = { index, item -> "${item.state}:${item.program.startUtcMillis}:${item.program.title}:$index" },
                 ) { index, item ->
                     GuideProgramRow(
                         item = item,

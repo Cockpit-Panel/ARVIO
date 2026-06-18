@@ -22,7 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
@@ -260,7 +260,7 @@ fun CategorySidebar(
             state = listState,
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            items(tree.top, key = { it.id }) { cat ->
+            itemsIndexed(tree.top, key = { index, cat -> "top:${cat.id}:$index" }) { _, cat ->
                 val isAllGroup = cat.id == "all" && cat.children.isNotEmpty()
                 val isOpen = isAllGroup && expandedAll
                 SidebarRow(
@@ -318,7 +318,7 @@ fun CategorySidebar(
             }
             if (tree.global.categories.isNotEmpty()) {
                 item { SectionHeader(tree.global.label, expanded) }
-                items(tree.global.categories, key = { it.id }) { cat ->
+                itemsIndexed(tree.global.categories, key = { index, cat -> "global:${cat.id}:$index" }) { _, cat ->
                     SidebarRow(
                         label = cat.label,
                         count = cat.count,
@@ -336,7 +336,7 @@ fun CategorySidebar(
             }
             if (tree.hidden.categories.isNotEmpty()) {
                 item { SectionHeader(tree.hidden.label, expanded) }
-                items(tree.hidden.categories, key = { "hidden:${it.id}" }) { cat ->
+                itemsIndexed(tree.hidden.categories, key = { index, cat -> "hidden:${cat.id}:$index" }) { _, cat ->
                     SidebarRow(
                         label = cat.label,
                         count = cat.count,
@@ -357,7 +357,7 @@ fun CategorySidebar(
             }
             if (tree.countries.categories.isNotEmpty()) {
                 item { SectionHeader(tree.countries.label, expanded) }
-                items(tree.countries.categories, key = { it.id }) { country ->
+                itemsIndexed(tree.countries.categories, key = { index, country -> "country:${country.id}:$index" }) { _, country ->
                     val isExpanded = expandedCountry == country.id
                     SidebarRow(
                         label = country.label,
@@ -403,7 +403,7 @@ fun CategorySidebar(
             }
             if (tree.adult.categories.isNotEmpty()) {
                 item { SectionHeader(tree.adult.label, expanded) }
-                items(tree.adult.categories, key = { it.id }) { cat ->
+                itemsIndexed(tree.adult.categories, key = { index, cat -> "adult:${cat.id}:$index" }) { _, cat ->
                     SidebarRow(
                         label = cat.label,
                         count = cat.count,

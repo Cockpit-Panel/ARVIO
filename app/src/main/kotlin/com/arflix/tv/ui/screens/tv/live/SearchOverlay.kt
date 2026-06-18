@@ -17,7 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -236,7 +236,7 @@ fun SearchOverlay(
                 modifier = Modifier.fillMaxWidth().height(440.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                items(results, key = { it.channel.id }) { result ->
+                itemsIndexed(results, key = { index, result -> "${result.channel.id}#$index" }) { _, result ->
                     val ch = result.channel
                     val focusMod = if (results.isNotEmpty() && ch.id == results.first().channel.id) {
                         Modifier.focusRequester(firstResultFocus)

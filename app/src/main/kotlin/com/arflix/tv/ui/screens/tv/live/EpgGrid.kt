@@ -433,7 +433,7 @@ fun EpgGrid(
                         }
                         if (focusMode == EpgGridFocusMode.Epg) {
                             onExitEpg(selectedChannel)
-                            selectedChannelFocusRequester.requestFocus()
+                            runCatching { selectedChannelFocusRequester.requestFocus() }
                         } else {
                             onMoveLeftFromChannels()
                         }
@@ -448,7 +448,7 @@ fun EpgGrid(
                 ) {
                     itemsIndexed(
                         channels,
-                        key = { _, ch -> ch.id },
+                        key = { index, ch -> "${ch.id}#$index" },
                         contentType = { _, _ -> "channelRowAndPrograms" }
                     ) { idx, ch ->
                         val channelFocusRequester = remember(ch.id) { FocusRequester() }
@@ -727,7 +727,7 @@ private fun ProgramsRow(
                     onFocused = onFocused,
                     onMoveLeft = {
                         if (focusableIndex > 0) {
-                            rowFocusRequesters[focusableIndex - 1].requestFocus()
+                            runCatching { rowFocusRequesters[focusableIndex - 1].requestFocus() }
                             true
                         } else {
                             onMoveLeftFromStart()
@@ -735,7 +735,7 @@ private fun ProgramsRow(
                     },
                     onMoveRight = {
                         if (focusableIndex in 0 until rowFocusRequesters.lastIndex) {
-                            rowFocusRequesters[focusableIndex + 1].requestFocus()
+                            runCatching { rowFocusRequesters[focusableIndex + 1].requestFocus() }
                             true
                         } else {
                             false
