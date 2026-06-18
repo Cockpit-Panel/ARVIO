@@ -60,6 +60,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import javax.inject.Inject
 import javax.inject.Provider
@@ -120,6 +121,8 @@ private data class AccountSyncPayloadCandidate(
     val payload: String,
     val updatedAtMillis: Long
 )
+
+private class AccountSyncPayloadRejectedException(message: String) : Exception(message)
 
 private fun parseJsonObject(payload: String): com.google.gson.JsonObject? {
     return runCatching { JsonParser().parse(payload).asJsonObject }.getOrNull()
@@ -1316,6 +1319,16 @@ class AuthRepository @Inject constructor(
             return Result.success(Unit)
         }
 
+        val rpcException = rpcResult.exceptionOrNull()
+        if (rpcException is AccountSyncPayloadRejectedException) {
+            AppLogger.breadcrumb(
+                tag = "CloudSync",
+                message = "rpc_rejected_weaker_snapshot_no_fallback",
+                severity = "warning"
+            )
+            return Result.failure(rpcException)
+        }
+
         val accountSyncResult = saveAccountSyncPayloadToAccountSyncState(userId, payload)
         val userSettingsResult = saveAccountSyncPayloadToUserSettings(userId, payload)
         val profileAddonsResult = saveAccountSyncPayloadToProfileAddons(userId, payload)
@@ -1378,11 +1391,16 @@ class AuthRepository @Inject constructor(
                     .build()
 
                 okHttpClient.newCall(request).execute().use { response ->
+                    val responseBody = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        val errorBody = response.body?.string().orEmpty()
                         throw IllegalStateException(
-                            "Cloud sync upload failed (${response.code}): ${safePostgrestError(errorBody)}"
+                            "Cloud sync upload failed (${response.code}): ${safePostgrestError(responseBody)}"
                         )
+                    }
+                    val rpcJson = runCatching { JSONObject(responseBody) }.getOrNull()
+                    if (rpcJson?.optBoolean("accepted", true) == false) {
+                        val reason = rpcJson.optString("reason", "existing_snapshot_is_richer")
+                        throw AccountSyncPayloadRejectedException("Cloud sync upload rejected: $reason")
                     }
                 }
             }
@@ -1396,6 +1414,73 @@ class AuthRepository @Inject constructor(
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
+        }
+    }
+
+    suspend fun getAccountSyncEventCursor(): Result<Long> {
+        return runCatching {
+            val body = JSONObject().toString()
+            val response = callSupabaseRpc("account_sync_event_cursor", body)
+            response.trim().trim('"').toLongOrNull()
+                ?: JSONArray(response).optLong(0, 0L)
+        }
+    }
+
+    suspend fun pushAccountSyncItems(itemsJson: String): Result<String> {
+        return runCatching {
+            val items = JSONArray(itemsJson)
+            val body = JSONObject()
+                .put("p_items", items)
+                .toString()
+            callSupabaseRpc("push_account_sync_items", body)
+        }
+    }
+
+    suspend fun pullAccountSyncDelta(sinceEventId: Long, limit: Int = 500): Result<String> {
+        return runCatching {
+            val body = JSONObject()
+                .put("p_since_event_id", sinceEventId.coerceAtLeast(0L))
+                .put("p_limit", limit.coerceIn(1, 1000))
+                .toString()
+            callSupabaseRpc("pull_account_sync_delta", body)
+        }
+    }
+
+    suspend fun pullAccountSyncItems(
+        scope: String? = null,
+        profileId: String? = null,
+        limit: Int = 1000
+    ): Result<String> {
+        return runCatching {
+            val body = JSONObject()
+                .put("p_scope", scope?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                .put("p_profile_id", profileId?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+                .put("p_limit", limit.coerceIn(1, 5000))
+                .toString()
+            callSupabaseRpc("pull_account_sync_items", body)
+        }
+    }
+
+    private suspend fun callSupabaseRpc(functionName: String, body: String): String {
+        val session = ensureValidSession() ?: throw IllegalStateException("Session expired")
+        return withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url("${Constants.SUPABASE_URL}/rest/v1/rpc/$functionName")
+                .header("apikey", Constants.SUPABASE_ANON_KEY)
+                .header("Authorization", "Bearer ${session.accessToken}")
+                .header("Cache-Control", "no-cache, no-store")
+                .post(body.toRequestBody(jsonMediaType))
+                .build()
+
+            okHttpClient.newCall(request).execute().use { response ->
+                val responseBody = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw IllegalStateException(
+                        "$functionName failed (${response.code}): ${safePostgrestError(responseBody)}"
+                    )
+                }
+                responseBody
+            }
         }
     }
 
