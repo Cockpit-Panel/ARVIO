@@ -7,8 +7,8 @@ import com.dokar.quickjs.binding.asyncFunction
 import com.dokar.quickjs.quickJs
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
-import com.arflix.tv.BuildConfig
 import com.arflix.tv.domain.model.LocalScraperResult
+import com.arflix.tv.util.Constants
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeout
@@ -625,7 +625,10 @@ class PluginRuntime @Inject constructor() {
             globalThis.SCRAPER_ID = "$scraperId";
             globalThis.SCRAPER_SETTINGS = $settingsJson;
             if (typeof TMDB_API_KEY === 'undefined') {
-                globalThis.TMDB_API_KEY = "${BuildConfig.TMDB_API_KEY}";
+                globalThis.TMDB_API_KEY = "${Constants.TMDB_API_KEY}";
+            }
+            if (typeof TMDB_READ_ACCESS_TOKEN === 'undefined') {
+                globalThis.TMDB_READ_ACCESS_TOKEN = "${Constants.TMDB_READ_ACCESS_TOKEN}";
             }
             if (typeof globalThis.global === 'undefined') {
                 globalThis.global = globalThis;

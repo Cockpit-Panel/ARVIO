@@ -569,7 +569,9 @@ fun ArflixApp(
         }
     }
 
-    val startDestination = if (skipProfileSelection == true && activeProfile != null) {
+    val startDestination = if (authState !is AuthState.Authenticated) {
+        Screen.Login.route
+    } else if (skipProfileSelection == true && activeProfile != null) {
         Screen.Home.route
     } else {
         Screen.ProfileSelection.route

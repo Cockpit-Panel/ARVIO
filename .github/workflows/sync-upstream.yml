@@ -1,0 +1,68 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_repository:
+        description: "Upstream repository, for example owner/repo"
+        required: true
+        type: string
+      upstream_branch:
+        description: "Upstream branch to merge"
+        required: true
+        default: "main"
+        type: string
+      target_branch:
+        description: "Local branch to merge into"
+        required: true
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-${{ inputs.target_branch }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Create upstream sync PR
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream "https://github.com/${{ inputs.upstream_repository }}.git"
+          git fetch upstream "${{ inputs.upstream_branch }}"
+
+      - name: Merge upstream branch
+        run: |
+          branch="sync/upstream-${{ inputs.upstream_branch }}-${{ github.run_number }}"
+          git checkout -b "$branch"
+          git merge --no-ff --no-edit "upstream/${{ inputs.upstream_branch }}"
+          git push origin "$branch"
+          echo "SYNC_BRANCH=$branch" >> "$GITHUB_ENV"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --base "${{ inputs.target_branch }}" \
+            --head "$SYNC_BRANCH" \
+            --title "Sync upstream ${{ inputs.upstream_repository }}:${{ inputs.upstream_branch }}" \
+            --body "Merges upstream changes into the Cockpit-managed ARVIO branch.\n\nReview conflict resolutions carefully and preserve the Cockpit mod integration points documented in README.md."

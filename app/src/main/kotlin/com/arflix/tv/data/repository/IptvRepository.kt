@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.arflix.tv.data.model.IptvChannel
 import com.arflix.tv.data.model.DrmInfo
 import com.arflix.tv.data.model.IptvNowNext
@@ -13,6 +14,7 @@ import com.arflix.tv.data.model.IptvProgram
 import com.arflix.tv.data.model.IptvSnapshot
 import com.arflix.tv.data.model.StreamSource
 import com.arflix.tv.util.settingsDataStore
+import com.arflix.tv.util.authDataStore
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
@@ -427,12 +429,22 @@ class IptvRepository @Inject constructor(
     )
 
     fun observeConfig(): Flow<IptvConfig> =
-        profileManager.activeProfileId.combine(context.settingsDataStore.data) { _, prefs ->
-            val playlists = decodePlaylists(prefs[playlistsKey()].orEmpty())
+        combine(
+            profileManager.activeProfileId,
+            context.settingsDataStore.data,
+            context.authDataStore.data
+        ) { _, prefs, authPrefs ->
+            val savedPlaylists = decodePlaylists(prefs[playlistsKey()].orEmpty())
+            val loginPlaylist = buildLoginPlaylist(authPrefs)
+            val playlists = savedPlaylists.ifEmpty { loginPlaylist }
             val primary = playlists.firstOrNull()
             IptvConfig(
-                m3uUrl = primary?.m3uUrl ?: decryptConfigValue(prefs[m3uUrlKey()].orEmpty()),
-                epgUrl = primary?.epgUrl ?: decryptConfigValue(prefs[epgUrlKey()].orEmpty()),
+                m3uUrl = primary?.m3uUrl ?: decryptConfigValue(prefs[m3uUrlKey()].orEmpty()).ifBlank {
+                    loginPlaylist.firstOrNull()?.m3uUrl.orEmpty()
+                },
+                epgUrl = primary?.epgUrl ?: decryptConfigValue(prefs[epgUrlKey()].orEmpty()).ifBlank {
+                    loginPlaylist.firstOrNull()?.epgUrl.orEmpty()
+                },
                 playlists = playlists,
                 stalkerPortalUrl = decryptConfigValue(prefs[stalkerPortalUrlKey()].orEmpty()),
                 stalkerMacAddress = prefs[stalkerMacAddressKey()].orEmpty()
@@ -529,6 +541,41 @@ class IptvRepository @Inject constructor(
         }
         invalidateCache()
         invalidationBus.markDirty(CloudSyncScope.IPTV, profileManager.getProfileIdSync(), "save iptv playlists")
+    }
+
+    private fun buildLoginPlaylist(authPrefs: Preferences): List<IptvPlaylistEntry> {
+        val serverUrl = authPrefs[stringPreferencesKey("server_url")]
+            ?.trim()
+            ?.trimEnd('/')
+            .orEmpty()
+        val username = authPrefs[stringPreferencesKey("username")]?.trim().orEmpty()
+        val password = authPrefs[stringPreferencesKey("password")]?.trim().orEmpty()
+        if (serverUrl.isBlank() || username.isBlank() || password.isBlank()) {
+            return emptyList()
+        }
+
+        val raw = "$serverUrl $username $password"
+        val m3uUrl = normalizeIptvInput(raw)
+        val epgUrl = normalizeEpgInput(raw)
+        if (m3uUrl.isBlank()) {
+            return emptyList()
+        }
+
+        val displayName = authPrefs[stringPreferencesKey("display_name")]
+            ?.trim()
+            ?.ifBlank { null }
+            ?: "Arvio"
+
+        return listOf(
+            IptvPlaylistEntry(
+                id = "panel_login",
+                name = displayName,
+                m3uUrl = m3uUrl,
+                epgUrl = epgUrl,
+                enabled = true,
+                epgUrls = listOf(epgUrl).filter { it.isNotBlank() }
+            )
+        )
     }
 
     suspend fun saveStalkerConfig(portalUrl: String, macAddress: String) {

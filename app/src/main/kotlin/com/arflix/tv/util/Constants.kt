@@ -4,11 +4,11 @@ import com.arflix.tv.BuildConfig
 
 /**
  * Application constants.
- *
- * API keys come from ignored local secrets or CI environment values, not from
- * committed source.
  */
 object Constants {
+    // Cockpit Arvio module URL
+    const val COCKPIT_API_URL = "https://demo.cockpit.lol/api/arvio/"
+
     // Supabase - keys from BuildConfig (secrets.properties).
     val SUPABASE_URL: String get() = BuildConfig.SUPABASE_URL
     val SUPABASE_ANON_KEY: String get() = BuildConfig.SUPABASE_ANON_KEY
@@ -32,9 +32,11 @@ object Constants {
             candidate.isBlank() || candidate.startsWith("your-", ignoreCase = true)
         } ?: ""
 
-    // Optional local direct-call credentials. Release builds should use the Edge
-    // Function proxies so these values do not have to be shipped in the client.
-    val TMDB_API_KEY: String get() = usableSecret(BuildConfig.TMDB_API_KEY)
+    // TMDB direct-call credentials.
+    const val TMDB_API_KEY = "38208ec0916665e6989a1163bb362859"
+    const val TMDB_READ_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIzODIwOGVjMDkxNjY2NWU2OTg5YTExNjNiYjM2Mjg1OSIsIm5iZiI6MTU4OTE0ODMzNC45OTcsInN1YiI6IjVlYjg3YWFlYzM1MTRjMDAxZTVhN2Q5ZCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Xq8vQPnachkv69Tf2Q2up5G0Eo89RvLDEYZ-eJBsR3Q"
+
+    // Optional local direct-call credentials.
     val TRAKT_CLIENT_ID: String get() = usableSecret(BuildConfig.TRAKT_CLIENT_ID)
     val TRAKT_CLIENT_SECRET: String
         get() = usableSecret(BuildConfig.TRAKT_CLIENT_SECRET)

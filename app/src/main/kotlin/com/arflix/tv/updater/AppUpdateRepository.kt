@@ -4,8 +4,10 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import com.arflix.tv.BuildConfig
+import com.arflix.tv.util.Constants
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
+import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.qualifiers.ApplicationContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -54,24 +56,26 @@ class AppUpdateRepository @Inject constructor(
     suspend fun getLatestUpdate(): Result<AppUpdate> {
         return withContext(Dispatchers.IO) {
             runCatching {
-                val url = "https://api.github.com/repos/${BuildConfig.GITHUB_OWNER}/${BuildConfig.GITHUB_REPO}/releases/latest"
+                val url = Constants.COCKPIT_API_URL + "update.php"
                 val request = Request.Builder()
                     .url(url)
-                    .header("Accept", "application/vnd.github+json")
+                    .header("Accept", "application/json")
                     .header("User-Agent", "ARVIO/${BuildConfig.VERSION_NAME}")
                     .build()
 
                 okHttpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        error("GitHub API error: ${response.code}")
+                        error("Update API error: ${response.code}")
                     }
                     val body = response.body?.string().orEmpty()
-                    val dto = gson.fromJson(body, GitHubReleaseDto::class.java)
-                        ?: error("Empty GitHub release response")
-
-                    if (dto.draft || dto.prerelease) {
-                        error("Latest release is draft/prerelease")
-                    }
+                    val releases: List<GitHubReleaseDto> = if (body.trimStart().startsWith("[")) {
+                        val type = object : TypeToken<List<GitHubReleaseDto>>() {}.type
+                        gson.fromJson(body, type)
+                    } else {
+                        listOfNotNull(gson.fromJson(body, GitHubReleaseDto::class.java))
+                    } ?: emptyList()
+                    val dto = releases.firstOrNull { !it.draft && !it.prerelease }
+                        ?: error("No stable release available")
 
                     val tag = dto.tagName?.takeIf { it.isNotBlank() }
                         ?: dto.name?.takeIf { it.isNotBlank() }

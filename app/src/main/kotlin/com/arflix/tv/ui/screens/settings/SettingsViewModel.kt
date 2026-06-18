@@ -13,6 +13,8 @@ import com.arflix.tv.ui.screens.player.SubtitleAiModel
 import com.arflix.tv.util.DeviceIpAddress
 import com.arflix.tv.util.QrCodeGenerator
 import com.arflix.tv.data.api.TraktDeviceCode
+import com.arflix.tv.data.api.ArvioPortal
+import com.arflix.tv.data.api.CockpitArvioApi
 import com.arflix.tv.data.model.Addon
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.CatalogDiscoveryResult
@@ -56,6 +58,7 @@ import com.arflix.tv.updater.UpdatePreferences
 import com.arflix.tv.updater.VersionUtils
 import com.arflix.tv.util.AuthEmailValidator
 import com.arflix.tv.util.LAST_APP_LANGUAGE_KEY
+import com.arflix.tv.util.authDataStore
 import com.arflix.tv.util.settingsDataStore
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -156,6 +159,11 @@ data class SettingsUiState(
     val iptvAvailableGroups: List<String> = emptyList(),
     val iptvHiddenGroups: List<String> = emptyList(),
     val iptvGroupOrder: List<String> = emptyList(),
+    val iptvLoginUsername: String = "",
+    val iptvLoginPassword: String = "",
+    val isLoadingPortals: Boolean = false,
+    val portalError: String? = null,
+    val portals: List<ArvioPortal> = emptyList(),
     // App updates
     val isSelfUpdateSupported: Boolean = true,
     val updateStatus: com.arflix.tv.updater.UpdateStatus = com.arflix.tv.updater.UpdateStatus.Idle,
@@ -224,7 +232,8 @@ class SettingsViewModel @Inject constructor(
     private val appUpdateRepository: AppUpdateRepository,
     private val updatePreferences: UpdatePreferences,
     private val apkDownloader: ApkDownloader,
-    private val updateStatusManager: com.arflix.tv.updater.UpdateStatusManager
+    private val updateStatusManager: com.arflix.tv.updater.UpdateStatusManager,
+    private val cockpitArvioApi: CockpitArvioApi
 ) : ViewModel() {
     private fun visibleCatalogs(catalogs: List<CatalogConfig>): List<CatalogConfig> {
         return catalogs.filter { config ->
@@ -362,12 +371,39 @@ class SettingsViewModel @Inject constructor(
         observeHomeServer()
         observeSyncState()
         observeAuthState()
+        observeAuthCredentials()
         observeIptvConfig()
         observeIptvGroupPrefs()
+        loadPortals()
         initializeCatalogs()
         observeCatalogs()
         initializeUpdaterState()
         checkForAppUpdates(force = false, showNoUpdateFeedback = false)
+    }
+
+    private fun loadPortals() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                isLoadingPortals = true,
+                portalError = null
+            )
+            runCatching { cockpitArvioApi.getPortals().portals }
+                .onSuccess { portals ->
+                    val servicePortals = portals.filter { it.id != 0 }
+                    _uiState.value = _uiState.value.copy(
+                        isLoadingPortals = false,
+                        portalError = null,
+                        portals = servicePortals
+                    )
+                }
+                .onFailure {
+                    _uiState.value = _uiState.value.copy(
+                        isLoadingPortals = false,
+                        portalError = "Unable to load panel services.",
+                        portals = emptyList()
+                    )
+                }
+        }
     }
 
     private fun observeIptvGroupPrefs() {
@@ -1619,6 +1655,17 @@ class SettingsViewModel @Inject constructor(
                 } else if (!isLoggedIn) {
                     lastCloudSyncedUserId = null
                 }
+            }
+        }
+    }
+
+    private fun observeAuthCredentials() {
+        viewModelScope.launch {
+            context.authDataStore.data.collect { prefs ->
+                _uiState.value = _uiState.value.copy(
+                    iptvLoginUsername = prefs[stringPreferencesKey("username")].orEmpty(),
+                    iptvLoginPassword = prefs[stringPreferencesKey("password")].orEmpty()
+                )
             }
         }
     }
@@ -3055,6 +3102,13 @@ class SettingsViewModel @Inject constructor(
 
     fun dismissToast() {
         _uiState.value = _uiState.value.copy(toastMessage = null)
+    }
+
+    fun showToast(message: String, type: ToastType = ToastType.INFO) {
+        _uiState.value = _uiState.value.copy(
+            toastMessage = message,
+            toastType = type
+        )
     }
 
     fun logout() {

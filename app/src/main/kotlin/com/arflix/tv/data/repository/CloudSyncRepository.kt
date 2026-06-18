@@ -69,6 +69,26 @@ internal fun mergeCloudAddonsPreservingLocalDirectAddons(
     return merged.values.toList() to preservedLocalAddon
 }
 
+internal fun accountSyncPayloadRestoreRank(payload: String?): Int {
+    if (payload.isNullOrBlank()) return 0
+
+    return runCatching {
+        val root = JSONObject(payload)
+        var rank = 0
+
+        if ((root.optJSONArray("profiles")?.length() ?: 0) > 0) rank += 30
+        if ((root.optJSONObject("profileSettingsById")?.length() ?: 0) > 0) rank += 10
+        if ((root.optJSONObject("addonsByProfile")?.length() ?: 0) > 0) rank += 20
+        if ((root.optJSONArray("addons")?.length() ?: 0) > 0) rank += 20
+        if ((root.optJSONObject("catalogsByProfile")?.length() ?: 0) > 0) rank += 10
+        if ((root.optJSONObject("iptvByProfile")?.length() ?: 0) > 0) rank += 10
+        if ((root.optJSONObject("traktTokens")?.length() ?: 0) > 0) rank += 10
+        if ((root.optJSONObject("watchlistByProfile")?.length() ?: 0) > 0) rank += 10
+
+        rank.coerceAtMost(100)
+    }.getOrDefault(0)
+}
+
 /**
  * Shared cloud sync logic used by both SettingsViewModel (full push/pull on
  * Settings screen) and ProfileViewModel (pull on profile selection).

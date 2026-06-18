@@ -3,6 +3,7 @@ package com.arflix.tv.di
 import android.content.Context
 import com.arflix.tv.data.api.AniSkipApi
 import com.arflix.tv.data.api.ArmApi
+import com.arflix.tv.data.api.CockpitArvioApi
 import com.arflix.tv.data.api.IntroDbApi
 import com.arflix.tv.data.api.StreamApi
 import com.arflix.tv.data.api.SupabaseApi
@@ -76,17 +77,18 @@ object AppModule {
     @Provides
     @Singleton
     fun provideSupabaseApi(okHttpClient: OkHttpClient): SupabaseApi {
-        // Supabase API client without disk cache to prevent OkHttp from returning
-        // cached responses for POST/upsert operations (which silently drops writes)
-        val noCacheClient = okHttpClient.newBuilder()
-            .cache(null)
-            .build()
+        return com.arflix.tv.data.api.NoOpSupabaseApi()
+    }
+
+    @Provides
+    @Singleton
+    fun provideCockpitArvioApi(okHttpClient: OkHttpClient): CockpitArvioApi {
         return Retrofit.Builder()
-            .baseUrl(Constants.SUPABASE_URL + "/")
-            .client(noCacheClient)
+            .baseUrl(Constants.COCKPIT_API_URL)
+            .client(okHttpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
-            .create(SupabaseApi::class.java)
+            .create(CockpitArvioApi::class.java)
     }
 
     @Provides

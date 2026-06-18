@@ -1,54 +1,68 @@
 package com.arflix.tv.ui.screens.login
 
-import androidx.credentials.GetCredentialRequest
-import androidx.credentials.GetCredentialResponse
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.datastore.preferences.core.stringPreferencesKey
+import com.arflix.tv.data.api.ArvioPortal
+import com.arflix.tv.data.api.CockpitArvioApi
+import com.arflix.tv.data.model.Addon
 import com.arflix.tv.data.repository.AuthRepository
 import com.arflix.tv.data.repository.AuthState
-import com.arflix.tv.data.repository.CloudSyncRepository
 import com.arflix.tv.data.repository.StreamRepository
-import com.arflix.tv.util.AuthEmailValidator
+import com.arflix.tv.util.authDataStore
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 data class LoginUiState(
     val isLoading: Boolean = false,
+    val isLoadingPortals: Boolean = false,
     val error: String? = null,
     val authState: AuthState = AuthState.Loading,
-    val googleSignInRequest: GetCredentialRequest? = null,
+    val portals: List<ArvioPortal> = emptyList(),
     val loginReady: Boolean = false
 )
 
 @HiltViewModel
 class LoginViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val authRepository: AuthRepository,
-    private val streamRepository: StreamRepository,
-    private val cloudSyncRepository: CloudSyncRepository
+    private val cockpitArvioApi: CockpitArvioApi,
+    private val iptvRepository: com.arflix.tv.data.repository.IptvRepository,
+    private val streamRepository: StreamRepository
 ) : ViewModel() {
-    private var lastSignUpAttemptMs: Long = 0L
 
     private val _uiState = MutableStateFlow(LoginUiState())
     val uiState: StateFlow<LoginUiState> = _uiState.asStateFlow()
+    private val gson = Gson()
 
     init {
-        // Observe auth state
         viewModelScope.launch {
             authRepository.authState.collect { authState ->
                 _uiState.update { it.copy(authState = authState) }
             }
         }
+        loadPortals()
     }
 
-    fun signIn(email: String, password: String) {
-        val normalizedEmail = AuthEmailValidator.normalize(email)
-        AuthEmailValidator.validate(normalizedEmail, rejectDisposable = false)?.let { message ->
-            _uiState.update { it.copy(error = message) }
+    fun signIn(username: String, password: String, serverUrl: String) {
+        val trimmedUsername = username.trim()
+        val trimmedServerUrl = serverUrl.trim()
+        if (trimmedServerUrl.isBlank()) {
+            _uiState.update { it.copy(error = "Please select a service") }
+            return
+        }
+        if (trimmedUsername.isBlank()) {
+            _uiState.update { it.copy(error = "Please enter your username") }
             return
         }
         if (password.isBlank()) {
@@ -59,16 +73,39 @@ class LoginViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
 
-            val result = authRepository.signIn(normalizedEmail, password)
+            val result = authRepository.signIn(trimmedUsername, password, trimmedServerUrl)
 
-            // Full cloud restore after successful login — not just addons.
-            // The previous flow only called syncAddonsFromCloud(), so catalogs,
-            // IPTV favorites, watchlist, and other cloud-backed state never came
-            // down on a fresh login. This is why TV-side changes weren't visible
-            // on the phone even after logout/login.
             if (result.isSuccess) {
-                runCatching { cloudSyncRepository.pullFromCloud(pushPendingLocalFirst = false) }
-                runCatching { streamRepository.syncAddonsFromCloud() }
+                try {
+                    val prefs = context.authDataStore.data.first()
+                    val serverUrl = prefs[stringPreferencesKey("server_url")].orEmpty()
+                    val user = prefs[stringPreferencesKey("username")].orEmpty()
+                    val pass = prefs[stringPreferencesKey("password")].orEmpty()
+                    val displayName = prefs[stringPreferencesKey("display_name")].orEmpty().ifBlank { "Arvio" }
+                    if (serverUrl.isNotBlank() && user.isNotBlank() && pass.isNotBlank()) {
+                        val finalM3uUrl = "$serverUrl $user $pass"
+                        val finalEpgUrl = "$serverUrl $user $pass"
+                        val list = listOf(
+                            com.arflix.tv.data.repository.IptvPlaylistEntry(
+                                id = "list_1",
+                                name = displayName,
+                                m3uUrl = finalM3uUrl,
+                                epgUrl = finalEpgUrl,
+                                enabled = true,
+                                epgUrls = listOf(finalEpgUrl)
+                            )
+                        )
+                        iptvRepository.savePlaylists(list)
+                    }
+                } catch (e: Exception) {
+                    // Ignore errors during IPTV auto-sync
+                }
+
+                try {
+                    importPanelAddons()
+                } catch (e: Exception) {
+                    // Ignore errors during addon provisioning
+                }
             }
 
             _uiState.update { state ->
@@ -81,72 +118,27 @@ class LoginViewModel @Inject constructor(
         }
     }
 
-    fun signUp(email: String, password: String) {
-        val normalizedEmail = AuthEmailValidator.normalize(email)
-        AuthEmailValidator.validate(normalizedEmail)?.let { message ->
-            _uiState.update { it.copy(error = message) }
-            return
-        }
-        if (password.isBlank()) {
-            _uiState.update { it.copy(error = "Please enter your password") }
-            return
-        }
-
-        if (password.length < 6) {
-            _uiState.update { it.copy(error = "Password must be at least 6 characters") }
-            return
-        }
-        val now = System.currentTimeMillis()
-        val remainingCooldownMs = 60_000L - (now - lastSignUpAttemptMs)
-        if (remainingCooldownMs > 0L) {
-            val seconds = ((remainingCooldownMs + 999L) / 1000L).coerceAtLeast(1L)
-            _uiState.update { it.copy(error = "Please wait ${seconds}s before creating another account") }
-            return
-        }
-        lastSignUpAttemptMs = now
-
+    private fun loadPortals() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
-
-            val result = authRepository.signUp(normalizedEmail, password)
-
-            _uiState.update { state ->
-                state.copy(
-                    isLoading = false,
-                    error = result.exceptionOrNull()?.message
-                )
-            }
-        }
-    }
-
-    /**
-     * Initiate Google Sign-In - returns the request for the Activity to handle
-     */
-    fun getGoogleSignInRequest(): GetCredentialRequest {
-        return authRepository.getGoogleSignInRequest()
-    }
-
-    /**
-     * Handle Google Sign-In result from the Activity
-     */
-    fun handleGoogleSignInResult(result: GetCredentialResponse) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
-
-            val authResult = authRepository.handleGoogleSignInResult(result)
-
-            if (authResult.isSuccess) {
-                runCatching { cloudSyncRepository.pullFromCloud(pushPendingLocalFirst = false) }
-                runCatching { streamRepository.syncAddonsFromCloud() }
-            }
-
-            _uiState.update { state ->
-                state.copy(
-                    isLoading = false,
-                    error = authResult.exceptionOrNull()?.message,
-                    loginReady = authResult.isSuccess
-                )
-            }
+            _uiState.update { it.copy(isLoadingPortals = true) }
+            runCatching { cockpitArvioApi.getPortals().portals }
+                .onSuccess { portals ->
+                    val servicePortals = portals.filter { it.id != 0 }
+                    _uiState.update {
+                        it.copy(
+                            isLoadingPortals = false,
+                            portals = servicePortals
+                        )
+                    }
+                }
+                .onFailure {
+                    _uiState.update {
+                        it.copy(
+                            isLoadingPortals = false,
+                            error = "Unable to load services"
+                        )
+                    }
+                }
         }
     }
 
@@ -154,10 +146,16 @@ class LoginViewModel @Inject constructor(
         _uiState.update { it.copy(loginReady = false) }
     }
 
-    /**
-     * Handle Google Sign-In error
-     */
-    fun handleGoogleSignInError(error: String) {
-        _uiState.update { it.copy(isLoading = false, error = error) }
+    private suspend fun importPanelAddons() {
+        val payload = authRepository.loadAccountSyncPayload().getOrNull().orEmpty()
+        if (payload.isBlank()) return
+
+        val root = org.json.JSONObject(payload)
+        val addonsJson = root.optJSONArray("addons")?.toString().orEmpty()
+        if (addonsJson.isBlank()) return
+
+        val type = TypeToken.getParameterized(List::class.java, Addon::class.java).type
+        val addons: List<Addon> = gson.fromJson(addonsJson, type) ?: emptyList()
+        streamRepository.replaceSharedAddonsFromCloud(addons)
     }
 }

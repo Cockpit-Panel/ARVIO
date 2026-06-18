@@ -13,6 +13,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
 import com.arflix.tv.BuildConfig
+import com.arflix.tv.data.api.ArvioPortal
 import androidx.compose.foundation.background
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -418,7 +419,7 @@ fun SettingsScreen(
             }
             "home_server" -> uiState.homeServerConnections.size + 3
             "catalogs" -> uiState.catalogs.size // Add + rows
-            "stremio" -> stremioAddons.size // rows + add button
+            "stremio" -> (stremioAddons.size - 1).coerceAtLeast(0)
             "accounts" -> 5 // Cloud + Trakt + Telegram + Force Sync + App Update + Privacy/Data
             else -> 0
         }
@@ -588,7 +589,7 @@ fun SettingsScreen(
         }
     }
 
-    LaunchedEffect(uiState.iptvPlaylists, showIptvInput, editingIptvIndex) {
+    LaunchedEffect(uiState.iptvPlaylists, uiState.portals, uiState.iptvLoginUsername, uiState.iptvLoginPassword, showIptvInput, editingIptvIndex) {
         if (!showIptvInput) {
             editingIptvIndex = -1
             iptvEditName = ""
@@ -603,20 +604,30 @@ fun SettingsScreen(
             // When editing, try to extract Xtream credentials from the saved URL
             // (normalizeIptvInput converts "host user pass" to a full get.php URL)
             val savedUrl = playlist?.m3uUrl ?: ""
+            val xtreamParts = splitXtreamHostCredentials(savedUrl)
             val xtreamUri = try { android.net.Uri.parse(savedUrl) } catch (_: Exception) { null }
             val xtreamUser = xtreamUri?.getQueryParameter("username") ?: ""
             val xtreamPass = xtreamUri?.getQueryParameter("password") ?: ""
             val isXtreamUrl = savedUrl.contains("get.php") && xtreamUser.isNotBlank() && xtreamPass.isNotBlank()
-            if (isXtreamUrl) {
+            if (xtreamParts != null) {
+                iptvEditUrl = xtreamParts.host
+                iptvEditXtreamUser = uiState.iptvLoginUsername.ifBlank { xtreamParts.username }
+                iptvEditXtreamPass = uiState.iptvLoginPassword
+            } else if (isXtreamUrl) {
                 // Show just the host:port for Xtream URLs
                 val baseUrl = "${xtreamUri!!.scheme}://${xtreamUri.host}${if (xtreamUri.port > 0) ":${xtreamUri.port}" else ""}"
                 iptvEditUrl = baseUrl
-                iptvEditXtreamUser = xtreamUser
-                iptvEditXtreamPass = xtreamPass
+                iptvEditXtreamUser = uiState.iptvLoginUsername.ifBlank { xtreamUser }
+                iptvEditXtreamPass = uiState.iptvLoginPassword
             } else {
-                iptvEditUrl = savedUrl
-                iptvEditXtreamUser = ""
-                iptvEditXtreamPass = ""
+                val selectedPortalUrl = uiState.portals.firstOrNull()?.url.orEmpty()
+                iptvEditUrl = if (savedUrl.isNotBlank() && !isPanelApiPortalUrl(savedUrl)) {
+                    savedUrl
+                } else {
+                    selectedPortalUrl.trimEnd('/')
+                }
+                iptvEditXtreamUser = uiState.iptvLoginUsername
+                iptvEditXtreamPass = uiState.iptvLoginPassword
             }
             iptvEditEpg = playlist?.settingsEpgInput().orEmpty()
             iptvEditEnabled = playlist?.enabled ?: true
@@ -678,9 +689,7 @@ fun SettingsScreen(
                     val currentSection = sections.getOrNull(sectionIndex).orEmpty()
                     if (currentSection == "plugins" && activeZone == Zone.CONTENT) return@onPreviewKeyEvent false
                     val focusedStremioAddon = stremioAddons.getOrNull(contentFocusIndex)
-                    val focusedStremioAddonCanDelete = focusedStremioAddon?.let { addon ->
-                        !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
-                    } ?: false
+                    val focusedStremioAddonCanDelete = false
                     val focusedStremioAddonMaxAction = if (focusedStremioAddon == null) {
                         0
                     } else if (focusedStremioAddonCanDelete) {
@@ -1028,23 +1037,12 @@ fun SettingsScreen(
                                             when {
                                                 contentFocusIndex in 0 until stremioAddons.size -> {
                                                     val addon = stremioAddons[contentFocusIndex]
-                                                    val canDelete = !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
                                                     when (addonActionIndex) {
                                                         0 -> viewModel.toggleAddon(addon.id)
                                                         1 -> viewModel.moveAddonUp(addon.id)
                                                         2 -> viewModel.moveAddonDown(addon.id)
-                                                        3 -> if (canDelete) {
-                                                            viewModel.removeAddon(addon.id)
-                                                            addonActionIndex = 0
-                                                            if (contentFocusIndex >= stremioAddons.size && contentFocusIndex > 0) {
-                                                                contentFocusIndex--
-                                                            }
-                                                        }
                                                         else -> viewModel.toggleAddon(addon.id)
                                                     }
-                                                }
-                                                else -> {
-                                                    showCustomAddonInput = true
                                                 }
                                             }
                                         }
@@ -1673,9 +1671,23 @@ fun SettingsScreen(
             )
         }
         if (showIptvInput) {
+            val portalOptions = uiState.portals.map { it.toInputOption() }
+            val normalizedPortalUrl = iptvEditUrl.trim().trimEnd('/')
+            val hostOptions = if (portalOptions.isEmpty() || normalizedPortalUrl.isBlank() || portalOptions.any { it.value == normalizedPortalUrl }) {
+                portalOptions
+            } else {
+                listOf(InputOption("Current Portal", normalizedPortalUrl)) + portalOptions
+            }
+            val portalHelper = when {
+                uiState.isLoadingPortals -> "Loading panel services..."
+                uiState.portalError != null -> uiState.portalError.orEmpty()
+                hostOptions.isEmpty() -> "No panel services are configured."
+                else -> "Panel-managed service. Press OK to change."
+            }
             InputModal(
                 title = if (editingIptvIndex >= 0) "Edit TV Playlist" else "Add TV Playlist",
-                supportingText = "EPG supports multiple sources for this playlist. Add one URL per line; ARVIO will match them in order.",
+                supportingText = "Select a panel-managed service and enter the IPTV credentials.",
+                showPasteButton = false,
                 fields = listOf(
                     InputField(
                         label = "Playlist Name",
@@ -1683,47 +1695,41 @@ fun SettingsScreen(
                         onValueChange = { iptvEditName = it }
                     ),
                     InputField(
-                        label = "M3U URL or Xtream Host",
+                        label = "Portal",
                         value = iptvEditUrl,
-                        placeholder = "https://provider.host:port",
+                        placeholder = if (uiState.isLoadingPortals) "Loading services..." else "Select service",
+                        helper = portalHelper,
+                        options = hostOptions,
                         onValueChange = { iptvEditUrl = it }
                     ),
                     InputField(
-                        label = "Xtream Username (Optional)",
+                        label = "Username",
                         value = iptvEditXtreamUser,
-                        placeholder = "Leave empty for plain M3U",
+                        placeholder = "Enter username",
                         onValueChange = { iptvEditXtreamUser = it }
-                    ),
-                    InputField(
-                        label = "Xtream Password (Optional)",
-                        value = iptvEditXtreamPass,
-                        placeholder = "Leave empty for plain M3U",
-                        isSecret = true,
-                        onValueChange = { iptvEditXtreamPass = it }
-                    ),
-                    InputField(
-                        label = "EPG Sources (Optional)",
-                        value = iptvEditEpg,
-                        placeholder = "https://provider.com/xmltv.xml\nhttps://backup.com/epg.xml.gz",
-                        helper = "One URL per line. Commas, semicolons, and pipes are also accepted.",
-                        singleLine = false,
-                        onValueChange = { iptvEditEpg = it }
                     )
                 ),
                 onConfirm = {
+                    if (iptvEditUrl.isBlank()) {
+                        viewModel.showToast("Select a service before saving the playlist.", ToastType.ERROR)
+                        return@InputModal
+                    }
                     // Build the m3uUrl: if Xtream credentials are provided, combine as "host user pass"
-                    val hasXtream = iptvEditXtreamUser.isNotBlank() && iptvEditXtreamPass.isNotBlank()
+                    val loginPassword = uiState.iptvLoginPassword.trim()
+                    if (loginPassword.isBlank()) {
+                        viewModel.showToast("Sign in again before saving the playlist.", ToastType.ERROR)
+                        return@InputModal
+                    }
+                    val hasXtream = iptvEditXtreamUser.isNotBlank()
                     val finalM3uUrl = if (hasXtream) {
-                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} ${iptvEditXtreamPass.trim()}"
+                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} $loginPassword"
                     } else {
                         iptvEditUrl
                     }
                     // Auto-derive EPG for Xtream if not provided
-                    val finalEpgUrl = if (hasXtream && iptvEditEpg.isBlank()) {
-                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} ${iptvEditXtreamPass.trim()}"
-                    } else {
-                        iptvEditEpg
-                    }
+                    val finalEpgUrl = if (hasXtream) {
+                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} $loginPassword"
+                    } else ""
                     val finalEpgUrls = splitSettingsEpgInput(finalEpgUrl)
                     val updated = uiState.iptvPlaylists.toMutableList()
                     val entry = com.arflix.tv.data.repository.IptvPlaylistEntry(
@@ -5888,7 +5894,7 @@ private fun IptvSettings(
                             }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(playlist.name, style = ArflixTypography.cardTitle.copy(fontSize = 16.sp), color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(buildString { append(playlist.m3uUrl.take(56)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(buildString { append(maskedIptvSourceLabel(playlist)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             if (selectionMode && selectedIndices.size == 1 && isSelected) {
                                 Icon(imageVector = Icons.Default.DragHandle, contentDescription = "Drag to reorder", tint = TextSecondary, modifier = Modifier.size(24.dp).pointerInput(index) {
@@ -5943,7 +5949,7 @@ private fun IptvSettings(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(playlist.name, style = ArflixTypography.cardTitle.copy(fontSize = 16.sp), color = if (focusedIndex == rowIndex) TextPrimary else TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text(buildString { append(playlist.m3uUrl.take(56)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary.copy(alpha = 0.72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(buildString { append(maskedIptvSourceLabel(playlist)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary.copy(alpha = 0.72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     CatalogActionChip(
                         icon = Icons.Default.List,
@@ -7076,15 +7082,11 @@ private fun StremioAddonsSettings(
 
     if (isMobile) {
         Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
-            MobileSettingsCategory(title = "ADD ADDON") {
-                MobileSettingsRow(icon = Icons.Default.Add, title = "Add Addon", subtitle = "Install a custom Stremio addon by URL", value = "", isFocused = false, showDivider = false, onClick = onAddCustomAddon)
-            }
             MobileSettingsCategory(title = "MY ADDONS") {
                 if (addons.isEmpty()) {
                     MobileSettingsRow(icon = Icons.Default.Extension, title = "No addons installed", value = "", isFocused = false, showDivider = false, onClick = {})
                 } else {
                     addons.forEachIndexed { index, addon ->
-                        val canDelete = !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
                         val canMoveUp = index > 0
                         val canMoveDown = index < addons.lastIndex
                         Row(
@@ -7132,12 +7134,6 @@ private fun StremioAddonsSettings(
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
-                            if (canDelete) {
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Box(modifier = Modifier.size(32.dp).clickable { onDeleteAddon(addon.id) }.background(Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete addon", tint = TextSecondary, modifier = Modifier.size(18.dp))
-                                }
-                            }
                         }
                         if (index < addons.size - 1) {
                             Box(modifier = Modifier.fillMaxWidth().height(1.dp).padding(horizontal = 16.dp).background(Color.White.copy(alpha = 0.05f)))
@@ -7154,12 +7150,11 @@ private fun StremioAddonsSettings(
                 Text("No addons installed", style = ArflixTypography.body, color = TextSecondary)
             } else {
                 addons.forEachIndexed { index, addon ->
-                    val canDelete = !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
                     AddonRow(
                         addon = addon,
                         isFocused = focusedIndex == index,
                         focusedAction = if (focusedIndex == index) focusedActionIndex else -1,
-                        canDelete = canDelete,
+                        canDelete = false,
                         onToggle = { onToggleAddon(addon.id) },
                         onMoveUp = { onMoveAddonUp(addon.id) },
                         onMoveDown = { onMoveAddonDown(addon.id) },
@@ -7168,12 +7163,6 @@ private fun StremioAddonsSettings(
                     )
                     if (index < addons.size - 1) { Spacer(modifier = Modifier.height(12.dp)) }
                 }
-            }
-            Spacer(modifier = Modifier.height(24.dp))
-            Row(modifier = Modifier.settingsFocusSlot(addons.size).fillMaxWidth().clickable(onClick = onAddCustomAddon).background(if (focusedIndex == addons.size) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp)).border(width = if (focusedIndex == addons.size) 2.dp else 0.dp, color = if (focusedIndex == addons.size) Pink else Color.Transparent, shape = RoundedCornerShape(12.dp)).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
-                Icon(Icons.Default.Widgets, contentDescription = null, tint = Pink, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(12.dp))
-                Text("Add Addon", style = ArflixTypography.button, color = Pink)
             }
         }
     }
@@ -7784,8 +7773,53 @@ data class InputField(
     val helper: String = "",
     val isSecret: Boolean = false,
     val singleLine: Boolean = true,
+    val options: List<InputOption> = emptyList(),
     val onValueChange: (String) -> Unit
 )
+
+data class InputOption(
+    val label: String,
+    val value: String
+)
+
+private data class XtreamParts(
+    val host: String,
+    val username: String,
+    val password: String
+)
+
+private fun splitXtreamHostCredentials(value: String): XtreamParts? {
+    val parts = value.trim().split(Regex("\\s+"))
+    if (parts.size < 3) return null
+    val host = parts.first().trim()
+    val username = parts[1].trim()
+    val password = parts.drop(2).joinToString(" ").trim()
+    if (!host.startsWith("http", ignoreCase = true) || username.isBlank() || password.isBlank()) return null
+    return XtreamParts(host, username, password)
+}
+
+private fun ArvioPortal.toInputOption(): InputOption {
+    return InputOption(label = name.ifBlank { url }, value = url.trimEnd('/'))
+}
+
+private fun isPanelApiPortalUrl(value: String): Boolean {
+    val normalized = value.trim().lowercase()
+    return normalized.contains("/api/arvio")
+}
+
+private fun maskedIptvSourceLabel(playlist: IptvPlaylistEntry): String {
+    val source = playlist.m3uUrl.trim()
+    if (source.isBlank()) return "Panel playlist"
+    val xtream = splitXtreamHostCredentials(source)
+    if (xtream != null) return playlist.name.ifBlank { "Arvio Portal" }
+    val uri = runCatching { Uri.parse(source) }.getOrNull()
+    if (uri?.getQueryParameter("username")?.isNotBlank() == true ||
+        uri?.getQueryParameter("password")?.isNotBlank() == true
+    ) {
+        return playlist.name.ifBlank { "Arvio Portal" }
+    }
+    return playlist.name.ifBlank { "Arvio Portal" }
+}
 
 private fun IptvPlaylistEntry.settingsEpgInput(): String {
     return (epgUrls.orEmpty().ifEmpty { listOf(epgUrl) })
@@ -8080,13 +8114,16 @@ private fun InputModalLegacy(
 private fun InputModal(
     title: String,
     supportingText: String? = null,
+    showPasteButton: Boolean = true,
     fields: List<InputField>,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var focusedIndex by remember(title, fields.size) { mutableIntStateOf(0) }
     var lastFocusedFieldIndex by remember(title, fields.size) { mutableStateOf<Int?>(null) }
-    val totalItems = fields.size + 3 // inputs + paste + cancel + confirm
+    val cancelIndex = fields.size + if (showPasteButton) 1 else 0
+    val confirmIndex = cancelIndex + 1
+    val totalItems = confirmIndex + 1
     val isTouchDevice = LocalDeviceType.current.isTouchDevice()
     val screenHeightDp = LocalConfiguration.current.screenHeightDp.dp
     val maxDialogHeight = (screenHeightDp * 0.88f).coerceAtMost(if (isTouchDevice) 620.dp else 660.dp)
@@ -8137,6 +8174,7 @@ private fun InputModal(
     }
 
     fun showKeyboardFor(index: Int) {
+        if (fields.getOrNull(index)?.options?.isNotEmpty() == true) return
         val edit = editTextRefs.getOrNull(index) ?: return
         val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         edit.post {
@@ -8144,6 +8182,14 @@ private fun InputModal(
             val shown = imm?.showSoftInput(edit, InputMethodManager.SHOW_IMPLICIT) ?: false
             if (!shown) imm?.showSoftInput(edit, InputMethodManager.SHOW_FORCED)
         }
+    }
+
+    fun cycleFieldOption(index: Int) {
+        val field = fields.getOrNull(index) ?: return
+        if (field.options.isEmpty()) return
+        val currentIndex = field.options.indexOfFirst { it.value == field.value }
+        val nextIndex = if (currentIndex >= 0) (currentIndex + 1) % field.options.size else 0
+        field.onValueChange(field.options[nextIndex].value)
     }
 
     LaunchedEffect(title, fields.size) {
@@ -8227,29 +8273,33 @@ private fun InputModal(
                                     true
                                 }
                                 Key.DirectionLeft -> {
-                                    if (focusedIndex == fields.size + 2) focusedIndex = fields.size + 1
+                                    if (focusedIndex == confirmIndex) focusedIndex = cancelIndex
                                     true
                                 }
                                 Key.DirectionRight -> {
-                                    if (focusedIndex == fields.size + 1) focusedIndex = fields.size + 2
+                                    if (focusedIndex == cancelIndex) focusedIndex = confirmIndex
                                     true
                                 }
                                 Key.Enter, Key.DirectionCenter -> {
                                     when {
                                         focusedIndex in 0 until fields.size -> {
-                                            showKeyboardFor(focusedIndex)
+                                            if (fields[focusedIndex].options.isNotEmpty()) {
+                                                cycleFieldOption(focusedIndex)
+                                            } else {
+                                                showKeyboardFor(focusedIndex)
+                                            }
                                             true
                                         }
-                                        focusedIndex == fields.size -> {
+                                        showPasteButton && focusedIndex == fields.size -> {
                                             pasteClipboardIntoTarget()
                                             true
                                         }
-                                        focusedIndex == fields.size + 1 -> {
+                                        focusedIndex == cancelIndex -> {
                                             hideKeyboardAll()
                                             onDismiss()
                                             true
                                         }
-                                        focusedIndex == fields.size + 2 -> {
+                                        focusedIndex == confirmIndex -> {
                                             hideKeyboardAll()
                                             onConfirm()
                                             true
@@ -8344,6 +8394,10 @@ private fun InputModal(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .clickable(enabled = field.options.isNotEmpty()) {
+                                        focusedIndex = index
+                                        cycleFieldOption(index)
+                                    }
                                     .background(Color.White.copy(alpha = if (isFocused) 0.12f else 0.05f), RoundedCornerShape(10.dp))
                                     .border(
                                         width = if (isFocused) 2.dp else 1.dp,
@@ -8352,7 +8406,32 @@ private fun InputModal(
                                     )
                                     .padding(2.dp)
                             ) {
-                                AndroidView(
+                                if (field.options.isNotEmpty()) {
+                                    val selectedLabel = field.options.firstOrNull { it.value == field.value }?.label
+                                        ?: field.value.ifBlank { field.placeholder.ifBlank { "Select" } }
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = selectedLabel,
+                                            style = ArflixTypography.body,
+                                            color = TextPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Text(
+                                            text = "Change",
+                                            style = ArflixTypography.caption,
+                                            color = if (isFocused) Pink else TextSecondary
+                                        )
+                                    }
+                                } else {
+                                    AndroidView(
                                     factory = { ctx ->
                                         EditText(ctx).apply {
                                             editTextRefs[index] = this
@@ -8458,7 +8537,8 @@ private fun InputModal(
                                             editText.setSelection(field.value.length)
                                         }
                                     }
-                                )
+                                    )
+                                }
                             }
 
                             if (index < fields.size - 1) {
@@ -8469,56 +8549,58 @@ private fun InputModal(
                 }
                 Spacer(modifier = Modifier.height(12.dp))
 
-                val isPasteFocused = focusedIndex == fields.size
-                val pasteTargetLabel = fields.getOrNull(pasteTargetIndex())
-                    ?.label
-                    ?.substringBefore("(")
-                    ?.trim()
-                    ?.ifBlank { "field" }
-                    ?: "field"
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(
-                            color = if (isPasteFocused) Color.White else Color.Black.copy(alpha = 0.82f),
-                            shape = RoundedCornerShape(10.dp)
+                if (showPasteButton) {
+                    val isPasteFocused = focusedIndex == fields.size
+                    val pasteTargetLabel = fields.getOrNull(pasteTargetIndex())
+                        ?.label
+                        ?.substringBefore("(")
+                        ?.trim()
+                        ?.ifBlank { "field" }
+                        ?: "field"
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                color = if (isPasteFocused) Color.White else Color.Black.copy(alpha = 0.82f),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isPasteFocused) Color.White else Color.White.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .clickable {
+                                pasteClipboardIntoTarget()
+                            }
+                            .padding(vertical = 11.dp, horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentPaste,
+                            contentDescription = "Paste",
+                            tint = if (isPasteFocused) Color.Black else Color.White,
+                            modifier = Modifier.size(18.dp)
                         )
-                        .border(
-                            width = 1.dp,
-                            color = if (isPasteFocused) Color.White else Color.White.copy(alpha = 0.14f),
-                            shape = RoundedCornerShape(10.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Paste into $pasteTargetLabel",
+                            style = ArflixTypography.button,
+                            color = if (isPasteFocused) Color.Black else Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        .clickable {
-                            pasteClipboardIntoTarget()
-                        }
-                        .padding(vertical = 11.dp, horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ContentPaste,
-                        contentDescription = "Paste",
-                        tint = if (isPasteFocused) Color.Black else Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Paste into $pasteTargetLabel",
-                        style = ArflixTypography.button,
-                        color = if (isPasteFocused) Color.Black else Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                    }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    val isCancelFocused = focusedIndex == fields.size + 1
+                    val isCancelFocused = focusedIndex == cancelIndex
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -8546,7 +8628,7 @@ private fun InputModal(
                         )
                     }
 
-                    val isConfirmFocused = focusedIndex == fields.size + 2
+                    val isConfirmFocused = focusedIndex == confirmIndex
                     Box(
                         modifier = Modifier
                             .weight(1f)
