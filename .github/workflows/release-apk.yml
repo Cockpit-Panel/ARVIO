@@ -2,42 +2,53 @@ name: Build APK Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      gradle_task:
-        description: "Gradle task to run"
-        required: true
-        default: ":app:assembleSideloadRelease"
-        type: choice
-        options:
-          - ":app:assembleSideloadRelease"
-          - ":app:assembleSideloadStaging"
-          - ":app:assembleSideloadDebug"
-          - ":app:assemblePlayRelease"
-          - ":app:assemblePlayStaging"
-          - ":app:assemblePlayDebug"
-      release_tag:
-        description: "Release tag for manual runs. Leave blank to upload artifact only."
-        required: false
-        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-apk-${{ github.ref }}-${{ inputs.gradle_task }}
+  group: release-apk-main
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build APK
+    name: Build and publish APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read app version
+        id: version
+        shell: bash
+        run: |
+          version_name="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"/\1/p' app/build.gradle.kts | head -n 1)"
+          version_code="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)/\1/p' app/build.gradle.kts | head -n 1)"
+          if [ -z "$version_name" ] || [ -z "$version_code" ]; then
+            echo "Unable to read versionName/versionCode from app/build.gradle.kts" >&2
+            exit 1
+          fi
+          echo "name=$version_name" >> "$GITHUB_OUTPUT"
+          echo "code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version_name" >> "$GITHUB_OUTPUT"
+
+      - name: Check release tag
+        id: release
+        shell: bash
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "$tag already exists; APK will be retained as a workflow artifact only."
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -46,35 +57,33 @@ jobs:
           java-version: "17"
           cache: gradle
 
-      - name: Build
-        run: ./gradlew "${{ github.event.inputs.gradle_task || ':app:assembleSideloadRelease' }}" --no-daemon
+      - name: Build release APK
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon
 
-      - name: Collect APKs
+      - name: Collect release APK
+        shell: bash
         run: |
           mkdir -p release-artifacts
-          find app/build/outputs/apk -name "*.apk" -type f -print -exec cp {} release-artifacts/ \;
-          ls -la release-artifacts
+          cp app/build/outputs/apk/sideload/release/app-sideload-release.apk \
+            "release-artifacts/ARVIO-${{ steps.version.outputs.name }}.apk"
+          sha256sum release-artifacts/*.apk > release-artifacts/SHA256SUMS.txt
 
-      - name: Upload artifact
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: arvio-apks
-          path: release-artifacts/*.apk
+          name: ARVIO-${{ steps.version.outputs.name }}
+          path: release-artifacts/*
           if-no-files-found: error
 
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
+      - name: Create version release
+        if: steps.release.outputs.new == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MANUAL_TAG: ${{ github.event.inputs.release_tag }}
+        shell: bash
         run: |
-          tag="${GITHUB_REF_NAME}"
-          if [ -n "$MANUAL_TAG" ]; then
-            tag="$MANUAL_TAG"
-            git tag "$tag" || true
-            git push origin "$tag" || true
-          fi
-          gh release create "$tag" release-artifacts/*.apk \
-            --title "ARVIO $tag" \
-            --notes "Cockpit-managed ARVIO APK build." \
+          gh release create "${{ steps.version.outputs.tag }}" \
+            release-artifacts/* \
+            --target "$GITHUB_SHA" \
+            --title "ARVIO ${{ steps.version.outputs.name }}" \
+            --generate-notes \
             --latest
