@@ -1966,7 +1966,6 @@ fun LiveTvScreen(
             lastPreparedHeaders = emptyMap()
             lastPreparedCatchupOffsetMs = -1L
             lastPreparedChannelId = null
-            delay(120L)
         }
         val rawStream = currentStreamUrl ?: return@LaunchedEffect
         val sourceChannel = playingChannel?.source
