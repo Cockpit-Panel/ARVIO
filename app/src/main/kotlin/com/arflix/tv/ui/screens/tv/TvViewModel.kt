@@ -1910,7 +1910,12 @@ class TvViewModel @Inject constructor(
         } else {
             channel.streamUrl
         }
-        return resolveStalkerStreamIfNeeded(rawUrl, forceRefresh)
+        val resolved = resolveStalkerStreamIfNeeded(rawUrl, forceRefresh)
+        return if (forceRefresh) {
+            iptvRepository.resolvePlaybackRedirect(resolved, channel.requestHeaders)
+        } else {
+            resolved
+        }
     }
 
     private suspend fun resolveStalkerStreamIfNeeded(rawUrl: String, forceRefresh: Boolean): String {

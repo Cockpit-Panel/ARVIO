@@ -958,7 +958,7 @@ class IptvRepository @Inject constructor(
                             "${if (candidate == ordered.firstOrNull()) "primary" else "fallback"} " +
                             "status=${probe.statusCode} url=${redactIptvUrl(candidate)}"
                     )
-                    return@withContext candidate
+                    return@withContext probe.finalUrl
                 }
                 if (probe != null) {
                     System.err.println(
@@ -1251,8 +1251,18 @@ class IptvRepository @Inject constructor(
     private data class PlaybackProbeResult(
         val statusCode: Int,
         val isPlayable: Boolean,
-        val reason: String
+        val reason: String,
+        val finalUrl: String
     )
+
+    suspend fun resolvePlaybackRedirect(url: String, headers: Map<String, String>): String =
+        withContext(Dispatchers.IO) {
+            probePlaybackUrl(url, headers)
+                ?.takeIf { it.isPlayable }
+                ?.finalUrl
+                ?.takeIf { it.isNotBlank() }
+                ?: url
+        }
 
     private fun probePlaybackUrl(url: String, headers: Map<String, String>): PlaybackProbeResult? {
         val ranged = executePlaybackProbe(url, headers, useRange = true)
@@ -1288,15 +1298,30 @@ class IptvRepository @Inject constructor(
             xtreamGuideHttpClient.newCall(builder.build()).execute().use { response ->
                 val statusCode = response.code
                 if (statusCode !in 200..399) {
-                    return@use PlaybackProbeResult(statusCode, isPlayable = false, reason = "http")
+                    return@use PlaybackProbeResult(
+                        statusCode,
+                        isPlayable = false,
+                        reason = "http",
+                        finalUrl = response.request.url.toString()
+                    )
                 }
 
                 val contentType = response.header("Content-Type").orEmpty().lowercase(Locale.US)
                 if (contentType.contains("text/html") || contentType.contains("application/json")) {
-                    return@use PlaybackProbeResult(statusCode, isPlayable = false, reason = "content-type:$contentType")
+                    return@use PlaybackProbeResult(
+                        statusCode,
+                        isPlayable = false,
+                        reason = "content-type:$contentType",
+                        finalUrl = response.request.url.toString()
+                    )
                 }
 
-                PlaybackProbeResult(statusCode, isPlayable = true, reason = "ok")
+                PlaybackProbeResult(
+                    statusCode,
+                    isPlayable = true,
+                    reason = "ok",
+                    finalUrl = response.request.url.toString()
+                )
             }
         }.getOrNull()
     }

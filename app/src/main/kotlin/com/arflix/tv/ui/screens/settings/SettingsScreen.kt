@@ -611,14 +611,14 @@ fun SettingsScreen(
             val isXtreamUrl = savedUrl.contains("get.php") && xtreamUser.isNotBlank() && xtreamPass.isNotBlank()
             if (xtreamParts != null) {
                 iptvEditUrl = xtreamParts.host
-                iptvEditXtreamUser = uiState.iptvLoginUsername.ifBlank { xtreamParts.username }
-                iptvEditXtreamPass = uiState.iptvLoginPassword
+                iptvEditXtreamUser = xtreamParts.username
+                iptvEditXtreamPass = xtreamParts.password
             } else if (isXtreamUrl) {
                 // Show just the host:port for Xtream URLs
                 val baseUrl = "${xtreamUri!!.scheme}://${xtreamUri.host}${if (xtreamUri.port > 0) ":${xtreamUri.port}" else ""}"
                 iptvEditUrl = baseUrl
-                iptvEditXtreamUser = uiState.iptvLoginUsername.ifBlank { xtreamUser }
-                iptvEditXtreamPass = uiState.iptvLoginPassword
+                iptvEditXtreamUser = xtreamUser
+                iptvEditXtreamPass = xtreamPass
             } else {
                 val selectedPortalUrl = uiState.portals.firstOrNull()?.url.orEmpty()
                 iptvEditUrl = if (savedUrl.isNotBlank() && !isPanelApiPortalUrl(savedUrl)) {
@@ -1707,6 +1707,13 @@ fun SettingsScreen(
                         value = iptvEditXtreamUser,
                         placeholder = "Enter username",
                         onValueChange = { iptvEditXtreamUser = it }
+                    ),
+                    InputField(
+                        label = "Password",
+                        value = iptvEditXtreamPass,
+                        placeholder = "Enter password",
+                        isSecret = true,
+                        onValueChange = { iptvEditXtreamPass = it }
                     )
                 ),
                 onConfirm = {
@@ -1714,22 +1721,14 @@ fun SettingsScreen(
                         viewModel.showToast("Select a service before saving the playlist.", ToastType.ERROR)
                         return@InputModal
                     }
-                    // Build the m3uUrl: if Xtream credentials are provided, combine as "host user pass"
-                    val loginPassword = uiState.iptvLoginPassword.trim()
-                    if (loginPassword.isBlank()) {
-                        viewModel.showToast("Sign in again before saving the playlist.", ToastType.ERROR)
+                    val username = iptvEditXtreamUser.trim()
+                    val password = iptvEditXtreamPass.trim()
+                    if (username.isBlank() || password.isBlank()) {
+                        viewModel.showToast("Enter both the IPTV username and password.", ToastType.ERROR)
                         return@InputModal
                     }
-                    val hasXtream = iptvEditXtreamUser.isNotBlank()
-                    val finalM3uUrl = if (hasXtream) {
-                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} $loginPassword"
-                    } else {
-                        iptvEditUrl
-                    }
-                    // Auto-derive EPG for Xtream if not provided
-                    val finalEpgUrl = if (hasXtream) {
-                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} $loginPassword"
-                    } else ""
+                    val finalM3uUrl = "${iptvEditUrl.trim()} $username $password"
+                    val finalEpgUrl = "${iptvEditUrl.trim()} $username $password"
                     val finalEpgUrls = splitSettingsEpgInput(finalEpgUrl)
                     val updated = uiState.iptvPlaylists.toMutableList()
                     val entry = com.arflix.tv.data.repository.IptvPlaylistEntry(

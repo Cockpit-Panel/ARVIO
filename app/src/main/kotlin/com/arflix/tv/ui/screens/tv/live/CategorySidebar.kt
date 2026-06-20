@@ -121,7 +121,13 @@ fun CategorySidebar(
     var activeMenu by remember { mutableStateOf<CategoryMenuState?>(null) }
     val searchFocusRequester = remember { FocusRequester() }
     val selectedCategoryFocusRequester = remember { FocusRequester() }
+    val allCategoryFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
+
+    fun focusStableCategory() {
+        runCatching { allCategoryFocusRequester.requestFocus() }
+        onSelect("all")
+    }
 
     fun openCategoryMenu(category: LiveCategory, hidden: Boolean) {
         val groupName = category.playlistGroupName ?: return
@@ -143,10 +149,12 @@ fun CategorySidebar(
             canUnhide = menu.canUnhide,
             onHide = {
                 activeMenu = null
+                focusStableCategory()
                 onHideCategory(menu.playlistId, menu.groupName)
             },
             onUnhide = {
                 activeMenu = null
+                focusStableCategory()
                 onUnhideCategory(menu.playlistId, menu.groupName)
             },
             onMoveUp = {
@@ -271,7 +279,11 @@ fun CategorySidebar(
                     expanded = expanded,
                     hasChildren = isAllGroup,
                     isOpenGroup = isOpen,
-                    focusRequester = if (selectedId == cat.id) selectedCategoryFocusRequester else null,
+                    focusRequester = when {
+                        cat.id == "all" -> allCategoryFocusRequester
+                        selectedId == cat.id -> selectedCategoryFocusRequester
+                        else -> null
+                    },
                     onFocused = { onTopBoundaryFocusChanged(false) },
                     onClick = {
                         if (isAllGroup) {
@@ -350,6 +362,7 @@ fun CategorySidebar(
                         },
                         onClick = {
                             val groupName = cat.playlistGroupName ?: return@SidebarRow
+                            focusStableCategory()
                             onUnhideCategory(cat.playlistId, groupName)
                         },
                     )

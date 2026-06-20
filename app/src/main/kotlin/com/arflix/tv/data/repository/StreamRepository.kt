@@ -2933,7 +2933,8 @@ class StreamRepository @Inject constructor(
         if (!stream.behaviorHints?.proxyHeaders?.request.isNullOrEmpty()) return false
         if (url.contains(".m3u8", ignoreCase = true) || url.contains(".mpd", ignoreCase = true)) return false
 
-        return host.contains("torrentio", ignoreCase = true) ||
+        return stream.addonId == "iptv_xtream_vod" ||
+            host.contains("torrentio", ignoreCase = true) ||
             host.contains("strem", ignoreCase = true) ||
             host.contains("comet", ignoreCase = true) ||
             host.contains("mediafusion", ignoreCase = true) ||
