@@ -1149,12 +1149,18 @@ fun LiveTvScreen(
         focusedChannelId,
         favSet,
         filteredChannels,
+        normalizedGuideStart,
     ) {
         val maxPrefetch = if (selectedCategoryId == "all") 96 else 180
         val visibleFirstRows = if (selectedCategoryId == "all") GuideVisibleFirstRowsAllChannels else GuideVisibleFirstRows
         val selectedSeedChannelId = epgAnchorChannelId ?: selectedDisplayChannelId ?: focusedChannelId ?: playingChannelId
-        val anchorIndex = selectedSeedChannelId?.let(filteredChannelIndexById::get)
-            ?: 0
+        val anchorIndex = resolveGuideAnchorIndex(
+            selectedChannelId = selectedSeedChannelId,
+            guideChannelIndexById = guideChannelIndexById,
+            filteredChannelIndexById = filteredChannelIndexById,
+            guideWindowStart = normalizedGuideStart,
+            guideChannelCount = guideChannels.size,
+        )
         buildList<String> {
             fun addChannel(channel: EnrichedChannel?) {
                 val id = channel?.id ?: return
@@ -1190,7 +1196,7 @@ fun LiveTvScreen(
             var nearBackIndex = anchorIndex - 1
             var nearBackCount = 0
             while (nearBackIndex >= 0 && nearBackCount < 8 && size < maxPrefetch) {
-                addChannel(guideChannels[nearBackIndex])
+                addChannel(guideChannels.getOrNull(nearBackIndex))
                 nearBackIndex--
                 nearBackCount++
             }
@@ -1799,6 +1805,7 @@ fun LiveTvScreen(
     var lastPreparedStreamUrl by remember { mutableStateOf<String?>(null) }
     var lastPreparedHeaders by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var lastPreparedCatchupOffsetMs by remember { mutableLongStateOf(-1L) }
+    var lastPreparedChannelId by remember { mutableStateOf<String?>(null) }
     var playerRetryCount by remember { mutableIntStateOf(0) }
     var playbackDiagnostic by remember { mutableStateOf<PlaybackDiagnostic?>(null) }
 
@@ -1853,6 +1860,7 @@ fun LiveTvScreen(
         lastPreparedStreamUrl = stream
         lastPreparedHeaders = headers
         lastPreparedCatchupOffsetMs = if (playingCatchupProgram != null) catchupUrlAnchorOffsetMs else -1L
+        lastPreparedChannelId = playingChannelId
         if (resetRetry) playerRetryCount = 0
         if (resetRetry) {
             playbackDiagnostic = PlaybackDiagnostic(
@@ -1948,7 +1956,18 @@ fun LiveTvScreen(
             }
         }
     }
-    LaunchedEffect(currentStreamUrl, playingCatchupProgram, catchupUrlAnchorOffsetMs, playingChannel?.id) {
+    LaunchedEffect(playingChannelId, currentStreamUrl, playingCatchupProgram, catchupUrlAnchorOffsetMs) {
+        val nextChannelId = playingChannelId
+        if (lastPreparedChannelId != null && lastPreparedChannelId != nextChannelId) {
+            exoPlayer.playWhenReady = false
+            exoPlayer.stop()
+            exoPlayer.clearMediaItems()
+            lastPreparedStreamUrl = null
+            lastPreparedHeaders = emptyMap()
+            lastPreparedCatchupOffsetMs = -1L
+            lastPreparedChannelId = null
+            delay(120L)
+        }
         val rawStream = currentStreamUrl ?: return@LaunchedEffect
         val sourceChannel = playingChannel?.source
         val streamProgram = playingCatchupProgram?.shiftedForCatchup(catchupUrlAnchorOffsetMs)
@@ -2826,6 +2845,25 @@ private fun LiveCategoryTree.countForCategory(categoryId: String): Int? {
         adult.categories.asSequence(),
         hidden.categories.asSequence(),
     ).flatten().findCount()
+}
+
+internal fun resolveGuideAnchorIndex(
+    selectedChannelId: String?,
+    guideChannelIndexById: Map<String, Int>,
+    filteredChannelIndexById: Map<String, Int>,
+    guideWindowStart: Int,
+    guideChannelCount: Int,
+): Int {
+    if (selectedChannelId == null || guideChannelCount <= 0) return 0
+
+    guideChannelIndexById[selectedChannelId]
+        ?.takeIf { it in 0 until guideChannelCount }
+        ?.let { return it }
+
+    return filteredChannelIndexById[selectedChannelId]
+        ?.minus(guideWindowStart)
+        ?.takeIf { it in 0 until guideChannelCount }
+        ?: 0
 }
 
 private val IptvGroupPipeSpacingRegex = Regex("""\s*\|\s*""")
