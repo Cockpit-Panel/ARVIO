@@ -2074,8 +2074,9 @@
 
   .cinematic-showcase {
     position: relative;
-    width: 280px;
-    height: 420px;
+    width: 384px;
+    height: 216px;
+    --r: 300px;
     transform-style: preserve-3d;
     transform: rotateX(8deg) rotateY(-16deg);
     transition: transform 0.6s cubic-bezier(0.2, 0.9, 0.2, 1);
@@ -2110,6 +2111,7 @@
     height: 100%;
     transform-style: preserve-3d;
     animation: rotateCarousel 24s linear infinite;
+    will-change: transform;
   }
 
   @keyframes rotateCarousel {
@@ -2124,29 +2126,24 @@
     width: 100%;
     height: 100%;
     transform-style: preserve-3d;
+    transform: rotateY(var(--a, 0deg)) translateZ(var(--r, 300px));
   }
 
   .movie-card {
     position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    border-radius: 16px;
-    background: oklch(0.2 0.01 60 / 0.6);
-    backdrop-filter: blur(12px);
-    border: 1px solid oklch(1 1 1 / 0.15);
-    box-shadow: 0 30px 60px -15px oklch(0 0 0 / 0.8), 0 0 20px oklch(0 0 0 / 0.4) inset;
+    inset: 0;
+    border-radius: 14px;
+    background: #0c0a12;
+    border: 1px solid oklch(1 1 1 / 0.12);
+    box-shadow: 0 30px 60px -15px oklch(0 0 0 / 0.8);
     overflow: hidden;
-    transform-style: preserve-3d;
-    transition: transform 0.4s cubic-bezier(0.2, 0.9, 0.2, 1), box-shadow 0.4s ease, filter 0.4s ease;
-    filter: brightness(0.85);
+    backface-visibility: hidden;
+    transition: transform 0.4s cubic-bezier(0.2, 0.9, 0.2, 1), box-shadow 0.4s ease, border-color 0.4s ease;
   }
 
   .card-wrapper:hover .movie-card {
-    transform: translateY(-20px) scale(1.08);
+    transform: translateY(-14px) scale(1.05);
     box-shadow: 0 40px 80px -10px oklch(0 0 0 / 0.9), 0 0 30px color-mix(in oklch, var(--accent) 50%, transparent);
-    filter: brightness(1.1);
     border-color: color-mix(in oklch, var(--accent) 60%, transparent);
   }
 
@@ -2162,9 +2159,25 @@
     content: "";
     position: absolute;
     inset: 0;
-    background: linear-gradient(135deg, oklch(1 1 1 / 0.3) 0%, transparent 40%, transparent 100%);
-    opacity: 0.6;
+    background: linear-gradient(to top, oklch(0 0 0 / 0.6), transparent 48%);
     pointer-events: none;
+  }
+
+  .card-cap {
+    position: absolute;
+    left: 12px;
+    bottom: 11px;
+    z-index: 2;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: #fff;
+    padding: 4px 9px;
+    border-radius: 999px;
+    background: oklch(0 0 0 / 0.5);
+    border: 1px solid oklch(1 1 1 / 0.14);
   }
 
   .particles-container {
@@ -2201,7 +2214,7 @@
     .hero-h1 { margin-left: auto; margin-right: auto; }
     .hero-sub { margin-left: auto; margin-right: auto; }
     .hero-ctas { justify-content: center; }
-    .cinematic-showcase { width: 220px; height: 330px; }
+    .cinematic-showcase { width: 288px; height: 162px; --r: 210px; }
   }
 </style>
 </head>
@@ -2275,20 +2288,20 @@
         </div>
         <div class="cinematic-showcase">
           <div class="carousel-track">
-            <div class="card-wrapper" style="transform: rotateY(0deg) translateZ(260px);">
-              <div class="movie-card"><img src="1.jpg" alt="Sci-Fi"></div>
+            <div class="card-wrapper" style="--a: 0deg;">
+              <div class="movie-card"><img src="assets/a8d8836c-0b29-4232-a545-5c112c26ebbb.webp" alt="ARVIO Home on Android TV" loading="eager" decoding="async"><span class="card-cap">Home</span></div>
             </div>
-            <div class="card-wrapper" style="transform: rotateY(72deg) translateZ(260px);">
-              <div class="movie-card"><img src="2.jpg" alt="Action"></div>
+            <div class="card-wrapper" style="--a: 72deg;">
+              <div class="movie-card"><img src="assets/cb602938-0a58-4480-8f8a-f21fac260e1d.webp" alt="ARVIO Live TV" loading="lazy" decoding="async"><span class="card-cap">Live TV</span></div>
             </div>
-            <div class="card-wrapper" style="transform: rotateY(144deg) translateZ(260px);">
-              <div class="movie-card"><img src="3.jpg" alt="Fantasy"></div>
+            <div class="card-wrapper" style="--a: 144deg;">
+              <div class="movie-card"><img src="assets/58a51fcb-b75b-4891-82f3-f797e12afdc1.webp" alt="ARVIO title details" loading="lazy" decoding="async"><span class="card-cap">Details</span></div>
             </div>
-            <div class="card-wrapper" style="transform: rotateY(216deg) translateZ(260px);">
-              <div class="movie-card"><img src="4.jpg" alt="Cyberpunk"></div>
+            <div class="card-wrapper" style="--a: 216deg;">
+              <div class="movie-card"><img src="assets/a1703ba5-e81a-44fc-a257-52f24cc895f4.webp" alt="ARVIO collections" loading="lazy" decoding="async"><span class="card-cap">Collections</span></div>
             </div>
-            <div class="card-wrapper" style="transform: rotateY(288deg) translateZ(260px);">
-              <div class="movie-card"><img src="5.jpg" alt="Space"></div>
+            <div class="card-wrapper" style="--a: 288deg;">
+              <div class="movie-card"><img src="assets/a9f9dd6c-4a0c-4ff5-b6d8-4cb8890875f6.webp" alt="ARVIO 4K HDR player" loading="lazy" decoding="async"><span class="card-cap">Player · 4K</span></div>
             </div>
           </div>
         </div>
@@ -2625,7 +2638,7 @@
       <div class="shot-mobile reveal" data-delay="2"><div class="img-slot" style="background:linear-gradient(135deg, var(--accent-soft), transparent), var(--bg-2); display:grid; place-items:center; text-align:center; padding:20px"><div><div style="font-size:10px;color:var(--ink-3);letter-spacing:.08em;margin-bottom:8px">MORE</div><div style="font-size:13px;color:var(--ink);line-height:1.3">On your phone, too</div></div></div></div>
     </div>
 
-    <p class="reveal" style="font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.1em;margin-top:32px;text-transform:uppercase;font-weight:500">// drop screenshots into /screenshots folder to replace placeholders</p>
+    <p class="reveal" style="font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.1em;margin-top:32px;text-transform:uppercase;font-weight:500">// Captured on Android TV &amp; Pixel — actual ARVIO UI</p>
   </div>
 </section>
 

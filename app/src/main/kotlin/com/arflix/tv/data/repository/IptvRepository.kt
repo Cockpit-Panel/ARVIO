@@ -438,11 +438,13 @@ class IptvRepository @Inject constructor(
             val loginPlaylist = buildLoginPlaylist(authPrefs)
             val playlists = savedPlaylists.ifEmpty { loginPlaylist }
             val primary = playlists.firstOrNull()
+            val legacyM3uUrl = normalizeStoredIptvUrl(decryptConfigValue(prefs[m3uUrlKey()].orEmpty()))
+            val legacyEpgUrls = normalizeStoredEpgInputs(decryptConfigValue(prefs[epgUrlKey()].orEmpty()))
             IptvConfig(
-                m3uUrl = primary?.m3uUrl ?: decryptConfigValue(prefs[m3uUrlKey()].orEmpty()).ifBlank {
+                m3uUrl = primary?.m3uUrl ?: legacyM3uUrl.ifBlank {
                     loginPlaylist.firstOrNull()?.m3uUrl.orEmpty()
                 },
-                epgUrl = primary?.epgUrl ?: decryptConfigValue(prefs[epgUrlKey()].orEmpty()).ifBlank {
+                epgUrl = primary?.epgUrl ?: legacyEpgUrls.firstOrNull().orEmpty().ifBlank {
                     loginPlaylist.firstOrNull()?.epgUrl.orEmpty()
                 },
                 playlists = playlists,
@@ -499,8 +501,8 @@ class IptvRepository @Inject constructor(
     }
 
     suspend fun saveConfig(m3uUrl: String, epgUrl: String) {
-        val normalizedM3u = normalizeIptvInput(m3uUrl)
-        val normalizedEpgUrls = normalizeEpgInputs(epgUrl)
+        val normalizedM3u = normalizeStoredIptvUrl(m3uUrl)
+        val normalizedEpgUrls = normalizeStoredEpgInputs(epgUrl)
         val normalizedEpg = normalizedEpgUrls.firstOrNull().orEmpty()
         val primary = if (normalizedM3u.isNotBlank()) listOf(
             IptvPlaylistEntry(
@@ -522,16 +524,8 @@ class IptvRepository @Inject constructor(
 
     suspend fun savePlaylists(playlists: List<IptvPlaylistEntry>) {
         val normalized = playlists.mapIndexed { index, item ->
-            val normalizedEpgUrls = normalizePlaylistEpgUrls(item)
-            IptvPlaylistEntry(
-                id = item.id.ifBlank { "list_${index + 1}" },
-                name = item.name.ifBlank { "List ${index + 1}" },
-                m3uUrl = normalizeIptvInput(item.m3uUrl),
-                epgUrl = normalizedEpgUrls.firstOrNull().orEmpty(),
-                enabled = item.enabled,
-                epgUrls = normalizedEpgUrls
-            )
-        }.filter { it.m3uUrl.isNotBlank() }.take(3)
+            normalizePlaylistEntry(item, index)
+        }.filterNotNull().take(3)
 
         context.settingsDataStore.edit { prefs ->
             prefs[playlistsKey()] = gson.toJson(normalized)
@@ -653,6 +647,13 @@ class IptvRepository @Inject constructor(
         return trimmed
     }
 
+    private fun normalizeStoredIptvUrl(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return ""
+        val decoded = decodeLegacyBase64Url(trimmed)
+        return normalizeIptvInput(decoded ?: trimmed)
+    }
+
     /**
      * Accept Xtream credentials in the EPG field too.
      *
@@ -713,6 +714,13 @@ class IptvRepository @Inject constructor(
         return trimmed
     }
 
+    private fun normalizeStoredEpgInputs(raw: String): List<String> {
+        val trimmed = raw.trim()
+        if (trimmed.isBlank()) return emptyList()
+        val decoded = decodeLegacyBase64Url(trimmed)
+        return normalizeEpgInputs(decoded ?: trimmed)
+    }
+
     private fun normalizeEpgInputs(raw: String): List<String> {
         val trimmed = raw.trim()
         if (trimmed.isBlank()) return emptyList()
@@ -749,14 +757,66 @@ class IptvRepository @Inject constructor(
     }
 
     private fun normalizePlaylistEpgUrls(playlist: IptvPlaylistEntry): List<String> {
+        val epgUrl = runCatching { playlist.epgUrl }.getOrNull().orEmpty()
+        val epgUrls = runCatching { playlist.epgUrls }.getOrNull().orEmpty()
         return buildList {
-            add(playlist.epgUrl)
-            addAll(playlist.epgUrls.orEmpty())
+            add(epgUrl)
+            addAll(epgUrls)
         }
-            .flatMap { normalizeEpgInputs(it) }
+            .flatMap { normalizeStoredEpgInputs(it) }
             .filter { it.isNotBlank() }
             .distinct()
     }
+
+    private fun normalizePlaylistEntry(playlist: IptvPlaylistEntry, index: Int): IptvPlaylistEntry? {
+        val m3uUrl = normalizeStoredIptvUrl(runCatching { playlist.m3uUrl }.getOrNull().orEmpty())
+        if (m3uUrl.isBlank()) return null
+        val epgUrls = normalizePlaylistEpgUrls(playlist)
+        return IptvPlaylistEntry(
+            id = runCatching { playlist.id }.getOrNull().orEmpty().trim().ifBlank { "list_${index + 1}" },
+            name = runCatching { playlist.name }.getOrNull().orEmpty().trim().ifBlank { "List ${index + 1}" },
+            m3uUrl = m3uUrl,
+            epgUrl = epgUrls.firstOrNull().orEmpty(),
+            enabled = runCatching { playlist.enabled }.getOrDefault(true),
+            epgUrls = epgUrls
+        )
+    }
+
+    private fun decodeLegacyBase64Url(value: String): String? {
+        val trimmed = value.trim()
+        if (trimmed.length < 12 || trimmed.contains("://") || trimmed.any { it.isWhitespace() }) {
+            return null
+        }
+        return listOf(Base64.DEFAULT, Base64.URL_SAFE or Base64.NO_WRAP)
+            .asSequence()
+            .mapNotNull { flags ->
+                runCatching { String(Base64.decode(trimmed, flags), StandardCharsets.UTF_8).trim() }.getOrNull()
+            }
+            .firstOrNull { decoded ->
+                decoded.startsWith("http://", ignoreCase = true) ||
+                    decoded.startsWith("https://", ignoreCase = true)
+            }
+    }
+
+    private fun normalizedIptvHttpUrlOrNull(raw: String): okhttp3.HttpUrl? {
+        val normalized = normalizeStoredIptvUrl(raw)
+        val parsed = normalized.toHttpUrlOrNull() ?: return null
+        return parsed.takeIf { it.scheme == "http" || it.scheme == "https" }
+    }
+
+    private fun normalizedEpgHttpUrlOrNull(raw: String): okhttp3.HttpUrl? {
+        val normalized = normalizeStoredEpgInputs(raw).firstOrNull().orEmpty()
+        val parsed = normalized.toHttpUrlOrNull() ?: return null
+        return parsed.takeIf { it.scheme == "http" || it.scheme == "https" }
+    }
+
+    private fun validatedIptvHttpUrl(raw: String, label: String): okhttp3.HttpUrl =
+        normalizedIptvHttpUrlOrNull(raw)
+            ?: throw IOException("$label is not a valid http(s) URL.")
+
+    private fun validatedEpgHttpUrl(raw: String, label: String): okhttp3.HttpUrl =
+        normalizedEpgHttpUrlOrNull(raw)
+            ?: throw IOException("$label is not a valid http(s) URL.")
 
     private fun IptvPlaylistEntry.allEpgUrls(): List<String> {
         return buildList {
@@ -1282,13 +1342,14 @@ class IptvRepository @Inject constructor(
         favoriteGroups: List<String>,
         favoriteChannels: List<String> = emptyList()
     ) {
-        val normalizedEpgUrls = normalizeEpgInputs(epgUrl)
+        val normalizedM3u = normalizeStoredIptvUrl(m3uUrl)
+        val normalizedEpgUrls = normalizeStoredEpgInputs(epgUrl)
         val normalizedEpg = normalizedEpgUrls.firstOrNull().orEmpty()
         context.settingsDataStore.edit { prefs ->
-            if (m3uUrl.isBlank()) {
+            if (normalizedM3u.isBlank()) {
                 prefs.remove(m3uUrlKey())
             } else {
-                prefs[m3uUrlKey()] = encryptConfigValue(m3uUrl)
+                prefs[m3uUrlKey()] = encryptConfigValue(normalizedM3u)
             }
             if (normalizedEpg.isBlank()) {
                 prefs.remove(epgUrlKey())
@@ -1296,12 +1357,12 @@ class IptvRepository @Inject constructor(
                 prefs[epgUrlKey()] = encryptConfigValue(normalizedEpg)
             }
             prefs[playlistsKey()] = gson.toJson(
-                if (m3uUrl.isNotBlank()) {
+                if (normalizedM3u.isNotBlank()) {
                     listOf(
                         IptvPlaylistEntry(
                             "list_1",
                             "List 1",
-                            m3uUrl,
+                            normalizedM3u,
                             normalizedEpgUrls.firstOrNull().orEmpty(),
                             epgUrls = normalizedEpgUrls
                         )
@@ -2722,15 +2783,9 @@ class IptvRepository @Inject constructor(
             val type = TypeToken.getParameterized(List::class.java, IptvPlaylistEntry::class.java).type
             gson.fromJson<List<IptvPlaylistEntry>>(raw, type)
                 ?.mapIndexed { index, playlist ->
-                    val epgUrls = normalizePlaylistEpgUrls(playlist)
-                    playlist.copy(
-                        id = playlist.id.ifBlank { "list_${index + 1}" },
-                        name = playlist.name.ifBlank { "List ${index + 1}" },
-                        epgUrl = epgUrls.firstOrNull().orEmpty(),
-                        epgUrls = epgUrls
-                    )
+                    normalizePlaylistEntry(playlist, index)
                 }
-                ?.filter { it.m3uUrl.isNotBlank() }
+                ?.filterNotNull()
                 ?: emptyList()
         }.getOrDefault(emptyList())
     }
@@ -2873,9 +2928,13 @@ class IptvRepository @Inject constructor(
         val orderRaw = prefs[groupOrderKeyFor(safeProfileId)].orEmpty()
         val playlistsRaw = prefs[playlistsKeyFor(safeProfileId)].orEmpty()
         val tvSessionRaw = prefs[tvSessionKeyFor(safeProfileId)].orEmpty()
+        val playlists = decodePlaylists(playlistsRaw)
+        val primary = playlists.firstOrNull()
+        val legacyM3uUrl = normalizeStoredIptvUrl(decryptConfigValue(prefs[m3uUrlKeyFor(safeProfileId)].orEmpty()))
+        val legacyEpgUrls = normalizeStoredEpgInputs(decryptConfigValue(prefs[epgUrlKeyFor(safeProfileId)].orEmpty()))
         return IptvCloudProfileState(
-            m3uUrl = decryptConfigValue(prefs[m3uUrlKeyFor(safeProfileId)].orEmpty()),
-            epgUrl = decryptConfigValue(prefs[epgUrlKeyFor(safeProfileId)].orEmpty()),
+            m3uUrl = primary?.m3uUrl ?: legacyM3uUrl,
+            epgUrl = primary?.epgUrl ?: legacyEpgUrls.firstOrNull().orEmpty(),
             favoriteGroups = decodeFavoriteGroups(prefs[favoriteGroupsKeyFor(safeProfileId)].orEmpty()),
             favoriteChannels = decodeFavoriteChannels(prefs[favoriteChannelsKeyFor(safeProfileId)].orEmpty()),
             hiddenGroups = if (hiddenRaw.isNotBlank()) {
@@ -2890,31 +2949,19 @@ class IptvRepository @Inject constructor(
                     gson.fromJson<List<String>>(orderRaw, type) ?: emptyList()
                 }.getOrDefault(emptyList())
             } else emptyList(),
-            playlists = if (playlistsRaw.isNotBlank()) {
-                runCatching {
-                    val type = TypeToken.getParameterized(List::class.java, IptvPlaylistEntry::class.java).type
-                    gson.fromJson<List<IptvPlaylistEntry>>(playlistsRaw, type) ?: emptyList()
-                }.getOrDefault(emptyList())
-            } else emptyList(),
+            playlists = playlists,
             tvSession = decodeTvSessionState(tvSessionRaw)
         )
     }
 
     suspend fun importCloudConfigForProfile(profileId: String, state: IptvCloudProfileState) {
         val safeProfileId = profileId.trim().ifBlank { "default" }
-        val normalizedM3u = normalizeIptvInput(state.m3uUrl)
-        val normalizedEpgUrls = normalizeEpgInputs(state.epgUrl)
+        val normalizedM3u = normalizeStoredIptvUrl(state.m3uUrl)
+        val normalizedEpgUrls = normalizeStoredEpgInputs(state.epgUrl)
         val normalizedEpg = normalizedEpgUrls.firstOrNull().orEmpty()
         val normalizedPlaylists = state.playlists.mapIndexed { index, playlist ->
-            val epgUrls = normalizePlaylistEpgUrls(playlist)
-            playlist.copy(
-                id = playlist.id.ifBlank { "list_${index + 1}" },
-                name = playlist.name.ifBlank { "List ${index + 1}" },
-                m3uUrl = normalizeIptvInput(playlist.m3uUrl),
-                epgUrl = epgUrls.firstOrNull().orEmpty(),
-                epgUrls = epgUrls
-            )
-        }.filter { it.m3uUrl.isNotBlank() }.take(3)
+            normalizePlaylistEntry(playlist, index)
+        }.filterNotNull().take(3)
         context.settingsDataStore.edit { prefs ->
             prefs[m3uUrlKeyFor(safeProfileId)] = encryptConfigValue(normalizedM3u)
             prefs[epgUrlKeyFor(safeProfileId)] = encryptConfigValue(normalizedEpg)
@@ -2976,7 +3023,8 @@ class IptvRepository @Inject constructor(
         url: String,
         onProgress: (IptvLoadProgress) -> Unit
     ): List<IptvChannel> {
-        resolveXtreamCredentials(url)?.let { creds ->
+        val normalizedUrl = normalizeStoredIptvUrl(url)
+        resolveXtreamCredentials(normalizedUrl)?.let { creds ->
             onProgress(IptvLoadProgress("Detected Xtream provider. Loading live channels...", 6))
             runCatching {
                 withTimeoutOrNull(120_000L) {
@@ -2997,7 +3045,7 @@ class IptvRepository @Inject constructor(
             onProgress(IptvLoadProgress("Connecting to playlist (attempt ${attempt + 1}/$maxAttempts)...", 5))
             runCatching {
                 withTimeoutOrNull(90_000L) {
-                    fetchAndParseM3uOnce(url, onProgress)
+                    fetchAndParseM3uOnce(normalizedUrl, onProgress)
                 } ?: throw IllegalStateException("Playlist loading timed out. Try refreshing or using the provider's Xtream credentials.")
             }.onSuccess { channels ->
                 if (channels.isNotEmpty()) return channels
@@ -5049,7 +5097,7 @@ class IptvRepository @Inject constructor(
 
     private fun resolveXtreamCredentials(url: String): XtreamCredentials? {
         if (url.isBlank()) return null
-        val parsed = url.toHttpUrlOrNull() ?: return null
+        val parsed = normalizeStoredIptvUrl(url).toHttpUrlOrNull() ?: return null
         var username = parsed.queryParameter("username")?.trim()?.ifBlank { null }
             ?: parsed.queryParameter("user")?.trim()?.ifBlank { null }
             ?: parsed.queryParameter("uname")?.trim()?.ifBlank { null }
@@ -5181,10 +5229,10 @@ class IptvRepository @Inject constructor(
     }
 
     private fun discoverM3uHeaderEpgUrls(m3uUrl: String): List<String> {
-        val request = Request.Builder()
-            .url(m3uUrl)
-            .build()
         return runCatching {
+            val request = Request.Builder()
+                .url(validatedIptvHttpUrl(m3uUrl, "IPTV playlist URL"))
+                .build()
             iptvCatalogHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@use emptyList()
                 val body = response.body ?: return@use emptyList()
@@ -5315,7 +5363,7 @@ class IptvRepository @Inject constructor(
         onProgress: (IptvLoadProgress) -> Unit
     ): List<IptvChannel> {
         val request = Request.Builder()
-            .url(url)
+            .url(validatedIptvHttpUrl(url, "IPTV playlist URL"))
             .header("User-Agent", OkHttpProvider.userAgentOr(IPTV_USER_AGENT))
             .header("Accept", "*/*")
             .get()
@@ -5364,7 +5412,7 @@ class IptvRepository @Inject constructor(
 
         fun epgRequest(targetUrl: String, userAgent: String, forceFull: Boolean = false): Request {
             val builder = Request.Builder()
-                .url(targetUrl)
+                .url(validatedEpgHttpUrl(targetUrl, "EPG URL"))
                 .header("User-Agent", userAgent)
                 .header("Accept", "*/*")
                 .header("Accept-Language", "en-US,en;q=0.9")

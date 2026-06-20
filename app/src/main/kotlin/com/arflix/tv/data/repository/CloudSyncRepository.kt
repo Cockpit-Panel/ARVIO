@@ -111,7 +111,8 @@ class CloudSyncRepository @Inject constructor(
     private val watchHistoryRepository: WatchHistoryRepository,
     private val watchlistRepository: WatchlistRepository,
     private val profileAvatarImageManager: ProfileAvatarImageManager,
-    private val invalidationBus: CloudSyncInvalidationBus
+    private val invalidationBus: CloudSyncInvalidationBus,
+    private val pluginDataStore: com.arflix.tv.data.local.PluginDataStore
 ) {
     private val TAG = "CloudSync"
     private val gson = Gson()
@@ -643,6 +644,16 @@ class CloudSyncRepository @Inject constructor(
         root.put("iptvEpgUrl", iptvConfig.epgUrl)
         root.put("iptvFavoriteGroups", JSONArray(gson.toJson(iptvRepository.observeFavoriteGroups().first())))
         root.put("iptvFavoriteChannels", JSONArray(gson.toJson(iptvRepository.observeFavoriteChannels().first())))
+
+        // Plugin repositories and scrapers (sideload flavor)
+        runCatching {
+            val pluginRepos = pluginDataStore.repositories.first()
+            val pluginScrapers = pluginDataStore.scrapers.first()
+            val pluginsEnabled = pluginDataStore.pluginsEnabled.first()
+            root.put("pluginRepositories", JSONArray(gson.toJson(pluginRepos)))
+            root.put("pluginScrapers", JSONArray(gson.toJson(pluginScrapers)))
+            root.put("pluginsEnabled", pluginsEnabled)
+        }
 
         // Informational
         val isTraktLinked = traktRepository.hasTrakt()
@@ -1462,6 +1473,21 @@ class CloudSyncRepository @Inject constructor(
 
         traktRepository.clearAllProfileCaches()
         watchHistoryRepository.clearProfileCaches()
+
+        // Restore plugin repositories and scrapers
+        runCatching {
+            root.optJSONArray("pluginRepositories")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
+                val type = com.google.gson.reflect.TypeToken.getParameterized(List::class.java, com.arflix.tv.domain.model.PluginRepository::class.java).type
+                val repos: List<com.arflix.tv.domain.model.PluginRepository> = gson.fromJson(json, type) ?: emptyList()
+                if (repos.isNotEmpty()) pluginDataStore.saveRepositories(repos)
+            }
+            root.optJSONArray("pluginScrapers")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
+                val type = com.google.gson.reflect.TypeToken.getParameterized(List::class.java, com.arflix.tv.domain.model.ScraperInfo::class.java).type
+                val scrapers: List<com.arflix.tv.domain.model.ScraperInfo> = gson.fromJson(json, type) ?: emptyList()
+                if (scrapers.isNotEmpty()) pluginDataStore.saveScrapers(scrapers)
+            }
+            if (root.has("pluginsEnabled")) pluginDataStore.setPluginsEnabled(root.optBoolean("pluginsEnabled", false))
+        }.onFailure { AppLogger.recordException(it, mapOf("error_area" to "CloudSync", "cloud_flow" to "apply_plugins")) }
 
         System.err.println("[CLOUD-SYNC] Full cloud restore applied successfully")
     }

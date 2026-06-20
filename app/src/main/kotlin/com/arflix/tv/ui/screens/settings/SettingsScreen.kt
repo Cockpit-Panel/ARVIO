@@ -3260,7 +3260,11 @@ private fun MobileSettingsLayout(
                         text = stringResource(R.string.log_out),
                         style = ArflixTypography.button,
                         color = Pink,
-                        modifier = Modifier.clickable { viewModel.logout() }.padding(8.dp)
+                        modifier = Modifier
+                            .heightIn(min = 48.dp)
+                            .widthIn(min = 72.dp)
+                            .clickable { viewModel.logout() }
+                            .padding(horizontal = 12.dp, vertical = 14.dp)
                     )
                 }
             }

@@ -127,6 +127,17 @@ class RealtimeSyncManager @Inject constructor(
     fun start() {
         if (isRunning.getAndSet(true)) return
         Log.i(TAG, "Starting realtime sync")
+        if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+            Log.i(TAG, "Netlify cloud sync enabled; Supabase realtime socket disabled")
+            scope.launch {
+                _syncStatusFlow.value = if (authRepository.getCurrentUserIdForSync().isNullOrBlank()) {
+                    CloudSyncStatus.NOT_SIGNED_IN
+                } else {
+                    CloudSyncStatus.CONNECTED
+                }
+            }
+            return
+        }
         _syncStatusFlow.value = CloudSyncStatus.RECONNECTING
         connectWebSocket()
         if (BuildConfig.ENABLE_PERIODIC_CLOUD_PULL) {

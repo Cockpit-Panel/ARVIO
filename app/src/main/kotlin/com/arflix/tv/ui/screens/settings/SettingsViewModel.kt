@@ -3114,6 +3114,10 @@ class SettingsViewModel @Inject constructor(
     fun logout() {
         viewModelScope.launch {
             cancelCloudAuth()
+            _uiState.value = _uiState.value.copy(
+                toastMessage = "Signing out...",
+                toastType = ToastType.INFO
+            )
             authRepository.signOut()
             _uiState.value = _uiState.value.copy(
                 toastMessage = "Signed out",

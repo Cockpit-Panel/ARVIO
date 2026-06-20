@@ -152,6 +152,9 @@ class ProfileAvatarImageManager @Inject constructor(
     private suspend fun uploadAvatar(profileId: String, version: Long, file: File): Result<String> =
         withContext(Dispatchers.IO) {
             runCatching {
+                if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+                    error("Remote avatar storage is handled by account sync")
+                }
                 val userId = authRepository.getCurrentUserId().orEmpty()
                 val token = authRepository.getAccessToken().orEmpty()
                 if (userId.isBlank() || token.isBlank()) error("Not logged in")
@@ -176,6 +179,9 @@ class ProfileAvatarImageManager @Inject constructor(
     private suspend fun downloadAvatar(storagePath: String, destination: File): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
+                if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+                    error("Remote avatar storage is handled by account sync")
+                }
                 val token = authRepository.getAccessToken().orEmpty()
                 if (token.isBlank()) error("Not logged in")
                 val request = Request.Builder()

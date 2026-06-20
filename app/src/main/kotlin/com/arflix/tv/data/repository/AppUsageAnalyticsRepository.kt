@@ -34,7 +34,9 @@ class AppUsageAnalyticsRepository @Inject constructor(
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     suspend fun recordAppOpen() = withContext(Dispatchers.IO) {
-        if (Constants.SUPABASE_URL.isBlank() || Constants.SUPABASE_ANON_KEY.isBlank()) return@withContext
+        if (!Constants.USE_NETLIFY_CLOUD_SYNC &&
+            (Constants.SUPABASE_URL.isBlank() || Constants.SUPABASE_ANON_KEY.isBlank())
+        ) return@withContext
 
         runCatching {
             val now = System.currentTimeMillis()
@@ -68,14 +70,31 @@ class AppUsageAnalyticsRepository @Inject constructor(
                 .put("distribution", if (BuildConfig.SELF_UPDATE_ENABLED) "sideload" else "play")
                 .put("metadata", metadata)
 
+            if (Constants.USE_NETLIFY_CLOUD_SYNC) {
+                authRepository.getCurrentUserIdForSync()?.takeIf { it.isNotBlank() }?.let { userId ->
+                    payload.put("user_id", userId)
+                }
+                authRepository.getCurrentUserEmail()?.takeIf { it.isNotBlank() }?.let { email ->
+                    payload.put("email", email)
+                }
+            }
+
             val requestBuilder = Request.Builder()
                 .url(Constants.APP_USAGE_EVENT_URL)
-                .header("apikey", Constants.SUPABASE_ANON_KEY)
-                .header("Authorization", "Bearer ${Constants.SUPABASE_ANON_KEY}")
                 .post(payload.toString().toRequestBody(jsonMediaType))
 
-            if (accessToken.isNotBlank()) {
-                requestBuilder.header("x-user-token", accessToken)
+            if (!Constants.USE_NETLIFY_CLOUD_SYNC) {
+                requestBuilder
+                    .header("apikey", Constants.SUPABASE_ANON_KEY)
+                    .header("Authorization", "Bearer ${Constants.SUPABASE_ANON_KEY}")
+                if (accessToken.isNotBlank()) {
+                    requestBuilder.header("x-user-token", accessToken)
+                }
+            } else {
+                requestBuilder
+                    .header("apikey", Constants.APP_ANON_KEY)
+                    .header("Authorization", "Bearer ${Constants.APP_ANON_KEY}")
+                    .header("Cache-Control", "no-cache, no-store")
             }
 
             okHttpClient.newCall(requestBuilder.build()).execute().use { response ->

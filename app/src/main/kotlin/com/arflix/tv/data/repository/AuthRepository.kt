@@ -179,6 +179,7 @@ class AuthRepository @Inject constructor(
     }
 
     suspend fun getCurrentUserIdForSync(): String? = getCurrentUserId()
+    fun getCurrentUserEmail(): String? = _userProfile.value?.email
     suspend fun hasValidCloudSyncSession(): Boolean = getCurrentUserId() != null
 
     suspend fun getAccessToken(): String? {
