@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.arflix.tv.data.model.IptvChannel
 import com.arflix.tv.data.model.DrmInfo
 import com.arflix.tv.data.model.IptvNowNext
@@ -14,6 +15,7 @@ import com.arflix.tv.data.model.IptvSnapshot
 import com.arflix.tv.data.model.StreamSource
 import com.arflix.tv.R
 import com.arflix.tv.util.settingsDataStore
+import com.arflix.tv.util.authDataStore
 import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
@@ -460,14 +462,24 @@ class IptvRepository @Inject constructor(
     )
 
     fun observeConfig(): Flow<IptvConfig> =
-        profileManager.activeProfileId.combine(context.settingsDataStore.data) { _, prefs ->
-            val playlists = decodePlaylists(prefs[playlistsKey()].orEmpty())
+        combine(
+            profileManager.activeProfileId,
+            context.settingsDataStore.data,
+            context.authDataStore.data
+        ) { _, prefs, authPrefs ->
+            val savedPlaylists = decodePlaylists(prefs[playlistsKey()].orEmpty())
+            val loginPlaylist = buildLoginPlaylist(authPrefs)
+            val playlists = savedPlaylists.ifEmpty { loginPlaylist }
             val primary = playlists.firstOrNull()
             val legacyM3uUrl = normalizeStoredIptvUrl(decryptConfigValue(prefs[m3uUrlKey()].orEmpty()))
             val legacyEpgUrls = normalizeStoredEpgInputs(decryptConfigValue(prefs[epgUrlKey()].orEmpty()))
             IptvConfig(
-                m3uUrl = primary?.m3uUrl ?: legacyM3uUrl,
-                epgUrl = primary?.epgUrl ?: legacyEpgUrls.firstOrNull().orEmpty(),
+                m3uUrl = primary?.m3uUrl ?: legacyM3uUrl.ifBlank {
+                    loginPlaylist.firstOrNull()?.m3uUrl.orEmpty()
+                },
+                epgUrl = primary?.epgUrl ?: legacyEpgUrls.firstOrNull().orEmpty().ifBlank {
+                    loginPlaylist.firstOrNull()?.epgUrl.orEmpty()
+                },
                 playlists = playlists,
                 stalkerPortalUrl = decryptConfigValue(prefs[stalkerPortalUrlKey()].orEmpty()),
                 stalkerMacAddress = prefs[stalkerMacAddressKey()].orEmpty(),
@@ -601,6 +613,41 @@ class IptvRepository @Inject constructor(
         }
         invalidateCache()
         invalidationBus.markDirty(CloudSyncScope.IPTV, profileManager.getProfileIdSync(), "save iptv playlists")
+    }
+
+    private fun buildLoginPlaylist(authPrefs: Preferences): List<IptvPlaylistEntry> {
+        val serverUrl = authPrefs[stringPreferencesKey("server_url")]
+            ?.trim()
+            ?.trimEnd('/')
+            .orEmpty()
+        val username = authPrefs[stringPreferencesKey("username")]?.trim().orEmpty()
+        val password = authPrefs[stringPreferencesKey("password")]?.trim().orEmpty()
+        if (serverUrl.isBlank() || username.isBlank() || password.isBlank()) {
+            return emptyList()
+        }
+
+        val raw = "$serverUrl $username $password"
+        val m3uUrl = normalizeIptvInput(raw)
+        val epgUrl = normalizeEpgInput(raw)
+        if (m3uUrl.isBlank()) {
+            return emptyList()
+        }
+
+        val displayName = authPrefs[stringPreferencesKey("display_name")]
+            ?.trim()
+            ?.ifBlank { null }
+            ?: "Arvio"
+
+        return listOf(
+            IptvPlaylistEntry(
+                id = "panel_login",
+                name = displayName,
+                m3uUrl = m3uUrl,
+                epgUrl = epgUrl,
+                enabled = true,
+                epgUrls = listOf(epgUrl).filter { it.isNotBlank() }
+            )
+        )
     }
 
     suspend fun saveStalkerConfig(portalUrl: String, macAddress: String) {
@@ -1040,7 +1087,7 @@ class IptvRepository @Inject constructor(
                             "${if (candidate == ordered.firstOrNull()) "primary" else "fallback"} " +
                             "status=${probe.statusCode} url=${redactIptvUrl(candidate)}"
                     )
-                    return@withContext candidate
+                    return@withContext probe.finalUrl
                 }
                 if (probe != null) {
                     System.err.println(
@@ -1337,8 +1384,18 @@ class IptvRepository @Inject constructor(
     private data class PlaybackProbeResult(
         val statusCode: Int,
         val isPlayable: Boolean,
-        val reason: String
+        val reason: String,
+        val finalUrl: String
     )
+
+    suspend fun resolvePlaybackRedirect(url: String, headers: Map<String, String>): String =
+        withContext(Dispatchers.IO) {
+            probePlaybackUrl(url, headers)
+                ?.takeIf { it.isPlayable }
+                ?.finalUrl
+                ?.takeIf { it.isNotBlank() }
+                ?: url
+        }
 
     private fun probePlaybackUrl(url: String, headers: Map<String, String>): PlaybackProbeResult? {
         val ranged = executePlaybackProbe(url, headers, useRange = true)
@@ -1374,15 +1431,30 @@ class IptvRepository @Inject constructor(
             xtreamGuideHttpClient.newCall(builder.build()).execute().use { response ->
                 val statusCode = response.code
                 if (statusCode !in 200..399) {
-                    return@use PlaybackProbeResult(statusCode, isPlayable = false, reason = "http")
+                    return@use PlaybackProbeResult(
+                        statusCode,
+                        isPlayable = false,
+                        reason = "http",
+                        finalUrl = response.request.url.toString()
+                    )
                 }
 
                 val contentType = response.header("Content-Type").orEmpty().lowercase(Locale.US)
                 if (contentType.contains("text/html") || contentType.contains("application/json")) {
-                    return@use PlaybackProbeResult(statusCode, isPlayable = false, reason = "content-type:$contentType")
+                    return@use PlaybackProbeResult(
+                        statusCode,
+                        isPlayable = false,
+                        reason = "content-type:$contentType",
+                        finalUrl = response.request.url.toString()
+                    )
                 }
 
-                PlaybackProbeResult(statusCode, isPlayable = true, reason = "ok")
+                PlaybackProbeResult(
+                    statusCode,
+                    isPlayable = true,
+                    reason = "ok",
+                    finalUrl = response.request.url.toString()
+                )
             }
         }.getOrNull()
     }

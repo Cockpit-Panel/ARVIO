@@ -1,14 +1,5 @@
 package com.arflix.tv.ui.screens.settings
 
-import androidx.activity.compose.BackHandler
-import com.arflix.tv.ui.motion.*
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -18,12 +9,11 @@ import android.os.SystemClock
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import androidx.compose.foundation.clickable
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
 import com.arflix.tv.BuildConfig
+import com.arflix.tv.data.api.ArvioPortal
 import androidx.compose.foundation.background
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -38,7 +28,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -70,7 +59,6 @@ import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Subtitles
@@ -95,33 +83,19 @@ import androidx.compose.material.icons.filled.Speaker
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.ExitToApp
-import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.Upload
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.SwitchAccount
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.VpnKey
 import androidx.compose.material.icons.filled.QrCode
-import androidx.compose.material.icons.filled.Unarchive
-import androidx.compose.material.icons.filled.Archive
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.tv.material3.ClickableSurfaceDefaults
 import androidx.tv.material3.Surface
-import androidx.compose.foundation.layout.offset
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInParent
-import androidx.compose.ui.unit.IntOffset
-import kotlin.math.roundToInt
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.activity.compose.BackHandler
 import androidx.compose.material3.Icon
 import com.arflix.tv.ui.components.LoadingIndicator
-import com.arflix.tv.ui.components.MobileSettingsCategory
-import com.arflix.tv.ui.components.MobileSettingsRow
 import com.arflix.tv.ui.components.QrCodeImage
 import com.arflix.tv.ui.components.Toast
 import com.arflix.tv.ui.components.ToastType as ComponentToastType
@@ -159,19 +133,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.arflix.tv.ui.components.SettingsRow
 import com.arflix.tv.ui.components.SettingsToggleRow
-import com.arflix.tv.ui.components.localizeSettingValue
 import androidx.core.widget.doAfterTextChanged
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.tv.material3.ExperimentalTvMaterial3Api
@@ -179,10 +149,6 @@ import androidx.tv.material3.Text
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.CatalogDiscoveryResult
 import com.arflix.tv.data.model.CatalogKind
-import com.arflix.tv.data.model.CatalogPackManifest
-import com.arflix.tv.data.model.effectivePackId
-import com.arflix.tv.data.model.effectivePackName
-import com.arflix.tv.data.model.isBulkDeletablePack
 import com.arflix.tv.data.model.CatalogSourceType
 import com.arflix.tv.data.model.QualityFilterConfig
 import com.arflix.tv.data.model.RuntimeKind
@@ -204,7 +170,6 @@ import com.arflix.tv.ui.skin.resolveAccentColor
 import com.arflix.tv.ui.theme.ArflixTypography
 import com.arflix.tv.ui.theme.appBackgroundDark
 import com.arflix.tv.ui.theme.BackgroundElevated
-import com.arflix.tv.ui.theme.contrastingContentColor
 import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.SuccessGreen
 import com.arflix.tv.ui.theme.TextPrimary
@@ -226,15 +191,14 @@ import com.arflix.tv.network.OkHttpProvider
  * "focus moves but screen doesn't scroll" bug, e.g. reaching "Account").
  */
 @OptIn(ExperimentalFoundationApi::class)
-class SettingsFocusTracker {
+internal class SettingsFocusTracker {
     val requesters = mutableStateMapOf<Int, BringIntoViewRequester>()
     fun clear() = requesters.clear()
 }
 
-val LocalSettingsFocusTracker = compositionLocalOf<SettingsFocusTracker?> { null }
+internal val LocalSettingsFocusTracker = compositionLocalOf<SettingsFocusTracker?> { null }
 
 private const val ACCOUNT_DELETION_URL = "https://auth.arvio.tv/delete"
-private const val PRIVACY_POLICY_URL = "https://arvio.tv/privacy"
 
 private val tvGeneralSectionIds = setOf(
     "language",
@@ -248,30 +212,27 @@ private val tvGeneralSectionIds = setOf(
 
 private fun tvGeneralRowsForSection(section: String): List<Int> {
     return when (section) {
-        "language" -> listOf(0, 3, 1, 2)
-        "subtitles" -> listOf(4, 5, 6, 7, 42, 8, 38, 39, 9)
+        "language" -> listOf(0, 3)
+        "subtitles" -> listOf(1, 2, 4, 5, 6, 7, 8, 9)
         "ai_subtitles" -> listOf(28, 29, 30, 31, 32, 33)
-        "playback" -> listOf(10, 11, 12, 13, 14, 37, 34, 16, 15, 40, 27)
-        "appearance" -> listOf(17, 18, 20, 21, 24, 23, 22, 41, 36)
+        "playback" -> listOf(10, 11, 12, 13, 14, 37, 34, 16, 15, 27)
+        "appearance" -> listOf(17, 18, 20, 21, 24, 23, 22, 36)
         "profiles" -> listOf(19)
         "network" -> listOf(25, 26, 35)
         else -> emptyList()
     }
 }
 
-internal fun orderedIptvGroups(
+private fun orderedIptvGroups(
     playlistId: String,
     availableGroups: List<String>,
     groupOrder: List<String>
 ): List<String> {
-    val available = availableGroups.map { it.trim() }.filter { it.isNotBlank() }.distinct()
-    val availableSet = available.toHashSet()
     val explicitOrder = groupOrder
         .map { com.arflix.tv.data.model.PlaylistGroupKey(it) }
         .filter { it.playlistId == playlistId }
         .map { it.groupName }
-        .filter { it in availableSet }
-    return (explicitOrder + available).distinct()
+    return (explicitOrder + availableGroups).distinct()
 }
 
 private fun openExternalUrl(context: Context, url: String) {
@@ -283,10 +244,8 @@ private fun openExternalUrl(context: Context, url: String) {
     }
 }
 
-@Composable
-private fun formatUserAgentPreview(value: String?, maxLength: Int): String {
-    val safeValue = value.orEmpty()
-    val displayValue = safeValue.ifBlank { stringResource(R.string.settings_ua_default) }
+private fun formatUserAgentPreview(value: String, maxLength: Int): String {
+    val displayValue = value.ifBlank { "Default" }
     val preview = displayValue.take(maxLength)
     return if (displayValue.length > maxLength) "$preview..." else preview
 }
@@ -301,7 +260,7 @@ private fun formatUserAgentPreview(value: String?, maxLength: Int): String {
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun Modifier.settingsFocusSlot(index: Int): Modifier {
+internal fun Modifier.settingsFocusSlot(index: Int): Modifier {
     val tracker = LocalSettingsFocusTracker.current ?: return this
     val requester = remember(index) { BringIntoViewRequester() }
     DisposableEffect(tracker, index, requester) {
@@ -325,7 +284,6 @@ fun SettingsScreen(
     currentProfile: com.arflix.tv.data.model.Profile? = null,
     autoStartCloudAuth: Boolean = false,
     initialSection: String? = null,
-    installPackUrl: String? = null,
     onNavigateToHome: () -> Unit = {},
     onNavigateToSearch: () -> Unit = {},
     onNavigateToTv: () -> Unit = {},
@@ -338,7 +296,7 @@ fun SettingsScreen(
     val isTouchDevice = LocalDeviceType.current.isTouchDevice()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val isRtlLayoutDirection = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val isRtlLayoutDirection = androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
 
     val sections = remember {
         buildList {
@@ -386,9 +344,6 @@ fun SettingsScreen(
         )
     }
     var contentFocusIndex by remember { mutableIntStateOf(0) }
-    var pluginsMaxIndex by remember { mutableIntStateOf(0) }
-    var pluginsEnterTrigger by remember { mutableIntStateOf(-1) }
-    var pluginsModalOpen by remember { mutableStateOf(false) }
     var activeZone by remember { mutableStateOf(Zone.CONTENT) }
     var suppressSelectUntilMs by remember { mutableLongStateOf(0L) }
 
@@ -405,19 +360,6 @@ fun SettingsScreen(
     var renameCatalogId by remember { mutableStateOf("") }
     var renameCatalogTitle by remember { mutableStateOf("") }
 
-    // Catalog Pack states
-    var showCatalogPackInput by remember { mutableStateOf(false) }
-    var catalogPackInputUrl by remember { mutableStateOf("") }
-    var showDeletePackConfirm by remember { mutableStateOf(false) }
-    var deletePackId by remember { mutableStateOf("") }
-    var deletePackName by remember { mutableStateOf("") }
-
-    LaunchedEffect(installPackUrl) {
-        if (!installPackUrl.isNullOrBlank()) {
-            viewModel.loadPackManifest(installPackUrl)
-        }
-    }
-
     // Input modal states
     var showCustomAddonInput by remember { mutableStateOf(false) }
     var customAddonUrl by remember { mutableStateOf("") }
@@ -429,9 +371,6 @@ fun SettingsScreen(
     var iptvEditEnabled by remember { mutableStateOf(true) }
     var iptvEditXtreamUser by remember { mutableStateOf("") }
     var iptvEditXtreamPass by remember { mutableStateOf("") }
-    var showStalkerInput by remember { mutableStateOf(false) }
-    var stalkerEditPortal by remember { mutableStateOf("") }
-    var stalkerEditMac by remember { mutableStateOf("") }
     var showCatalogInput by remember { mutableStateOf(false) }
     var catalogInputUrl by remember { mutableStateOf("") }
     var showSubtitlePicker by remember { mutableStateOf(false) }
@@ -476,13 +415,12 @@ fun SettingsScreen(
                     groupOrder = uiState.iptvGroupOrder
                 ).size // Reset row + category rows
             } else {
-                5 + uiState.iptvPlaylists.size // Add + stalker + playlists + order + EPG actions + refresh + clear
+                2 + uiState.iptvPlaylists.size // Add + rows + refresh + clear
             }
             "home_server" -> uiState.homeServerConnections.size + 3
-            "catalogs" -> uiState.catalogs.size + 1 // Add + Import + catalogs
-            "stremio" -> stremioAddons.size + 1 // rows + refresh + add button
-            "plugins" -> pluginsMaxIndex
-            "accounts" -> 15 // Accounts, tracking routing, telegram, discord, sync/update, privacy and deletion
+            "catalogs" -> uiState.catalogs.size // Add + rows
+            "stremio" -> (stremioAddons.size - 1).coerceAtLeast(0)
+            "accounts" -> 5 // Cloud + Trakt + Telegram + Force Sync + App Update + Privacy/Data
             else -> 0
         }
     }
@@ -651,7 +589,7 @@ fun SettingsScreen(
         }
     }
 
-    LaunchedEffect(uiState.iptvPlaylists, showIptvInput, editingIptvIndex) {
+    LaunchedEffect(uiState.iptvPlaylists, uiState.portals, uiState.iptvLoginUsername, uiState.iptvLoginPassword, showIptvInput, editingIptvIndex) {
         if (!showIptvInput) {
             editingIptvIndex = -1
             iptvEditName = ""
@@ -666,30 +604,36 @@ fun SettingsScreen(
             // When editing, try to extract Xtream credentials from the saved URL
             // (normalizeIptvInput converts "host user pass" to a full get.php URL)
             val savedUrl = playlist?.m3uUrl ?: ""
+            val xtreamParts = splitXtreamHostCredentials(savedUrl)
             val xtreamUri = try { android.net.Uri.parse(savedUrl) } catch (_: Exception) { null }
             val xtreamUser = xtreamUri?.getQueryParameter("username") ?: ""
             val xtreamPass = xtreamUri?.getQueryParameter("password") ?: ""
             val isXtreamUrl = savedUrl.contains("get.php") && xtreamUser.isNotBlank() && xtreamPass.isNotBlank()
-            if (isXtreamUrl) {
+            if (xtreamParts != null) {
+                iptvEditUrl = xtreamParts.host
+                iptvEditXtreamUser = xtreamParts.username
+                iptvEditXtreamPass = xtreamParts.password
+            } else if (isXtreamUrl) {
                 // Show just the host:port for Xtream URLs
                 val baseUrl = "${xtreamUri!!.scheme}://${xtreamUri.host}${if (xtreamUri.port > 0) ":${xtreamUri.port}" else ""}"
                 iptvEditUrl = baseUrl
                 iptvEditXtreamUser = xtreamUser
                 iptvEditXtreamPass = xtreamPass
             } else {
-                iptvEditUrl = savedUrl
-                iptvEditXtreamUser = ""
-                iptvEditXtreamPass = ""
+                val selectedPortalUrl = uiState.portals.firstOrNull()?.url.orEmpty()
+                iptvEditUrl = if (savedUrl.isNotBlank() && !isPanelApiPortalUrl(savedUrl)) {
+                    savedUrl
+                } else {
+                    selectedPortalUrl.trimEnd('/')
+                }
+                iptvEditXtreamUser = uiState.iptvLoginUsername
+                iptvEditXtreamPass = uiState.iptvLoginPassword
             }
             iptvEditEpg = playlist?.settingsEpgInput().orEmpty()
             iptvEditEnabled = playlist?.enabled ?: true
         }
     }
 
-    var showCloudDisconnectConfirm by remember { mutableStateOf(false) }
-    var showTraktDisconnectConfirm by remember { mutableStateOf(false) }
-    var showMdbListConnect by remember { mutableStateOf(false) }
-    var showMdbListDisconnectConfirm by remember { mutableStateOf(false) }
     var cloudDialogEmail by remember { mutableStateOf("") }
     var cloudDialogPassword by remember { mutableStateOf("") }
 
@@ -710,7 +654,6 @@ fun SettingsScreen(
     val hasBlockingModal =
         showCustomAddonInput ||
         showIptvInput ||
-        showStalkerInput ||
         showHomeServerInput ||
         showPlexHomeServerInput ||
         showCatalogInput ||
@@ -730,30 +673,7 @@ fun SettingsScreen(
         uiState.traktCode != null ||
         uiState.plexHomeServerAuth != null ||
         uiState.showAppUpdateDialog ||
-        uiState.showUnknownSourcesDialog ||
-        showCloudDisconnectConfirm ||
-        showTraktDisconnectConfirm ||
-        showMdbListConnect ||
-        showMdbListDisconnectConfirm ||
-        showCatalogPackInput ||
-        showDeletePackConfirm ||
-        uiState.isPackLoading ||
-        uiState.packError != null ||
-        uiState.pendingPackManifest != null ||
-        pluginsModalOpen
-
-    BackHandler(enabled = !isTouchDevice && !hasBlockingModal) {
-        when (activeZone) {
-            Zone.SIDEBAR -> onBack()
-            Zone.SECTION -> {
-                activeZone = Zone.SIDEBAR
-                isSidebarFocused = true
-            }
-            Zone.CONTENT -> {
-                activeZone = Zone.SECTION
-            }
-        }
-    }
+        uiState.showUnknownSourcesDialog
 
     Box(
         modifier = Modifier
@@ -767,10 +687,9 @@ fun SettingsScreen(
 
                 if (event.type == KeyEventType.KeyDown) {
                     val currentSection = sections.getOrNull(sectionIndex).orEmpty()
+                    if (currentSection == "plugins" && activeZone == Zone.CONTENT) return@onPreviewKeyEvent false
                     val focusedStremioAddon = stremioAddons.getOrNull(contentFocusIndex)
-                    val focusedStremioAddonCanDelete = focusedStremioAddon?.let { addon ->
-                        !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
-                    } ?: false
+                    val focusedStremioAddonCanDelete = false
                     val focusedStremioAddonMaxAction = if (focusedStremioAddon == null) {
                         0
                     } else if (focusedStremioAddonCanDelete) {
@@ -818,11 +737,11 @@ fun SettingsScreen(
                                         iptvActionIndex > 0 &&
                                         (
                                             showIptvCategoriesSettings && contentFocusIndex > 0 ||
-                                                !showIptvCategoriesSettings && contentFocusIndex in 2..(uiState.iptvPlaylists.size + 1)
+                                                !showIptvCategoriesSettings && contentFocusIndex in 1..uiState.iptvPlaylists.size
                                             )
                                     ) {
                                         iptvActionIndex--
-                                    } else if (currentSection == "catalogs" && contentFocusIndex > 1 && catalogActionIndex > 0) {
+                                    } else if (currentSection == "catalogs" && contentFocusIndex > 0 && catalogActionIndex > 0) {
                                         catalogActionIndex--
                                     } else {
                                         activeZone = Zone.SECTION
@@ -863,9 +782,9 @@ fun SettingsScreen(
                                         addonActionIndex++
                                     } else if (currentSection == "iptv" && showIptvCategoriesSettings && contentFocusIndex > 0 && iptvActionIndex < 2) {
                                         iptvActionIndex++
-                                    } else if (currentSection == "iptv" && !showIptvCategoriesSettings && contentFocusIndex in 2..(uiState.iptvPlaylists.size + 1) && iptvActionIndex < 5) {
+                                    } else if (currentSection == "iptv" && !showIptvCategoriesSettings && contentFocusIndex in 1..uiState.iptvPlaylists.size && iptvActionIndex < 5) {
                                         iptvActionIndex++
-                                    } else if (currentSection == "catalogs" && contentFocusIndex > 1 && catalogActionIndex < 5) {
+                                    } else if (currentSection == "catalogs" && contentFocusIndex > 0 && catalogActionIndex < 4) {
                                         catalogActionIndex++
                                     }
                                 }
@@ -958,7 +877,6 @@ fun SettingsScreen(
                                                 5 -> viewModel.cycleSubtitleColor()
                                                 6 -> viewModel.cycleSubtitleOffset()
                                                 7 -> viewModel.cycleSubtitleStyle()
-                                                42 -> viewModel.cycleSubtitleFont()
                                                 8 -> viewModel.toggleSubtitleStylized()
                                                 9 -> viewModel.setFilterSubtitlesByLanguage(!uiState.filterSubtitlesByLanguage)
                                                 10 -> viewModel.setAutoPlayNext(!uiState.autoPlayNext)
@@ -974,7 +892,6 @@ fun SettingsScreen(
                                                 20 -> viewModel.setOledBlackBackground(!uiState.oledBlackBackground)
                                                 21 -> viewModel.cycleClockFormat()
                                                 22 -> viewModel.setShowBudget(!uiState.showBudget)
-                                                41 -> viewModel.setShowEpisodeRatings(!uiState.showEpisodeRatings)
                                                  36 -> viewModel.setSmoothScrolling(!uiState.smoothScrolling)
                                                 23 -> viewModel.setSpoilerBlurEnabled(!uiState.spoilerBlurEnabled)
                                                 24 -> viewModel.cycleAccentColor()
@@ -985,9 +902,6 @@ fun SettingsScreen(
                                                 28 -> viewModel.setSubtitleAiEnabled(!uiState.subtitleAiEnabled)
                                                 29 -> showAiModelDialog = true
                                                 30 -> viewModel.setSubtitleAiAutoSelect(!uiState.subtitleAiAutoSelect)
-                                                38 -> viewModel.setSubtitleAiFindBestMatch(!uiState.subtitleAiFindBestMatch)
-                                                39 -> viewModel.setSubtitlePreloadEnabled(!uiState.subtitlePreloadEnabled)
-                                                40 -> viewModel.setDolbyVisionCompatEnabled(!uiState.dolbyVisionCompatEnabled)
                                                 31 -> viewModel.setSubtitleRemoveHearingImpaired(!uiState.subtitleRemoveHearingImpaired)
                                                 32 -> showAiApiKeyDialog = true
                                                 33 -> viewModel.startAiKeyServer()
@@ -1023,13 +937,8 @@ fun SettingsScreen(
                                                     editingIptvIndex = -1
                                                     showIptvInput = true
                                                 }
-                                                contentFocusIndex == 1 -> {
-                                                    stalkerEditPortal = uiState.iptvStalkerUrl
-                                                    stalkerEditMac = uiState.iptvStalkerMac
-                                                    showStalkerInput = true
-                                                }
-                                                contentFocusIndex in 2..(uiState.iptvPlaylists.size + 1) -> {
-                                                    val idx = contentFocusIndex - 2
+                                                contentFocusIndex in 1..uiState.iptvPlaylists.size -> {
+                                                    val idx = contentFocusIndex - 1
                                                     val updated = uiState.iptvPlaylists.toMutableList()
                                                     val playlist = updated.getOrNull(idx)
                                                     if (playlist != null) {
@@ -1066,21 +975,10 @@ fun SettingsScreen(
                                                         }
                                                     }
                                                 }
-                                                contentFocusIndex == uiState.iptvPlaylists.size + 2 -> {
-                                                    val next = when (uiState.iptvSortOrder) {
-                                                        "provider" -> "number"
-                                                        "number" -> "name"
-                                                        else -> "provider"
-                                                    }
-                                                    viewModel.setIptvSortOrder(next)
-                                                }
-                                                contentFocusIndex == uiState.iptvPlaylists.size + 3 -> {
-                                                    viewModel.setEpgVodActionsEnabled(!uiState.epgVodActionsEnabled)
-                                                }
-                                                contentFocusIndex == uiState.iptvPlaylists.size + 4 -> {
+                                                contentFocusIndex == uiState.iptvPlaylists.size + 1 -> {
                                                     viewModel.refreshIptv(force = true)
                                                 }
-                                                contentFocusIndex == uiState.iptvPlaylists.size + 5 -> {
+                                                contentFocusIndex == uiState.iptvPlaylists.size + 2 -> {
                                                     viewModel.clearIptvConfig()
                                                 }
                                             }
@@ -1114,10 +1012,8 @@ fun SettingsScreen(
                                         "catalogs" -> {
                                             if (contentFocusIndex == 0) {
                                                 showCatalogInput = true
-                                            } else if (contentFocusIndex == 1) {
-                                                showCatalogPackInput = true
                                             } else {
-                                                val catalog = uiState.catalogs.getOrNull(contentFocusIndex - 2)
+                                                val catalog = uiState.catalogs.getOrNull(contentFocusIndex - 1)
                                                 if (catalog != null) {
                                                     when (catalogActionIndex) {
                                                         0 -> {
@@ -1132,20 +1028,7 @@ fun SettingsScreen(
                                                                 toggleCatalogueRowLayoutMode(context, catalogueLayoutRowKey(catalog))
                                                             }
                                                         }
-                                                        4 -> {
-                                                            if (catalog.packId != null && catalog.isBulkDeletablePack) {
-                                                                viewModel.unpackCatalog(catalog.id)
-                                                            }
-                                                        }
-                                                        else -> {
-                                                            if (catalog.isBulkDeletablePack) {
-                                                                deletePackId = catalog.effectivePackId
-                                                                deletePackName = catalog.effectivePackName
-                                                                showDeletePackConfirm = true
-                                                            } else {
-                                                                viewModel.removeCatalog(catalog.id)
-                                                            }
-                                                        }
+                                                        else -> viewModel.removeCatalog(catalog.id)
                                                     }
                                                 }
                                             }
@@ -1154,26 +1037,12 @@ fun SettingsScreen(
                                             when {
                                                 contentFocusIndex in 0 until stremioAddons.size -> {
                                                     val addon = stremioAddons[contentFocusIndex]
-                                                    val canDelete = !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
                                                     when (addonActionIndex) {
                                                         0 -> viewModel.toggleAddon(addon.id)
                                                         1 -> viewModel.moveAddonUp(addon.id)
                                                         2 -> viewModel.moveAddonDown(addon.id)
-                                                        3 -> if (canDelete) {
-                                                            viewModel.removeAddon(addon.id)
-                                                            addonActionIndex = 0
-                                                            if (contentFocusIndex >= stremioAddons.size && contentFocusIndex > 0) {
-                                                                contentFocusIndex--
-                                                            }
-                                                        }
                                                         else -> viewModel.toggleAddon(addon.id)
                                                     }
-                                                }
-                                                contentFocusIndex == stremioAddons.size -> {
-                                                    viewModel.refreshAddons()
-                                                }
-                                                else -> {
-                                                    showCustomAddonInput = true
                                                 }
                                             }
                                         }
@@ -1181,83 +1050,30 @@ fun SettingsScreen(
                                             when (contentFocusIndex) {
                                                 0 -> {
                                                     if (uiState.isLoggedIn) {
-                                                        showCloudDisconnectConfirm = true
+                                                        viewModel.logout()
                                                     } else {
                                                         viewModel.startCloudAuth()
                                                     }
                                                 }
                                                 1 -> {
                                                     if (uiState.isTraktAuthenticated) {
-                                                        showTraktDisconnectConfirm = true
+                                                        viewModel.disconnectTrakt()
                                                     } else if (uiState.isTraktPolling) {
                                                         viewModel.cancelTraktAuth()
                                                     } else {
                                                         viewModel.startTraktAuth()
                                                     }
                                                 }
-                                                2 -> {
-                                                    if (uiState.isMdbListConnected) {
-                                                        showMdbListDisconnectConfirm = true
-                                                    } else {
-                                                        showMdbListConnect = true
-                                                    }
-                                                }
-                                                3 -> {
-                                                    if (uiState.isSimklConnected || uiState.isSimklPolling) {
-                                                        viewModel.disconnectSimkl()
-                                                    } else {
-                                                        viewModel.startSimklAuth()
-                                                    }
-                                                }
-                                                4 -> viewModel.setTrackingReadMode(
-                                                    com.arflix.tv.data.repository.sync.TrackingFeature.WATCHLIST,
-                                                    nextTrackingMode(uiState.trackingWatchlistReadMode, uiState)
-                                                )
-                                                5 -> viewModel.setTrackingReadMode(
-                                                    com.arflix.tv.data.repository.sync.TrackingFeature.CONTINUE_WATCHING,
-                                                    nextTrackingMode(uiState.trackingContinueReadMode, uiState)
-                                                )
-                                                6 -> viewModel.setTrackingReadMode(
-                                                    com.arflix.tv.data.repository.sync.TrackingFeature.WATCHED,
-                                                    nextTrackingMode(uiState.trackingWatchedReadMode, uiState)
-                                                )
-                                                7 -> if (uiState.isTraktAuthenticated) {
-                                                    viewModel.setTrackingWriteTarget(
-                                                        com.arflix.tv.data.repository.sync.SyncProvider.TRAKT,
-                                                        !uiState.trackingWriteToTrakt
-                                                    )
-                                                }
-                                                8 -> if (uiState.isSimklConnected) {
-                                                    viewModel.setTrackingWriteTarget(
-                                                        com.arflix.tv.data.repository.sync.SyncProvider.SIMKL,
-                                                        !uiState.trackingWriteToSimkl
-                                                    )
-                                                }
-                                                9 -> onNavigateToTelegramSettings()
-                                                10 -> {
-                                                    if (com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isSupported) {
-                                                        if (com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isLoggedInFlow.value) {
-                                                            com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.logout()
-                                                        } else {
-                                                            com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.login(context)
-                                                        }
-                                                    }
-                                                }
-                                                11 -> viewModel.forceCloudSyncNow()
-                                                12 -> {
+                                                2 -> onNavigateToTelegramSettings()
+                                                3 -> viewModel.forceCloudSyncNow()
+                                                4 -> {
                                                     if (uiState.updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall) {
                                                         viewModel.installAppUpdateOrRequestPermission()
                                                     } else {
                                                         viewModel.checkForAppUpdates(force = true, showNoUpdateFeedback = true)
                                                     }
                                                 }
-                                                13 -> viewModel.setDiagnosticsSharingEnabled(!uiState.diagnosticsSharingEnabled)
-                                                14 -> openExternalUrl(context, PRIVACY_POLICY_URL)
-                                                15 -> openExternalUrl(context, ACCOUNT_DELETION_URL)
                                             }
-                                        }
-                                        "plugins" -> {
-                                            pluginsEnterTrigger = contentFocusIndex
                                         }
                                         else -> Unit
                                     }
@@ -1290,23 +1106,12 @@ fun SettingsScreen(
                 onSubtitleAiApiKeyClick = { showAiApiKeyDialog = true },
                 onSubtitleAiQrClick = { viewModel.startAiKeyServer() },
                 onAddIptvClick = { editingIptvIndex = -1; showIptvInput = true },
-                onConfigureStalkerClick = { stalkerEditPortal = uiState.iptvStalkerUrl; stalkerEditMac = uiState.iptvStalkerMac; showStalkerInput = true },
                 onEditIptvClick = { idx -> editingIptvIndex = idx; showIptvInput = true },
                 onAddCatalogClick = { showCatalogInput = true },
-                onImportCatalogPackClick = { showCatalogPackInput = true },
                 onRenameCatalogClick = { catalog ->
                     renameCatalogId = catalog.id
                     renameCatalogTitle = catalog.title
                     showCatalogRename = true
-                },
-                onDeleteCatalogClick = { catalog ->
-                    if (catalog.isBulkDeletablePack) {
-                        deletePackId = catalog.effectivePackId
-                        deletePackName = catalog.effectivePackName
-                        showDeletePackConfirm = true
-                    } else {
-                        viewModel.removeCatalog(catalog.id)
-                    }
                 },
                 onConnectHomeServerClick = {
                     val connection = uiState.homeServerConnection
@@ -1323,9 +1128,7 @@ fun SettingsScreen(
                 },
                 onAddCustomAddonClick = { showCustomAddonInput = true },
                 openCustomUserAgentDialog = { showCustomUserAgentDialog = true },
-                onNavigateToTelegram = onNavigateToTelegramSettings,
-                onDisconnectCloud = { showCloudDisconnectConfirm = true },
-                onDisconnectTrakt = { showTraktDisconnectConfirm = true }
+                onNavigateToTelegram = onNavigateToTelegramSettings
             )
         } else {
             AppTopBar(
@@ -1397,8 +1200,8 @@ fun SettingsScreen(
                                     "appearance" -> stringResource(R.string.interface_label)
                                     "profiles" -> stringResource(R.string.profiles)
                                     "network" -> stringResource(R.string.network)
-                                    "iptv" -> stringResource(R.string.iptv)
-                                    "home_server" -> stringResource(R.string.settings_home_server)
+                                    "iptv" -> "TV"
+                                    "home_server" -> "Home Server"
                                     "catalogs" -> stringResource(R.string.catalogs)
                                     "stremio" -> stringResource(R.string.addons)
                                     "accounts" -> stringResource(R.string.accounts)
@@ -1422,7 +1225,7 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
-                        text = stringResource(R.string.settings_app_version_label, BuildConfig.VERSION_NAME),
+                        text = "ARVIO V${BuildConfig.VERSION_NAME}",
                         style = ArflixTypography.caption,
                         color = TextSecondary.copy(alpha = 0.5f),
                         modifier = Modifier.padding(start = 8.dp)
@@ -1462,7 +1265,6 @@ fun SettingsScreen(
                             subtitleColor = uiState.subtitleColor,
                             subtitleOffset = uiState.subtitleOffset,
                             subtitleStyle = uiState.subtitleStyle,
-                            subtitleFont = uiState.subtitleFont,
                             subtitleStylized = uiState.subtitleStylized,
                             deviceModeOverride = uiState.deviceModeOverride,
                             skipProfileSelection = uiState.skipProfileSelection,
@@ -1494,8 +1296,6 @@ fun SettingsScreen(
                             onOledBlackBackgroundToggle = { viewModel.setOledBlackBackground(it) },
                             onClockFormatClick = { viewModel.cycleClockFormat() },
                             onShowBudgetToggle = { viewModel.setShowBudget(it) },
-                            showEpisodeRatings = uiState.showEpisodeRatings,
-                            onShowEpisodeRatingsToggle = { viewModel.setShowEpisodeRatings(it) },
                             smoothScrolling = uiState.smoothScrolling,
                             onSmoothScrollingToggle = { viewModel.setSmoothScrolling(it) },
                             spoilerBlurEnabled = uiState.spoilerBlurEnabled,
@@ -1509,7 +1309,6 @@ fun SettingsScreen(
                             onSubtitleColorClick = { viewModel.cycleSubtitleColor() },
                             onSubtitleOffsetClick = { viewModel.cycleSubtitleOffset() },
                             onSubtitleStyleClick = { viewModel.cycleSubtitleStyle() },
-                            onSubtitleFontClick = { viewModel.cycleSubtitleFont() },
                             onSubtitleStylizedToggle = { viewModel.toggleSubtitleStylized() },
                             filterSubtitlesByLanguage = uiState.filterSubtitlesByLanguage,
                             onFilterSubtitlesByLanguageToggle = { viewModel.setFilterSubtitlesByLanguage(it) },
@@ -1517,18 +1316,12 @@ fun SettingsScreen(
                             onQualityFiltersClick = { showQualityFiltersModal = true },
                             subtitleAiEnabled = uiState.subtitleAiEnabled,
                             subtitleAiAutoSelect = uiState.subtitleAiAutoSelect,
-                            subtitleAiFindBestMatch = uiState.subtitleAiFindBestMatch,
-                            subtitlePreloadEnabled = uiState.subtitlePreloadEnabled,
-                            dolbyVisionCompatEnabled = uiState.dolbyVisionCompatEnabled,
                             subtitleAiApiKey = uiState.subtitleAiApiKey,
                             subtitleAiModel = uiState.subtitleAiModel,
                             subtitleRemoveHearingImpaired = uiState.subtitleRemoveHearingImpaired,
                             onSubtitleAiEnabledToggle = { viewModel.setSubtitleAiEnabled(it) },
                             onSubtitleAiModelClick = { showAiModelDialog = true },
                             onSubtitleAiAutoSelectToggle = { viewModel.setSubtitleAiAutoSelect(it) },
-                            onSubtitleAiFindBestMatchToggle = { viewModel.setSubtitleAiFindBestMatch(it) },
-                            onSubtitlePreloadToggle = { viewModel.setSubtitlePreloadEnabled(it) },
-                            onDolbyVisionCompatToggle = { viewModel.setDolbyVisionCompatEnabled(it) },
                             onSubtitleRemoveHearingImpairedToggle = { viewModel.setSubtitleRemoveHearingImpaired(it) },
                             onSubtitleAiApiKeyClick = { showAiApiKeyDialog = true },
                             onSubtitleAiQrClick = { viewModel.startAiKeyServer() },
@@ -1600,8 +1393,6 @@ fun SettingsScreen(
                             focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
                             focusedActionIndex = iptvActionIndex,
                             onConfigure = { editingIptvIndex = -1; showIptvInput = true },
-                            onConfigureStalker = { stalkerEditPortal = uiState.iptvStalkerUrl; stalkerEditMac = uiState.iptvStalkerMac; showStalkerInput = true },
-                            stalkerSubtitle = if (uiState.iptvStalkerUrl.isNotBlank()) uiState.iptvStalkerUrl else stringResource(R.string.settings_stalker_middleware_hint),
                             onEditPlaylist = { idx -> editingIptvIndex = idx; showIptvInput = true },
                             onTogglePlaylist = { idx ->
                                 val updated = uiState.iptvPlaylists.toMutableList()
@@ -1632,11 +1423,7 @@ fun SettingsScreen(
                             },
                             onRefresh = { viewModel.refreshIptv() },
                             onDelete = { viewModel.clearIptvConfig() },
-                            onManageCategories = openIptvCategories,
-                            sortOrder = uiState.iptvSortOrder,
-                            onSortOrderChange = { viewModel.setIptvSortOrder(it) },
-                            epgVodActionsEnabled = uiState.epgVodActionsEnabled,
-                            onEpgVodActionsToggle = viewModel::setEpgVodActionsEnabled,
+                            onManageCategories = openIptvCategories
                         )
                         "TV" -> IptvSettings(
                             playlists = uiState.iptvPlaylists,
@@ -1650,8 +1437,6 @@ fun SettingsScreen(
                             focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
                             focusedActionIndex = iptvActionIndex,
                             onConfigure = { editingIptvIndex = -1; showIptvInput = true },
-                            onConfigureStalker = { stalkerEditPortal = uiState.iptvStalkerUrl; stalkerEditMac = uiState.iptvStalkerMac; showStalkerInput = true },
-                            stalkerSubtitle = if (uiState.iptvStalkerUrl.isNotBlank()) uiState.iptvStalkerUrl else stringResource(R.string.settings_stalker_middleware_hint),
                             onEditPlaylist = { idx -> editingIptvIndex = idx; showIptvInput = true },
                             onTogglePlaylist = { idx ->
                                 val updated = uiState.iptvPlaylists.toMutableList()
@@ -1682,11 +1467,7 @@ fun SettingsScreen(
                             },
                             onRefresh = { viewModel.refreshIptv() },
                             onDelete = { viewModel.clearIptvConfig() },
-                            onManageCategories = openIptvCategories,
-                            sortOrder = uiState.iptvSortOrder,
-                            onSortOrderChange = { viewModel.setIptvSortOrder(it) },
-                            epgVodActionsEnabled = uiState.epgVodActionsEnabled,
-                            onEpgVodActionsToggle = viewModel::setEpgVodActionsEnabled,
+                            onManageCategories = openIptvCategories
                         )
                         "home_server" -> HomeServerSettings(
                             connections = uiState.homeServerConnections,
@@ -1721,7 +1502,6 @@ fun SettingsScreen(
                             focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
                             focusedActionIndex = catalogActionIndex,
                             onAddCatalog = { showCatalogInput = true },
-                            onImportCatalogPack = { showCatalogPackInput = true },
                             onRenameCatalog = { catalog ->
                                 renameCatalogId = catalog.id
                                 renameCatalogTitle = catalog.title
@@ -1729,37 +1509,20 @@ fun SettingsScreen(
                             },
                             onMoveCatalogUp = { catalog -> viewModel.moveCatalogUp(catalog.id) },
                             onMoveCatalogDown = { catalog -> viewModel.moveCatalogDown(catalog.id) },
-                            onDeleteCatalog = { catalog ->
-                                if (catalog.isBulkDeletablePack) {
-                                    deletePackId = catalog.effectivePackId
-                                    deletePackName = catalog.effectivePackName
-                                    showDeletePackConfirm = true
-                                } else {
-                                    viewModel.removeCatalog(catalog.id)
-                                }
-                            },
-                            onUnpackCatalog = { catalog -> viewModel.unpackCatalog(catalog.id) }
+                            onDeleteCatalog = { catalog -> viewModel.removeCatalog(catalog.id) }
                         )
                         "stremio" -> StremioAddonsSettings(
                             addons = stremioAddons,
-                            isRefreshingAddons = uiState.isRefreshingAddons,
                             focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
                             focusedActionIndex = addonActionIndex,
                             onToggleAddon = { viewModel.toggleAddon(it) },
                             onMoveAddonUp = { viewModel.moveAddonUp(it) },
                             onMoveAddonDown = { viewModel.moveAddonDown(it) },
                             onDeleteAddon = { viewModel.removeAddon(it) },
-                            onAddCustomAddon = { showCustomAddonInput = true },
-                            onRefreshAddons = { viewModel.refreshAddons() }
+                            onAddCustomAddon = { showCustomAddonInput = true }
                         )
                         "plugins" -> {
                             com.arflix.tv.ui.screens.plugin.PluginScreen(
-                                focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
-                                onFocusedIndexChanged = { contentFocusIndex = it },
-                                onMaxIndexChanged = { pluginsMaxIndex = it },
-                                enterTrigger = if (activeZone == Zone.CONTENT) pluginsEnterTrigger else -1,
-                                onEnterTriggerHandled = { pluginsEnterTrigger = -1 },
-                                onModalStateChanged = { pluginsModalOpen = it },
                                 onBackPressed = { activeZone = Zone.SECTION },
                                 onNavigateToSection = { activeZone = Zone.SECTION }
                             )
@@ -1775,7 +1538,6 @@ fun SettingsScreen(
                             isTraktPolling = uiState.isTraktPolling,
                             isForceCloudSyncing = uiState.isForceCloudSyncing,
                             lastCloudSyncStatus = uiState.lastCloudSyncStatus,
-                            diagnosticsSharingEnabled = uiState.diagnosticsSharingEnabled,
                             isSelfUpdateSupported = uiState.isSelfUpdateSupported,
                             updateStatus = uiState.updateStatus,
                             focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
@@ -1786,30 +1548,14 @@ fun SettingsScreen(
                                     viewModel.startCloudAuth()
                                 }
                             },
-                            onDisconnectCloud = { showCloudDisconnectConfirm = true },
+                            onDisconnectCloud = { viewModel.logout() },
                             onConnectTrakt = { viewModel.startTraktAuth() },
                             onCancelTrakt = { viewModel.cancelTraktAuth() },
-                            onDisconnectTrakt = { showTraktDisconnectConfirm = true },
-                            isMdbListConnected = uiState.isMdbListConnected,
-                            onConnectMdbList = { showMdbListConnect = true },
-                            onDisconnectMdbList = { showMdbListDisconnectConfirm = true },
-                            isSimklConnected = uiState.isSimklConnected,
-                            simklCode = uiState.simklUserCode,
-                            simklUrl = uiState.simklVerificationUrl,
-                            isSimklAuthStarting = uiState.isSimklAuthStarting,
-                            isSimklPolling = uiState.isSimklPolling,
-                            onConnectSimkl = { viewModel.startSimklAuth() },
-                            onCancelSimkl = { viewModel.disconnectSimkl() },
-                            onDisconnectSimkl = { viewModel.disconnectSimkl() },
-                            trackingUiState = uiState,
-                            onTrackingReadMode = viewModel::setTrackingReadMode,
-                            onTrackingWriteTarget = viewModel::setTrackingWriteTarget,
+                            onDisconnectTrakt = { viewModel.disconnectTrakt() },
                             onForceCloudSync = { viewModel.forceCloudSyncNow() },
                             onSwitchProfile = onSwitchProfile,
                             onCheckUpdates = { viewModel.checkForAppUpdates(force = true, showNoUpdateFeedback = true) },
                             onInstallUpdate = { viewModel.installAppUpdateOrRequestPermission() },
-                            onDiagnosticsSharingToggle = viewModel::setDiagnosticsSharingEnabled,
-                            onOpenPrivacy = { openExternalUrl(context, PRIVACY_POLICY_URL) },
                             onOpenDataDeletion = { openExternalUrl(context, ACCOUNT_DELETION_URL) },
                             onNavigateToTelegram = onNavigateToTelegramSettings
                         )
@@ -1824,7 +1570,7 @@ fun SettingsScreen(
             InputModal(
                 title = stringResource(R.string.add_addon),
                 fields = listOf(
-                    InputField(label = stringResource(R.string.settings_label_url), value = customAddonUrl, onValueChange = { customAddonUrl = it })
+                    InputField(label = "URL", value = customAddonUrl, onValueChange = { customAddonUrl = it })
                 ),
                 onConfirm = {
                     if (customAddonUrl.isNotBlank()) {
@@ -1842,29 +1588,29 @@ fun SettingsScreen(
 
         if (showHomeServerInput) {
             InputModal(
-                title = stringResource(R.string.settings_home_server),
-                supportingText = stringResource(R.string.settings_home_server_https_note),
+                title = "Home Server",
+                supportingText = "Use HTTPS where possible. HTTP server URLs are allowed for local networks but are not encrypted.",
                 fields = listOf(
                     InputField(
-                        label = stringResource(R.string.settings_label_server_name),
+                        label = "Server name",
                         value = homeServerDisplayName,
-                        placeholder = stringResource(R.string.settings_ph_server_name),
+                        placeholder = "Optional, shown in sources",
                         onValueChange = { homeServerDisplayName = it }
                     ),
                     InputField(
-                        label = stringResource(R.string.settings_label_server_url),
+                        label = "Server URL",
                         value = homeServerUrl,
-                        placeholder = stringResource(R.string.settings_ph_server_url),
+                        placeholder = "http://server:8096 or http://server:32400",
                         onValueChange = { homeServerUrl = it }
                     ),
                     InputField(
-                        label = stringResource(R.string.settings_label_username),
+                        label = "Username",
                         value = homeServerUsername,
-                        placeholder = stringResource(R.string.settings_ph_username_token),
+                        placeholder = "Optional for token sign-in",
                         onValueChange = { homeServerUsername = it }
                     ),
                     InputField(
-                        label = stringResource(R.string.settings_label_password_token),
+                        label = "Password / token",
                         value = homeServerPassword,
                         isSecret = true,
                         onValueChange = { homeServerPassword = it }
@@ -1892,19 +1638,19 @@ fun SettingsScreen(
         }
         if (showPlexHomeServerInput) {
             InputModal(
-                title = stringResource(R.string.settings_connect_with_code),
-                supportingText = stringResource(R.string.settings_home_server_https_note),
+                title = "Connect with code",
+                supportingText = "Use HTTPS where possible. HTTP server URLs are allowed for local networks but are not encrypted.",
                 fields = listOf(
                     InputField(
-                        label = stringResource(R.string.settings_label_server_name),
+                        label = "Server name",
                         value = plexHomeServerDisplayName,
-                        placeholder = stringResource(R.string.settings_ph_server_name),
+                        placeholder = "Optional, shown in sources",
                         onValueChange = { plexHomeServerDisplayName = it }
                     ),
                     InputField(
-                        label = stringResource(R.string.settings_label_server_url_optional),
+                        label = "Server URL (optional)",
                         value = plexHomeServerUrl,
-                        placeholder = stringResource(R.string.settings_ph_server_url_discover),
+                        placeholder = "Leave empty to discover automatically",
                         onValueChange = { plexHomeServerUrl = it }
                     )
                 ),
@@ -1925,57 +1671,64 @@ fun SettingsScreen(
             )
         }
         if (showIptvInput) {
+            val portalOptions = uiState.portals.map { it.toInputOption() }
+            val normalizedPortalUrl = iptvEditUrl.trim().trimEnd('/')
+            val hostOptions = if (portalOptions.isEmpty() || normalizedPortalUrl.isBlank() || portalOptions.any { it.value == normalizedPortalUrl }) {
+                portalOptions
+            } else {
+                listOf(InputOption("Current Portal", normalizedPortalUrl)) + portalOptions
+            }
+            val portalHelper = when {
+                uiState.isLoadingPortals -> "Loading panel services..."
+                uiState.portalError != null -> uiState.portalError.orEmpty()
+                hostOptions.isEmpty() -> "No panel services are configured."
+                else -> "Panel-managed service. Press OK to change."
+            }
             InputModal(
-                title = if (editingIptvIndex >= 0) stringResource(R.string.settings_edit_tv_playlist) else stringResource(R.string.settings_add_tv_playlist),
-                supportingText = stringResource(R.string.settings_iptv_epg_note),
+                title = if (editingIptvIndex >= 0) "Edit TV Playlist" else "Add TV Playlist",
+                supportingText = "Select a panel-managed service and enter the IPTV credentials.",
+                showPasteButton = false,
                 fields = listOf(
                     InputField(
-                        label = stringResource(R.string.settings_label_playlist_name),
+                        label = "Playlist Name",
                         value = iptvEditName,
                         onValueChange = { iptvEditName = it }
                     ),
                     InputField(
-                        label = stringResource(R.string.settings_label_m3u_or_xtream),
+                        label = "Portal",
                         value = iptvEditUrl,
-                        placeholder = stringResource(R.string.settings_ph_provider_host),
+                        placeholder = if (uiState.isLoadingPortals) "Loading services..." else "Select service",
+                        helper = portalHelper,
+                        options = hostOptions,
                         onValueChange = { iptvEditUrl = it }
                     ),
                     InputField(
-                        label = stringResource(R.string.settings_label_xtream_user),
+                        label = "Username",
                         value = iptvEditXtreamUser,
-                        placeholder = stringResource(R.string.settings_ph_plain_m3u),
+                        placeholder = "Enter username",
                         onValueChange = { iptvEditXtreamUser = it }
                     ),
                     InputField(
-                        label = stringResource(R.string.settings_label_xtream_pass),
+                        label = "Password",
                         value = iptvEditXtreamPass,
-                        placeholder = stringResource(R.string.settings_ph_plain_m3u),
+                        placeholder = "Enter password",
                         isSecret = true,
                         onValueChange = { iptvEditXtreamPass = it }
-                    ),
-                    InputField(
-                        label = stringResource(R.string.settings_label_epg_sources),
-                        value = iptvEditEpg,
-                        placeholder = "https://provider.com/xmltv.xml\nhttps://backup.com/epg.xml.gz",
-                        helper = stringResource(R.string.settings_helper_epg_one_per_line),
-                        singleLine = false,
-                        onValueChange = { iptvEditEpg = it }
                     )
                 ),
                 onConfirm = {
-                    // Build the m3uUrl: if Xtream credentials are provided, combine as "host user pass"
-                    val hasXtream = iptvEditXtreamUser.isNotBlank() && iptvEditXtreamPass.isNotBlank()
-                    val finalM3uUrl = if (hasXtream) {
-                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} ${iptvEditXtreamPass.trim()}"
-                    } else {
-                        iptvEditUrl
+                    if (iptvEditUrl.isBlank()) {
+                        viewModel.showToast("Select a service before saving the playlist.", ToastType.ERROR)
+                        return@InputModal
                     }
-                    // Auto-derive EPG for Xtream if not provided
-                    val finalEpgUrl = if (hasXtream && iptvEditEpg.isBlank()) {
-                        "${iptvEditUrl.trim()} ${iptvEditXtreamUser.trim()} ${iptvEditXtreamPass.trim()}"
-                    } else {
-                        iptvEditEpg
+                    val username = iptvEditXtreamUser.trim()
+                    val password = iptvEditXtreamPass.trim()
+                    if (username.isBlank() || password.isBlank()) {
+                        viewModel.showToast("Enter both the IPTV username and password.", ToastType.ERROR)
+                        return@InputModal
                     }
+                    val finalM3uUrl = "${iptvEditUrl.trim()} $username $password"
+                    val finalEpgUrl = "${iptvEditUrl.trim()} $username $password"
                     val finalEpgUrls = splitSettingsEpgInput(finalEpgUrl)
                     val updated = uiState.iptvPlaylists.toMutableList()
                     val entry = com.arflix.tv.data.repository.IptvPlaylistEntry(
@@ -1993,31 +1746,6 @@ fun SettingsScreen(
                 onDismiss = {
                     showIptvInput = false
                 }
-            )
-        }
-        if (showStalkerInput) {
-            InputModal(
-                title = stringResource(R.string.settings_stalker_title),
-                supportingText = if (uiState.iptvStalkerUrl.isNotBlank()) stringResource(R.string.settings_stalker_remove_hint) else null,
-                fields = listOf(
-                    InputField(
-                        label = stringResource(R.string.settings_stalker_label_portal_url),
-                        value = stalkerEditPortal,
-                        placeholder = stringResource(R.string.settings_stalker_ph_portal_url),
-                        onValueChange = { stalkerEditPortal = it }
-                    ),
-                    InputField(
-                        label = stringResource(R.string.settings_stalker_label_mac),
-                        value = stalkerEditMac,
-                        placeholder = stringResource(R.string.settings_stalker_ph_mac),
-                        onValueChange = { stalkerEditMac = it }
-                    )
-                ),
-                onConfirm = {
-                    viewModel.saveStalkerConfig(stalkerEditPortal.trim(), stalkerEditMac.trim())
-                    showStalkerInput = false
-                },
-                onDismiss = { showStalkerInput = false }
             )
         }
 
@@ -2054,7 +1782,7 @@ fun SettingsScreen(
             InputModal(
                 title = stringResource(R.string.rename_catalog),
                 fields = listOf(
-                    InputField(label = stringResource(R.string.settings_label_title), value = renameCatalogTitle, onValueChange = { renameCatalogTitle = it })
+                    InputField(label = "Title", value = renameCatalogTitle, onValueChange = { renameCatalogTitle = it })
                 ),
                 onConfirm = {
                     if (renameCatalogTitle.isNotBlank()) {
@@ -2064,53 +1792,6 @@ fun SettingsScreen(
                 },
                 onDismiss = {
                     showCatalogRename = false
-                }
-            )
-        }
-
-        if (showCatalogPackInput) {
-            InputModal(
-                title = "Import Catalog Pack",
-                fields = listOf(
-                    InputField(label = "Pack URL", value = catalogPackInputUrl, onValueChange = { catalogPackInputUrl = it })
-                ),
-                onConfirm = {
-                    if (catalogPackInputUrl.isNotBlank()) {
-                        viewModel.loadPackManifest(catalogPackInputUrl)
-                        catalogPackInputUrl = ""
-                        showCatalogPackInput = false
-                    }
-                },
-                onDismiss = {
-                    catalogPackInputUrl = ""
-                    showCatalogPackInput = false
-                }
-            )
-        }
-
-        if (uiState.pendingPackManifest != null || uiState.isPackLoading || uiState.packError != null) {
-            CatalogPackImportDialog(
-                pendingPack = uiState.pendingPackManifest,
-                isLoading = uiState.isPackLoading,
-                error = uiState.packError,
-                onConfirm = { manifest ->
-                    viewModel.confirmInstallPack(uiState.pendingPackUrl ?: "")
-                },
-                onDismiss = {
-                    viewModel.clearPendingPack()
-                }
-            )
-        }
-
-        if (showDeletePackConfirm) {
-            CatalogPackDeleteConfirmDialog(
-                packName = deletePackName,
-                onConfirm = {
-                    viewModel.removeCatalogPack(deletePackId)
-                    showDeletePackConfirm = false
-                },
-                onDismiss = {
-                    showDeletePackConfirm = false
                 }
             )
         }
@@ -2138,7 +1819,7 @@ fun SettingsScreen(
 
         if (showQualityFilterEditor) {
             QualityFilterEditorModal(
-                title = if (editingQualityFilterId == null) stringResource(R.string.settings_add_quality_filter) else stringResource(R.string.settings_edit_quality_filter),
+                title = if (editingQualityFilterId == null) "Add Quality Filter" else "Edit Quality Filter",
                 deviceName = qualityFilterDeviceName,
                 regexPattern = qualityFilterRegexPattern,
                 onDeviceNameChange = { qualityFilterDeviceName = it },
@@ -2146,14 +1827,12 @@ fun SettingsScreen(
                 onDismiss = { showQualityFilterEditor = false },
                 onSave = {
                     val id = editingQualityFilterId
-                    val success = if (id == null) {
+                    if (id == null) {
                         viewModel.addQualityFilter(qualityFilterDeviceName, qualityFilterRegexPattern)
                     } else {
                         viewModel.updateQualityFilter(id, qualityFilterDeviceName, qualityFilterRegexPattern)
                     }
-                    if (success) {
-                        showQualityFilterEditor = false
-                    }
+                    showQualityFilterEditor = false
                 }
             )
         }
@@ -2220,7 +1899,7 @@ fun SettingsScreen(
 
         if (showContentLanguagePicker) {
             SubtitlePickerModal(
-                title = stringResource(R.string.content_language),
+                title = stringResource(R.string.app_language),
                 options = TMDB_LANGUAGES.map { it.second },
                 selected = TMDB_LANGUAGES.firstOrNull { it.first == uiState.contentLanguage }?.second ?: "English",
                 focusedIndex = contentLanguagePickerIndex,
@@ -2277,53 +1956,6 @@ fun SettingsScreen(
             )
         }
 
-        if (showCloudDisconnectConfirm) {
-            AccountDisconnectConfirmDialog(
-                title = stringResource(R.string.settings_cloud_disconnect_confirm_title),
-                description = stringResource(R.string.settings_cloud_disconnect_confirm_desc),
-                onConfirm = {
-                    showCloudDisconnectConfirm = false
-                    viewModel.logout()
-                },
-                onDismiss = { showCloudDisconnectConfirm = false }
-            )
-        }
-
-        if (showTraktDisconnectConfirm) {
-            AccountDisconnectConfirmDialog(
-                title = stringResource(R.string.settings_trakt_disconnect_confirm_title),
-                description = stringResource(R.string.settings_trakt_disconnect_confirm_desc),
-                onConfirm = {
-                    showTraktDisconnectConfirm = false
-                    viewModel.disconnectTrakt()
-                },
-                onDismiss = { showTraktDisconnectConfirm = false }
-            )
-        }
-
-        if (showMdbListConnect) {
-            MdbListConnectDialog(
-                connecting = uiState.mdbListConnecting,
-                onConnect = { apiKey ->
-                    showMdbListConnect = false
-                    viewModel.connectMdbList(apiKey)
-                },
-                onDismiss = { showMdbListConnect = false }
-            )
-        }
-
-        if (showMdbListDisconnectConfirm) {
-            AccountDisconnectConfirmDialog(
-                title = stringResource(R.string.mdblist_disconnect_confirm_title),
-                description = stringResource(R.string.mdblist_disconnect_confirm_desc),
-                onConfirm = {
-                    showMdbListDisconnectConfirm = false
-                    viewModel.disconnectMdbList()
-                },
-                onDismiss = { showMdbListDisconnectConfirm = false }
-            )
-        }
-
         if (uiState.showCloudEmailPasswordDialog) {
             CloudEmailPasswordModal(
                 email = cloudDialogEmail,
@@ -2332,8 +1964,7 @@ fun SettingsScreen(
                 onPasswordChange = { cloudDialogPassword = it },
                 onDismiss = { viewModel.closeCloudEmailPasswordDialog() },
                 onSignIn = { viewModel.completeCloudAuthWithEmailPassword(cloudDialogEmail, cloudDialogPassword, createAccount = false) },
-                onCreateAccount = { viewModel.completeCloudAuthWithEmailPassword(cloudDialogEmail, cloudDialogPassword, createAccount = true) },
-                onOpenPrivacy = { openExternalUrl(context, PRIVACY_POLICY_URL) }
+                onCreateAccount = { viewModel.completeCloudAuthWithEmailPassword(cloudDialogEmail, cloudDialogPassword, createAccount = true) }
             )
         }
 
@@ -2355,46 +1986,18 @@ fun SettingsScreen(
             )
         }
 
-        uiState.simklUserCode?.let { simklCode ->
-            val verificationUrl = uiState.simklVerificationUrl ?: "https://simkl.com/pin"
-            TraktActivationModal(
-                title = "Connect Simkl",
-                instruction = "Visit $verificationUrl on your phone or computer and enter this code:",
-                verificationUrl = verificationUrl,
-                userCode = simklCode,
-                onDismiss = { viewModel.disconnectSimkl() }
-            )
-        }
-
         uiState.plexHomeServerAuth?.let { plexAuth ->
             TraktActivationModal(
-                title = stringResource(R.string.settings_connect_with_code),
-                instruction = when (plexAuth.serverKind) {
-                    HomeServerKind.JELLYFIN -> stringResource(R.string.settings_jellyfin_auth_instruction)
-                    else -> if (LocalDeviceType.current.isTouchDevice()) {
-                        stringResource(R.string.settings_plex_auth_touch_instruction)
-                    } else {
-                        stringResource(R.string.settings_plex_auth_tv_instruction)
-                    }
+                title = "Connect with code",
+                instruction = if (LocalDeviceType.current.isTouchDevice()) {
+                    "Open the auth page, sign in, then return to ARVIO. This screen will finish automatically."
+                } else {
+                    "Scan the QR code or open the auth page and confirm this code"
                 },
                 verificationUrl = plexAuth.verificationUrl,
                 userCode = plexAuth.code,
                 onOpenUrl = { openExternalUrl(context, plexAuth.verificationUrl) },
                 onDismiss = { viewModel.cancelPlexHomeServerAuth() }
-            )
-        }
-
-        val isDiscordDialogVisible by com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isAuthDialogVisibleFlow.collectAsStateWithLifecycle()
-        val discordAuthUrl by com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.authUrlFlow.collectAsStateWithLifecycle()
-        val isDiscordAuthLoading by com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isAuthLoadingFlow.collectAsStateWithLifecycle()
-
-        if (isDiscordDialogVisible && !discordAuthUrl.isNullOrBlank()) {
-            DiscordActivationModal(
-                authUrl = discordAuthUrl!!,
-                isLoading = isDiscordAuthLoading,
-                onDismiss = {
-                    com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.closeAuthDialog()
-                }
             )
         }
 
@@ -2599,13 +2202,13 @@ private fun QualityFiltersModal(
                     }
             ) {
                 Text(
-                    text = stringResource(R.string.quality_filters),
+                    text = "Quality Regex Filters",
                     style = ArflixTypography.sectionTitle,
                     color = TextPrimary
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = stringResource(R.string.settings_quality_filters_subtitle),
+                    text = "Device-local filters. Matching streams are excluded.",
                     style = ArflixTypography.caption,
                     color = TextSecondary
                 )
@@ -2613,7 +2216,7 @@ private fun QualityFiltersModal(
 
                 if (filters.isEmpty()) {
                     Text(
-                        text = stringResource(R.string.settings_no_filters_yet),
+                        text = "No filters configured yet.",
                         style = ArflixTypography.body,
                         color = TextSecondary
                     )
@@ -2635,7 +2238,7 @@ private fun QualityFiltersModal(
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = filter.deviceName.ifBlank { stringResource(R.string.settings_unnamed_device) },
+                                        text = filter.deviceName.ifBlank { "Unnamed Device" },
                                         style = ArflixTypography.body,
                                         color = TextPrimary,
                                         maxLines = 1,
@@ -2680,14 +2283,14 @@ private fun QualityFiltersModal(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     SettingsChip(
-                        label = stringResource(R.string.close),
+                        label = "Close",
                         enabled = true,
                         onClick = onDismiss,
                         isFocused = isFooterFocused && selectedFooterAction == 0,
                         modifier = Modifier.weight(1f)
                     )
                     SettingsChip(
-                        label = stringResource(R.string.settings_add_filter),
+                        label = "Add Filter",
                         enabled = true,
                         onClick = onAdd,
                         isFocused = isFooterFocused && selectedFooterAction == 1,
@@ -2829,7 +2432,7 @@ private fun QualityFilterEditorModal(
                     value = deviceName,
                     onValueChange = onDeviceNameChange,
                     singleLine = true,
-                    label = { Text(stringResource(R.string.settings_label_device_preset_name)) },
+                    label = { Text("Device / Preset Name") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusRequester(deviceNameRequester)
@@ -2843,7 +2446,7 @@ private fun QualityFilterEditorModal(
                     onValueChange = onRegexPatternChange,
                     singleLine = false,
                     minLines = 3,
-                    label = { Text(stringResource(R.string.settings_label_regex_pattern)) },
+                    label = { Text("Regex Pattern") },
                     modifier = Modifier
                         .fillMaxWidth()
                         .focusRequester(regexPatternRequester)
@@ -2857,14 +2460,14 @@ private fun QualityFilterEditorModal(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     SettingsChip(
-                        label = stringResource(R.string.cancel),
+                        label = "Cancel",
                         enabled = true,
                         onClick = onDismiss,
                         isFocused = focusedIndex == 2,
                         modifier = Modifier.weight(1f)
                     )
                     SettingsChip(
-                        label = stringResource(R.string.save),
+                        label = "Save",
                         enabled = regexPattern.trim().isNotBlank(),
                         onClick = onSave,
                         isFocused = focusedIndex == 3,
@@ -2885,10 +2488,9 @@ private fun CloudEmailPasswordModal(
     onPasswordChange: (String) -> Unit,
     onDismiss: () -> Unit,
     onSignIn: () -> Unit,
-    onCreateAccount: () -> Unit,
-    onOpenPrivacy: () -> Unit
+    onCreateAccount: () -> Unit
 ) {
-    // Focus order: 0 email, 1 password, 2 cancel, 3 sign in, 4 create, 5 privacy
+    // Focus order: 0 email, 1 password, 2 cancel, 3 sign in, 4 create
     var focusedIndex by remember { mutableIntStateOf(0) }
     val emailRequester = remember { FocusRequester() }
     val passwordRequester = remember { FocusRequester() }
@@ -2927,7 +2529,6 @@ private fun CloudEmailPasswordModal(
                                     focusedIndex = when (focusedIndex) {
                                         1 -> 0
                                         2, 3, 4 -> 1
-                                        5 -> 3
                                         else -> focusedIndex
                                     }
                                     true
@@ -2936,7 +2537,7 @@ private fun CloudEmailPasswordModal(
                                     focusedIndex = when (focusedIndex) {
                                         0 -> 1
                                         1 -> 2
-                                        2, 3, 4 -> 5
+                                        2 -> 3
                                         else -> focusedIndex
                                     }
                                     true
@@ -2962,7 +2563,6 @@ private fun CloudEmailPasswordModal(
                                         2 -> { onDismiss(); true }
                                         3 -> { onSignIn(); true }
                                         4 -> { onCreateAccount(); true }
-                                        5 -> { onOpenPrivacy(); true }
                                         else -> false
                                     }
                                 }
@@ -2973,7 +2573,7 @@ private fun CloudEmailPasswordModal(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = stringResource(R.string.settings_cloud_signin_title),
+                    text = "ARVIO Cloud Sign-in",
                     style = ArflixTypography.sectionTitle,
                     color = TextPrimary,
                     modifier = Modifier.padding(bottom = 24.dp)
@@ -2981,7 +2581,7 @@ private fun CloudEmailPasswordModal(
 
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = stringResource(R.string.settings_label_email),
+                        text = "Email",
                         style = ArflixTypography.caption,
                         color = if (focusedIndex == 0) Pink else TextSecondary,
                         modifier = Modifier.padding(bottom = 8.dp)
@@ -3015,7 +2615,7 @@ private fun CloudEmailPasswordModal(
 
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = stringResource(R.string.settings_label_password),
+                        text = "Password",
                         style = ArflixTypography.caption,
                         color = if (focusedIndex == 1) Pink else TextSecondary,
                         modifier = Modifier.padding(bottom = 8.dp)
@@ -3070,7 +2670,7 @@ private fun CloudEmailPasswordModal(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = stringResource(R.string.cancel),
+                            text = "Cancel",
                             style = ArflixTypography.button,
                             color = if (isCancelFocused) TextPrimary else TextSecondary
                         )
@@ -3094,7 +2694,7 @@ private fun CloudEmailPasswordModal(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = stringResource(R.string.sign_in),
+                            text = "Sign In",
                             style = ArflixTypography.button,
                             color = if (isSignInFocused) Color.White else Color.Black
                         )
@@ -3118,7 +2718,7 @@ private fun CloudEmailPasswordModal(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = stringResource(R.string.settings_btn_create),
+                            text = "Create",
                             style = ArflixTypography.button,
                             color = Color.White
                         )
@@ -3127,34 +2727,7 @@ private fun CloudEmailPasswordModal(
 
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    text = stringResource(R.string.login_privacy_notice),
-                    style = ArflixTypography.caption,
-                    color = TextSecondary,
-                    textAlign = TextAlign.Center
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(onClick = onOpenPrivacy)
-                        .border(
-                            width = if (focusedIndex == 5) 2.dp else 1.dp,
-                            color = if (focusedIndex == 5) Pink else Color.White.copy(alpha = 0.14f),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = stringResource(R.string.login_read_privacy_policy),
-                        style = ArflixTypography.button,
-                        color = if (focusedIndex == 5) TextPrimary else TextSecondary
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = if (LocalDeviceType.current.isTouchDevice()) stringResource(R.string.settings_cloud_signin_hint_touch) else stringResource(R.string.settings_cloud_signin_hint_tv),
+                    text = if (LocalDeviceType.current.isTouchDevice()) "Enter your email and password to sign in." else "Tip: Use TV keyboard. D-pad to navigate.",
                     style = ArflixTypography.caption,
                     color = TextSecondary.copy(alpha = 0.5f)
                 )
@@ -3241,7 +2814,7 @@ private fun CloudPairModal(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = stringResource(R.string.settings_cloud_pairing_title),
+                    text = "ARVIO Cloud Pairing",
                     style = ArflixTypography.sectionTitle,
                     color = TextPrimary,
                     modifier = Modifier.padding(bottom = 10.dp)
@@ -3250,7 +2823,7 @@ private fun CloudPairModal(
                 if (isMobile) {
                     // On mobile, skip QR (can't scan own screen) and prompt email/password
                     Text(
-                        text = stringResource(R.string.settings_pair_signin_link_device),
+                        text = "Sign in with your email and password to link this device.",
                         style = ArflixTypography.body,
                         color = TextSecondary,
                         textAlign = TextAlign.Center,
@@ -3258,7 +2831,7 @@ private fun CloudPairModal(
                     )
                 } else {
                     Text(
-                        text = stringResource(R.string.settings_pair_scan_qr_link_tv),
+                        text = "Scan this QR code to sign in and link this TV.",
                         style = ArflixTypography.body,
                         color = TextSecondary,
                         textAlign = TextAlign.Center,
@@ -3310,7 +2883,7 @@ private fun CloudPairModal(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = stringResource(R.string.settings_pair_code, userCode),
+                            text = "Code: $userCode",
                             style = ArflixTypography.body,
                             color = TextPrimary
                         )
@@ -3323,7 +2896,7 @@ private fun CloudPairModal(
                         LoadingIndicator(size = 20.dp)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = stringResource(R.string.settings_waiting_for_approval),
+                            text = "Waiting for approval...",
                             style = ArflixTypography.body,
                             color = TextSecondary
                         )
@@ -3359,7 +2932,7 @@ private fun CloudPairModal(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = stringResource(R.string.settings_use_email_password),
+                                    text = "Use Email & Password",
                                     style = ArflixTypography.button,
                                     color = Color.White
                                 )
@@ -3379,7 +2952,7 @@ private fun CloudPairModal(
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = stringResource(R.string.cancel),
+                                text = "Cancel",
                                 style = ArflixTypography.button,
                                 color = TextSecondary
                             )
@@ -3415,7 +2988,7 @@ private fun CloudPairModal(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = stringResource(R.string.cancel),
+                                    text = "Cancel",
                                     style = ArflixTypography.button,
                                     color = if (isCancelFocused) TextPrimary else TextSecondary
                                 )
@@ -3447,7 +3020,7 @@ private fun CloudPairModal(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = stringResource(R.string.settings_use_email_password_short),
+                                    text = "Use Email/Password",
                                     style = ArflixTypography.button,
                                     color = Color.White
                                 )
@@ -3467,14 +3040,10 @@ private fun TraktActivationModal(
     verificationUrl: String,
     userCode: String,
     onDismiss: () -> Unit,
-    title: String? = null,
-    instruction: String? = null,
+    title: String = "Connect Trakt.tv",
+    instruction: String = "Go to $verificationUrl and enter this code",
     onOpenUrl: (() -> Unit)? = null
 ) {
-    val resolvedTitle = title ?: stringResource(R.string.settings_connect_trakt)
-    val resolvedInstruction = instruction ?: stringResource(R.string.settings_trakt_instruction, verificationUrl)
-    val accentColor = resolveAccentColor(fallback = Pink)
-    val accentContentColor = contrastingContentColor(accentColor)
     val focusRequester = remember { FocusRequester() }
     val isMobile = LocalDeviceType.current.isTouchDevice()
     val qrContainerSize = if (isMobile) 0.dp else 172.dp
@@ -3521,13 +3090,13 @@ private fun TraktActivationModal(
                     }
             ) {
                 Text(
-                    text = resolvedTitle,
+                    text = title,
                     style = ArflixTypography.sectionTitle,
                     color = TextPrimary
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    text = resolvedInstruction,
+                    text = instruction,
                     style = ArflixTypography.body,
                     color = TextSecondary
                 )
@@ -3560,13 +3129,13 @@ private fun TraktActivationModal(
                         Text(
                             text = userCode,
                             style = ArflixTypography.heroTitle.copy(fontSize = 42.sp),
-                            color = accentColor,
+                            color = Pink,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = stringResource(R.string.settings_waiting_for_authorization),
+                            text = "Waiting for authorization",
                             style = ArflixTypography.caption,
                             color = TextSecondary.copy(alpha = 0.78f)
                         )
@@ -3579,15 +3148,15 @@ private fun TraktActivationModal(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(accentColor, RoundedCornerShape(10.dp))
+                            .background(Pink, RoundedCornerShape(10.dp))
                             .clickable { onOpenUrl() }
                             .padding(vertical = 13.dp, horizontal = 18.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = stringResource(R.string.settings_open_auth_page),
+                            text = "Open auth page",
                             style = ArflixTypography.button,
-                            color = accentContentColor
+                            color = Color.White
                         )
                     }
 
@@ -3603,7 +3172,7 @@ private fun TraktActivationModal(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = stringResource(R.string.settings_copy_code),
+                            text = "Copy code",
                             style = ArflixTypography.button,
                             color = Color.White
                         )
@@ -3615,7 +3184,7 @@ private fun TraktActivationModal(
                 Box(
                     modifier = Modifier
                         .background(
-                            if (isMobile && onOpenUrl != null) Color.White.copy(alpha = 0.08f) else accentColor,
+                            if (isMobile && onOpenUrl != null) Color.White.copy(alpha = 0.08f) else Pink,
                             RoundedCornerShape(10.dp)
                         )
                         .then(if (isMobile && onOpenUrl != null) Modifier.fillMaxWidth() else Modifier)
@@ -3624,166 +3193,10 @@ private fun TraktActivationModal(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = stringResource(R.string.cancel),
+                        text = "Cancel",
                         style = ArflixTypography.button,
-                        color = if (isMobile && onOpenUrl != null) TextPrimary else accentContentColor
+                        color = Color.White
                     )
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun DiscordActivationModal(
-    authUrl: String,
-    isLoading: Boolean,
-    onDismiss: () -> Unit
-) {
-    val accentColor = Color(0xFF5865F2) // Discord Blurple
-    val focusRequester = remember { FocusRequester() }
-    val qrContainerSize = 190.dp
-    val qrBitmapSizePx = 512
-
-    LaunchedEffect(Unit) {
-        runCatching { focusRequester.requestFocus() }
-    }
-
-    BackHandler {
-        onDismiss()
-    }
-
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(
-            dismissOnBackPress = true,
-            dismissOnClickOutside = true,
-            usePlatformDefaultWidth = false
-        )
-    ) {
-        ModalScrim(onDismiss = onDismiss) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .focusRequester(focusRequester)
-                    .focusable()
-                    .onPreviewKeyEvent { event ->
-                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        when (event.key) {
-                            Key.Back, Key.Escape -> {
-                                onDismiss()
-                                true
-                            }
-                            else -> false
-                        }
-                    }
-                    .clickable(onClick = onDismiss),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    modifier = Modifier
-                        .width(580.dp)
-                        .background(BackgroundElevated, RoundedCornerShape(18.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(18.dp))
-                        .pointerInput(Unit) {
-                            detectTapGestures { /* consume tap events to prevent scrim dismissal */ }
-                        }
-                        .padding(28.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .background(accentColor.copy(alpha = 0.18f), RoundedCornerShape(10.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                painter = painterResource(id = R.drawable.ic_discord),
-                                contentDescription = null,
-                                tint = accentColor,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Column {
-                            Text(
-                                text = stringResource(R.string.discord_connect_title),
-                                style = ArflixTypography.sectionTitle,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = stringResource(R.string.discord_rpc_subtitle),
-                                style = ArflixTypography.caption.copy(fontSize = 12.sp),
-                                color = TextSecondary
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = stringResource(R.string.discord_qr_explanation),
-                        style = ArflixTypography.body.copy(fontSize = 14.sp, lineHeight = 20.sp),
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(22.dp))
-
-                    // TV QR Code & Instructions
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(20.dp)
-                    ) {
-                        if (authUrl.isNotBlank()) {
-                            Box(
-                                modifier = Modifier
-                                    .size(qrContainerSize)
-                                    .background(Color.White, RoundedCornerShape(14.dp))
-                                    .padding(12.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                QrCodeImage(
-                                    data = authUrl,
-                                    sizePx = qrBitmapSizePx,
-                                    modifier = Modifier.fillMaxSize(),
-                                    foreground = android.graphics.Color.BLACK,
-                                    background = android.graphics.Color.WHITE
-                                )
-                            }
-                        }
-
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            if (isLoading) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    LoadingIndicator(size = 20.dp, color = accentColor)
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Text(
-                                        text = stringResource(R.string.discord_connecting),
-                                        style = ArflixTypography.body,
-                                        color = TextPrimary
-                                    )
-                                }
-                            } else {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    LoadingIndicator(size = 18.dp, color = accentColor)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = stringResource(R.string.discord_waiting_approval),
-                                        style = ArflixTypography.caption,
-                                        color = TextSecondary.copy(alpha = 0.85f)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(14.dp))
-                                Text(
-                                    text = stringResource(R.string.discord_qr_instructions),
-                                    style = ArflixTypography.caption.copy(fontSize = 12.sp, lineHeight = 18.sp),
-                                    color = TextSecondary.copy(alpha = 0.7f)
-                                )
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -3810,42 +3223,25 @@ private fun MobileSettingsLayout(
     onSubtitleAiApiKeyClick: () -> Unit,
     onSubtitleAiQrClick: () -> Unit,
     onAddIptvClick: () -> Unit,
-    onConfigureStalkerClick: () -> Unit = {},
     onEditIptvClick: (Int) -> Unit,
     onAddCatalogClick: () -> Unit,
-    onImportCatalogPackClick: () -> Unit,
     onRenameCatalogClick: (CatalogConfig) -> Unit,
-    onDeleteCatalogClick: (CatalogConfig) -> Unit,
     onConnectHomeServerClick: () -> Unit,
     onConnectPlexHomeServerClick: () -> Unit,
     onAddCustomAddonClick: () -> Unit,
     openCustomUserAgentDialog: () -> Unit = {},
-    onNavigateToTelegram: () -> Unit = {},
-    onDisconnectCloud: () -> Unit = {},
-    onDisconnectTrakt: () -> Unit = {}
+    onNavigateToTelegram: () -> Unit = {}
 ) {
-    val backMotion = rememberArvioPredictiveBack(enabled = page != "MAIN") {
+    BackHandler(enabled = page != "MAIN") {
         onNavigate("MAIN")
     }
 
-    var lastSubPage by remember { mutableStateOf(if (page != "MAIN") page else "") }
-    val displayedSubPage = if (page != "MAIN") page else lastSubPage
-    LaunchedEffect(page) {
-        if (page != "MAIN") {
-            lastSubPage = page
-        }
-    }
-
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(appBackgroundDark())
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .arvioBackPeek(backMotion, active = page != "MAIN")
-        ) {
+        if (page == "MAIN") {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -3866,7 +3262,7 @@ private fun MobileSettingsLayout(
                         modifier = Modifier
                             .heightIn(min = 48.dp)
                             .widthIn(min = 72.dp)
-                            .clickable { onDisconnectCloud() }
+                            .clickable { viewModel.logout() }
                             .padding(horizontal = 12.dp, vertical = 14.dp)
                     )
                 }
@@ -3882,95 +3278,53 @@ private fun MobileSettingsLayout(
                 onSwitchProfile = onSwitchProfile,
                 onNavigateToTelegram = onNavigateToTelegram
             )
-        }
-
-        AnimatedVisibility(
-            visible = page != "MAIN",
-            enter = fadeIn(tween(200)) + slideInHorizontally(tween(250)) { it / 6 },
-            exit = fadeOut(tween(220, easing = FastOutSlowInEasing)) + slideOutHorizontally(tween(220, easing = FastOutSlowInEasing)) { it / 4 }
-        ) {
-            Column(
+        } else {
+            Row(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .arvioBackSurface(backMotion)
-                    .background(appBackgroundDark())
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = stringResource(R.string.back),
+                    tint = TextPrimary,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowBack,
-                        contentDescription = stringResource(R.string.back),
-                        tint = TextPrimary,
-                        modifier = Modifier
-                            .clickable { onNavigate("MAIN") }
-                            .padding(end = 16.dp)
-                            .size(28.dp)
-                    )
-                    Text(
-                        text = mobileCategoryTitle(displayedSubPage),
-                        style = ArflixTypography.heroTitle.copy(fontSize = 24.sp),
-                        color = TextPrimary,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                MobileSettingsSubPage(
-                    page = displayedSubPage,
-                    onNavigate = onNavigate,
-                    uiState = uiState,
-                    viewModel = viewModel,
-                    stremioAddons = stremioAddons,
-                    onSwitchProfile = onSwitchProfile,
-                    openDnsProviderPicker = openDnsProviderPicker,
-                    openUiModeWarningDialog = openUiModeWarningDialog,
-                    openQualityFiltersModal = openQualityFiltersModal,
-                    onSubtitleAiModelClick = onSubtitleAiModelClick,
-                    onSubtitleAiApiKeyClick = onSubtitleAiApiKeyClick,
-                    onSubtitleAiQrClick = onSubtitleAiQrClick,
-                    onAddIptvClick = onAddIptvClick,
-                    onConfigureStalkerClick = onConfigureStalkerClick,
-                    onEditIptvClick = onEditIptvClick,
-                    onAddCatalogClick = onAddCatalogClick,
-                    onImportCatalogPackClick = onImportCatalogPackClick,
-                    onRenameCatalogClick = onRenameCatalogClick,
-                    onDeleteCatalogClick = onDeleteCatalogClick,
-                    onConnectHomeServerClick = onConnectHomeServerClick,
-                    onConnectPlexHomeServerClick = onConnectPlexHomeServerClick,
-                    onAddCustomAddonClick = onAddCustomAddonClick,
-                    openCustomUserAgentDialog = openCustomUserAgentDialog,
-                    onConnectTrakt = { viewModel.startTraktAuth() },
-                    onDisconnectTrakt = onDisconnectTrakt,
-                    onConnectMdbList = viewModel::connectMdbList,
-                    onDisconnectMdbList = { viewModel.disconnectMdbList() }
+                        .clickable { onNavigate("MAIN") }
+                        .padding(end = 16.dp)
+                        .size(28.dp)
+                )
+                Text(
+                    text = page,
+                    style = ArflixTypography.heroTitle.copy(fontSize = 24.sp),
+                    color = TextPrimary,
+                    modifier = Modifier.weight(1f)
                 )
             }
+            MobileSettingsSubPage(
+                page = page,
+                onNavigate = onNavigate,
+                uiState = uiState,
+                viewModel = viewModel,
+                stremioAddons = stremioAddons,
+                openDnsProviderPicker = openDnsProviderPicker,
+                openUiModeWarningDialog = openUiModeWarningDialog,
+                openQualityFiltersModal = openQualityFiltersModal,
+                onSubtitleAiModelClick = onSubtitleAiModelClick,
+                onSubtitleAiApiKeyClick = onSubtitleAiApiKeyClick,
+                onSubtitleAiQrClick = onSubtitleAiQrClick,
+                onAddIptvClick = onAddIptvClick,
+                onEditIptvClick = onEditIptvClick,
+                onAddCatalogClick = onAddCatalogClick,
+                onRenameCatalogClick = onRenameCatalogClick,
+                onConnectHomeServerClick = onConnectHomeServerClick,
+                onConnectPlexHomeServerClick = onConnectPlexHomeServerClick,
+                onAddCustomAddonClick = onAddCustomAddonClick,
+                openCustomUserAgentDialog = openCustomUserAgentDialog
+            )
         }
     }
 }
-
-/**
- * Maps a stable mobile-settings page navigation key (kept in English so the
- * `when (page)` routing stays stable) to its localized display title.
- */
-@Composable
-private fun mobileCategoryTitle(page: String): String = when (page) {
-    "Playback & Controls" -> stringResource(R.string.settings_cat_playback_controls)
-    "Audio & Subtitles" -> stringResource(R.string.settings_cat_audio_subtitles)
-    "Appearance" -> stringResource(R.string.interface_label)
-    "Addons" -> stringResource(R.string.addons)
-    "Plugins & Extensions" -> stringResource(R.string.settings_cat_plugins_extensions)
-    "Catalogs" -> stringResource(R.string.catalogs)
-    "TV" -> stringResource(R.string.iptv)
-    "Home Server" -> stringResource(R.string.settings_home_server)
-    "Tracking Integrations" -> stringResource(R.string.settings_tracking_integrations)
-    "Privacy & Data" -> stringResource(R.string.settings_privacy_data_title)
-    "Cloud Sync & Account" -> stringResource(R.string.settings_cloud_account_sub_title)
-    else -> page
-}
-
 
 @Composable
 private fun MobileSettingsMainPage(
@@ -3984,35 +3338,24 @@ private fun MobileSettingsMainPage(
     onSwitchProfile: () -> Unit,
     onNavigateToTelegram: () -> Unit = {}
 ) {
-    val context = LocalContext.current
     androidx.compose.foundation.lazy.LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 24.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(32.dp)
     ) {
         item {
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_languages)) {
+            MobileSettingsCategory(title = "LANGUAGES") {
                 MobileSettingsRow(
                     icon = Icons.Default.Language,
                     title = stringResource(R.string.content_language),
                     value = TMDB_LANGUAGES.firstOrNull { it.first == uiState.contentLanguage }?.second ?: uiState.contentLanguage,
-                    isToggle = false,
                     isFocused = false,
                     onClick = openContentLanguagePicker
-                )
-                MobileSettingsRow(
-                    icon = Icons.Default.VolumeUp,
-                    title = stringResource(R.string.default_audio),
-                    value = uiState.defaultAudioLanguage,
-                    isToggle = false,
-                    isFocused = false,
-                    onClick = openAudioLanguagePicker
                 )
                 MobileSettingsRow(
                     icon = Icons.Default.Subtitles,
                     title = stringResource(R.string.default_subtitle),
                     value = uiState.defaultSubtitle,
-                    isToggle = false,
                     isFocused = false,
                     onClick = openSubtitlePicker
                 )
@@ -4020,16 +3363,29 @@ private fun MobileSettingsMainPage(
                     icon = Icons.Default.Subtitles,
                     title = stringResource(R.string.secondary_subtitle),
                     value = uiState.secondarySubtitle,
-                    isToggle = false,
+                    isFocused = false,
+                    onClick = openSecondarySubtitlePicker
+                )
+                MobileSettingsRow(
+                    icon = Icons.Default.Subtitles,
+                    title = stringResource(R.string.filter_subtitles),
+                    value = if (uiState.filterSubtitlesByLanguage) "On" else "Off",
+                    isFocused = false,
+                    onClick = { viewModel.setFilterSubtitlesByLanguage(!uiState.filterSubtitlesByLanguage) }
+                )
+                MobileSettingsRow(
+                    icon = Icons.Default.VolumeUp,
+                    title = stringResource(R.string.default_audio),
+                    value = uiState.defaultAudioLanguage,
                     isFocused = false,
                     showDivider = false,
-                    onClick = openSecondarySubtitlePicker
+                    onClick = openAudioLanguagePicker
                 )
             }
         }
 
         item {
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_categories)) {
+            MobileSettingsCategory(title = "CATEGORIES") {
                 val categories = buildList {
                     add("Playback & Controls" to Icons.Default.PlayArrow)
                     add("Audio & Subtitles" to Icons.Default.Speaker)
@@ -4053,7 +3409,7 @@ private fun MobileSettingsMainPage(
                         ) {
                             Icon(imageVector = icon, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(24.dp))
                             Spacer(modifier = Modifier.width(16.dp))
-                            Text(text = mobileCategoryTitle(name), style = ArflixTypography.cardTitle.copy(fontSize = 16.sp), color = TextPrimary, modifier = Modifier.weight(1f))
+                            Text(text = name, style = ArflixTypography.cardTitle.copy(fontSize = 16.sp), color = TextPrimary, modifier = Modifier.weight(1f))
                             Icon(imageVector = Icons.Default.ChevronRight, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
                         }
                         if (index < categories.lastIndex) {
@@ -4065,78 +3421,54 @@ private fun MobileSettingsMainPage(
         }
 
         item {
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_user_account)) {
-                MobileSettingsRow(
-                    icon = Icons.Default.Person,
-                    title = stringResource(R.string.cloud_account),
-                    subtitle = if (uiState.isLoggedIn) (uiState.accountEmail ?: "") else stringResource(R.string.settings_cloud_account_sub_desc),
-                    value = "",
-                    isFocused = false,
-                    onClick = { onNavigate("Cloud Sync & Account") }
-                )
+            MobileSettingsCategory(title = "USER INFO & ACCOUNT") {
+                if (uiState.isLoggedIn) {
+                    MobileSettingsRow(
+                        icon = Icons.Default.Person,
+                        title = stringResource(R.string.cloud_account),
+                        subtitle = uiState.accountEmail ?: "",
+                        value = "Force Sync",
+                        isFocused = false,
+                        onClick = { viewModel.forceCloudSyncNow() }
+                    )
+                    MobileSettingsRow(
+                        icon = Icons.Default.SwitchAccount,
+                        title = stringResource(R.string.switch_profile),
+                        value = "",
+                        isFocused = false,
+                        onClick = onSwitchProfile
+                    )
+                } else {
+                    MobileSettingsRow(
+                        icon = Icons.Default.Person,
+                        title = stringResource(R.string.cloud_account),
+                        value = "Sign In",
+                        isFocused = false,
+                        onClick = { viewModel.openCloudEmailPasswordDialog() }
+                    )
+                }
                 MobileSettingsRow(
                     icon = Icons.Default.Movie,
-                    title = stringResource(R.string.settings_tracking_integrations),
-                    value = when {
-                        uiState.isTraktAuthenticated -> "Trakt"
-                        uiState.isMdbListConnected -> "MDBList"
-                        uiState.isSimklConnected -> "Simkl"
-                        else -> ""
-                    },
+                    title = stringResource(R.string.trakt_account),
+                    value = if (uiState.isTraktAuthenticated) "Disconnect" else "Connect",
                     isFocused = false,
-                    onClick = { onNavigate("Tracking Integrations") }
+                    onClick = { if (uiState.isTraktAuthenticated) viewModel.disconnectTrakt() else viewModel.startTraktAuth() }
                 )
                 MobileSettingsRow(
-                    iconRes = R.drawable.ic_telegram,
+                    icon = Icons.Default.QrCode,
                     title = "Telegram",
-                    value = "",
-                    isExternalLink = false,
+                    value = "Open",
                     isFocused = false,
-                    onClick = { onNavigate("Telegram") }
-                )
-                val isDiscordLoggedIn by com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isLoggedInFlow.collectAsStateWithLifecycle(initialValue = false)
-                val discordUsername by com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.usernameFlow.collectAsStateWithLifecycle(initialValue = null)
-                val isDiscordSupported = com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isSupported
-                val context = LocalContext.current
-                MobileSettingsRow(
-                    iconRes = R.drawable.ic_discord,
-                    title = "Discord RPC",
-                    subtitle = when {
-                        !isDiscordSupported -> "Not included in this build"
-                        isDiscordLoggedIn && !discordUsername.isNullOrBlank() -> "Connected as $discordUsername"
-                        else -> ""
-                    },
-                    value = when {
-                        !isDiscordSupported -> "Unavailable"
-                        isDiscordLoggedIn -> "Disconnect"
-                        else -> "Connect"
-                    },
-                    enabled = isDiscordSupported,
-                    isFocused = false,
-                    onClick = {
-                        if (isDiscordLoggedIn) {
-                            com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.logout()
-                        } else {
-                            com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.login(context)
-                        }
-                    }
+                    onClick = onNavigateToTelegram
                 )
                 MobileSettingsRow(
                     icon = Icons.Default.SystemUpdate,
                     title = stringResource(R.string.app_version),
                     subtitle = "V${BuildConfig.VERSION_NAME}",
-                    value = if (uiState.updateStatus is com.arflix.tv.updater.UpdateStatus.UpdateAvailable) stringResource(R.string.settings_update_available) else stringResource(R.string.settings_check_updates),
-                    isFocused = false,
-                    onClick = { viewModel.checkForAppUpdates(force = true, showNoUpdateFeedback = true) }
-                )
-                MobileSettingsRow(
-                    icon = Icons.Default.Security,
-                    title = stringResource(R.string.settings_privacy_data_title),
-                    subtitle = stringResource(R.string.settings_privacy_data_sub_desc),
-                    value = "",
+                    value = if (uiState.updateStatus is com.arflix.tv.updater.UpdateStatus.UpdateAvailable) "Update Available" else "Check Updates",
                     isFocused = false,
                     showDivider = false,
-                    onClick = { onNavigate("Privacy & Data") }
+                    onClick = { viewModel.checkForAppUpdates(force = true, showNoUpdateFeedback = true) }
                 )
             }
         }
@@ -4157,24 +3489,14 @@ private fun MobileSettingsSubPage(
     onSubtitleAiApiKeyClick: () -> Unit,
     onSubtitleAiQrClick: () -> Unit,
     onAddIptvClick: () -> Unit,
-    onConfigureStalkerClick: () -> Unit = {},
     onEditIptvClick: (Int) -> Unit,
     onAddCatalogClick: () -> Unit,
-    onImportCatalogPackClick: () -> Unit,
     onRenameCatalogClick: (CatalogConfig) -> Unit,
-    onDeleteCatalogClick: (CatalogConfig) -> Unit,
     onConnectHomeServerClick: () -> Unit,
     onConnectPlexHomeServerClick: () -> Unit,
     onAddCustomAddonClick: () -> Unit,
-    openCustomUserAgentDialog: () -> Unit = {},
-    // Tracking integrations
-    onConnectTrakt: () -> Unit = {},
-    onDisconnectTrakt: () -> Unit = {},
-    onConnectMdbList: (String) -> Unit = {},
-    onDisconnectMdbList: () -> Unit = {},
-    onSwitchProfile: () -> Unit = {}
+    openCustomUserAgentDialog: () -> Unit = {}
 ) {
-
     val scrollState = rememberScrollState()
     Column(
         modifier = Modifier
@@ -4185,7 +3507,7 @@ private fun MobileSettingsSubPage(
     ) {
         when (page) {
             "Playback & Controls" -> {
-                MobileSettingsCategory(title = stringResource(R.string.settings_section_playback)) {
+                MobileSettingsCategory(title = "PLAYBACK") {
                     MobileSettingsRow(
                         icon = Icons.Default.PlayArrow,
                         title = stringResource(R.string.auto_play_next_title),
@@ -4243,14 +3565,6 @@ private fun MobileSettingsSubPage(
                         onClick = { viewModel.cycleFrameRateMatchingMode() }
                     )
                     MobileSettingsRow(
-                        icon = Icons.Default.Movie,
-                        title = stringResource(R.string.dv_compat_title),
-                        subtitle = stringResource(R.string.dv_compat_desc),
-                        value = if (uiState.dolbyVisionCompatEnabled) "On" else "Off",
-                        isFocused = false,
-                        onClick = { viewModel.setDolbyVisionCompatEnabled(!uiState.dolbyVisionCompatEnabled) }
-                    )
-                    MobileSettingsRow(
                         icon = Icons.Default.HighQuality,
                         title = stringResource(R.string.quality_filters),
                         value = uiState.qualityFilterPresetLabel,
@@ -4259,7 +3573,7 @@ private fun MobileSettingsSubPage(
                         onClick = openQualityFiltersModal
                     )
                 }
-                MobileSettingsCategory(title = stringResource(R.string.settings_section_controls)) {
+                MobileSettingsCategory(title = "CONTROLS") {
                     MobileSettingsRow(
                         icon = Icons.Default.Person,
                         title = stringResource(R.string.skip_profile),
@@ -4285,7 +3599,7 @@ private fun MobileSettingsSubPage(
                 }
             }
             "Audio & Subtitles" -> {
-                MobileSettingsCategory(title = stringResource(R.string.settings_section_subtitles)) {
+                MobileSettingsCategory(title = "SUBTITLES") {
                     MobileSettingsRow(
                         icon = Icons.Default.Subtitles,
                         title = stringResource(R.string.subtitle_size),
@@ -4316,46 +3630,17 @@ private fun MobileSettingsSubPage(
                     )
                     MobileSettingsRow(
                         icon = Icons.Default.Subtitles,
-                        title = stringResource(R.string.subtitle_font),
-                        subtitle = stringResource(R.string.subtitle_font_desc),
-                        value = uiState.subtitleFont,
-                        isFocused = false,
-                        onClick = { viewModel.cycleSubtitleFont() }
-                    )
-                    MobileSettingsRow(
-                        icon = Icons.Default.Subtitles,
                         title = stringResource(R.string.subtitle_stylized),
                         subtitle = stringResource(R.string.subtitle_stylized_desc),
                         value = if (uiState.subtitleStylized) "On" else "Off",
-                        isToggle = true,
                         isFocused = false,
                         onClick = { viewModel.toggleSubtitleStylized() }
-                    )
-                    // AI-independent: the timing-based match scan needs no API key.
-                    MobileSettingsRow(
-                        icon = Icons.Default.Subtitles,
-                        title = stringResource(R.string.ai_find_best_match_title),
-                        subtitle = stringResource(R.string.ai_find_best_match_desc),
-                        value = if (uiState.subtitleAiFindBestMatch) "On" else "Off",
-                        isToggle = true,
-                        isFocused = false,
-                        onClick = { viewModel.setSubtitleAiFindBestMatch(!uiState.subtitleAiFindBestMatch) }
-                    )
-                    MobileSettingsRow(
-                        icon = Icons.Default.Subtitles,
-                        title = stringResource(R.string.subtitle_preload_title),
-                        subtitle = stringResource(R.string.subtitle_preload_desc),
-                        value = if (uiState.subtitlePreloadEnabled) "On" else "Off",
-                        isToggle = true,
-                        isFocused = false,
-                        onClick = { viewModel.setSubtitlePreloadEnabled(!uiState.subtitlePreloadEnabled) }
                     )
                     MobileSettingsRow(
                         icon = Icons.Default.Subtitles,
                         title = stringResource(R.string.filter_subtitles),
                         subtitle = stringResource(R.string.filter_subtitles_desc),
                         value = if (uiState.filterSubtitlesByLanguage) "On" else "Off",
-                        isToggle = true,
                         isFocused = false,
                         showDivider = false,
                         onClick = { viewModel.setFilterSubtitlesByLanguage(!uiState.filterSubtitlesByLanguage) }
@@ -4375,8 +3660,8 @@ private fun MobileSettingsSubPage(
                         title = stringResource(R.string.ai_model_title),
                         subtitle = stringResource(R.string.ai_model_desc),
                         value = when (uiState.subtitleAiModel) {
-                            com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B -> "Groq - GPT-OSS 120B"
-                            com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25 -> "Google - Gemini 3.5 Flash Lite"
+                            com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B -> "Groq - Llama 3.3 70B"
+                            com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25 -> "Google - Gemini 2.5 Flash"
                         },
                         isFocused = false,
                         onClick = onSubtitleAiModelClick
@@ -4428,12 +3713,11 @@ private fun MobileSettingsSubPage(
                         )
                     }
                 }
-                MobileSettingsCategory(title = stringResource(R.string.settings_section_audio)) {
+                MobileSettingsCategory(title = "AUDIO") {
                     MobileSettingsRow(
                         icon = Icons.Default.VolumeUp,
                         title = stringResource(R.string.volume_boost),
-                        value = if (uiState.volumeBoostDb > 0) "+${uiState.volumeBoostDb} dB" else "0 dB",
-                        isToggle = false,
+                        value = if (uiState.volumeBoostDb > 0) "+${uiState.volumeBoostDb} dB" else "Off",
                         isFocused = false,
                         showDivider = false,
                         onClick = { viewModel.cycleVolumeBoost() }
@@ -4441,7 +3725,7 @@ private fun MobileSettingsSubPage(
                 }
             }
             "Appearance" -> {
-                MobileSettingsCategory(title = stringResource(R.string.settings_section_appearance)) {
+                MobileSettingsCategory(title = "APPEARANCE") {
                     MobileSettingsRow(
                         icon = Icons.Default.Palette,
                         title = stringResource(R.string.ui_mode),
@@ -4480,14 +3764,6 @@ private fun MobileSettingsSubPage(
                         onClick = { viewModel.setShowBudget(!uiState.showBudget) }
                     )
                     MobileSettingsRow(
-                        icon = Icons.Default.Star,
-                        title = stringResource(R.string.show_episode_ratings),
-                        value = if (uiState.showEpisodeRatings) "On" else "Off",
-                        isFocused = false,
-                        showDivider = true,
-                        onClick = { viewModel.setShowEpisodeRatings(!uiState.showEpisodeRatings) }
-                    )
-                    MobileSettingsRow(
                         icon = Icons.Default.VisibilityOff,
                         title = stringResource(R.string.spoiler_blur),
                         value = if (uiState.spoilerBlurEnabled) "On" else "Off",
@@ -4514,30 +3790,16 @@ private fun MobileSettingsSubPage(
                     )
                 }
             }
-            "Addons" -> {
+            "Addons", "Plugins & Extensions" -> {
                 StremioAddonsSettings(
                     addons = stremioAddons,
-                    isRefreshingAddons = uiState.isRefreshingAddons,
                     focusedIndex = -1,
                     focusedActionIndex = 0,
                     onToggleAddon = { viewModel.toggleAddon(it) },
                     onMoveAddonUp = { viewModel.moveAddonUp(it) },
                     onMoveAddonDown = { viewModel.moveAddonDown(it) },
                     onDeleteAddon = { viewModel.removeAddon(it) },
-                    onAddCustomAddon = onAddCustomAddonClick,
-                    onRefreshAddons = { viewModel.refreshAddons() }
-                )
-            }
-            "Plugins & Extensions" -> {
-                com.arflix.tv.ui.screens.plugin.PluginScreen(
-                    focusedIndex = -1,
-                    onFocusedIndexChanged = {},
-                    onMaxIndexChanged = {},
-                    enterTrigger = -1,
-                    onEnterTriggerHandled = {},
-                    onModalStateChanged = {},
-                    onBackPressed = { onNavigate("MAIN") },
-                    onNavigateToSection = {}
+                    onAddCustomAddon = onAddCustomAddonClick
                 )
             }
             "Catalogs" -> {
@@ -4546,12 +3808,10 @@ private fun MobileSettingsSubPage(
                     focusedIndex = -1,
                     focusedActionIndex = 0,
                     onAddCatalog = onAddCatalogClick,
-                    onImportCatalogPack = onImportCatalogPackClick,
                     onRenameCatalog = onRenameCatalogClick,
                     onMoveCatalogUp = { viewModel.moveCatalogUp(it.id) },
                     onMoveCatalogDown = { viewModel.moveCatalogDown(it.id) },
-                    onDeleteCatalog = onDeleteCatalogClick,
-                    onUnpackCatalog = { viewModel.unpackCatalog(it.id) }
+                    onDeleteCatalog = { viewModel.removeCatalog(it.id) }
                 )
             }
             "TV" -> {
@@ -4567,8 +3827,6 @@ private fun MobileSettingsSubPage(
                     focusedIndex = -1,
                     focusedActionIndex = 0,
                     onConfigure = onAddIptvClick,
-                    onConfigureStalker = onConfigureStalkerClick,
-                    stalkerSubtitle = if (uiState.iptvStalkerUrl.isNotBlank()) uiState.iptvStalkerUrl else stringResource(R.string.settings_stalker_middleware_hint),
                     onEditPlaylist = onEditIptvClick,
                     onTogglePlaylist = { idx ->
                         val updated = uiState.iptvPlaylists.toMutableList()
@@ -4602,11 +3860,7 @@ private fun MobileSettingsSubPage(
                     onManageCategories = { playlistId ->
                         viewModel.setIptvSelectedPlaylistId(playlistId)
                         onNavigate("IPTV_CATEGORIES")
-                    },
-                    sortOrder = uiState.iptvSortOrder,
-                    onSortOrderChange = { viewModel.setIptvSortOrder(it) },
-                    epgVodActionsEnabled = uiState.epgVodActionsEnabled,
-                    onEpgVodActionsToggle = viewModel::setEpgVodActionsEnabled,
+                    }
                 )
             }
             "IPTV_CATEGORIES" -> {
@@ -4639,258 +3893,122 @@ private fun MobileSettingsSubPage(
                     onDisconnect = { viewModel.disconnectHomeServer() }
                 )
             }
-            "Tracking Integrations" -> {
-                TrackingIntegrationsPage(
-                    uiState = uiState,
-                    onConnectTrakt = onConnectTrakt,
-                    onDisconnectTrakt = onDisconnectTrakt,
-                    onConnectMdbList = onConnectMdbList,
-                    onDisconnectMdbList = onDisconnectMdbList,
-                    onConnectSimkl = { viewModel.startSimklAuth() },
-                    onDisconnectSimkl = { viewModel.disconnectSimkl() },
-                    onReadMode = { feature, mode -> viewModel.setTrackingReadMode(feature, mode) },
-                    onWriteTarget = { provider, enabled ->
-                        viewModel.setTrackingWriteTarget(provider, enabled)
-                    }
-                )
-            }
-            "Privacy & Data" -> {
-                MobilePrivacySubPage(
-                    uiState = uiState,
-                    viewModel = viewModel
-                )
-            }
-            "Cloud Sync & Account" -> {
-                MobileCloudAccountSubPage(
-                    uiState = uiState,
-                    viewModel = viewModel,
-                    stremioAddons = stremioAddons,
-                    onSwitchProfile = onSwitchProfile,
-                    context = LocalContext.current
-                )
-            }
-            "Telegram" -> {
-                com.arflix.tv.ui.screens.settings.telegram.TelegramSettingsScreen(
-                    onBack = { onNavigate("MAIN") },
-                    showHeader = false
-                )
-            }
         }
     }
 }
 
 @Composable
-private fun MobilePrivacySubPage(
-    uiState: SettingsUiState,
-    viewModel: SettingsViewModel
+private fun MobileSettingsCategory(
+    title: String,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
 ) {
-    val context = LocalContext.current
-    MobileSettingsCategory(title = stringResource(R.string.settings_diagnostics_sharing).uppercase()) {
-        MobileSettingsRow(
-            icon = Icons.Default.Settings,
-            title = stringResource(R.string.settings_diagnostics_sharing),
-            subtitle = stringResource(R.string.settings_diagnostics_sharing_desc),
-            value = if (uiState.diagnosticsSharingEnabled) "On" else "Off",
-            isFocused = false,
-            showDivider = false,
-            onClick = { viewModel.setDiagnosticsSharingEnabled(!uiState.diagnosticsSharingEnabled) }
-        )
-    }
-
-    MobileSettingsCategory(title = stringResource(R.string.settings_privacy_policy).uppercase()) {
-        MobileSettingsRow(
-            icon = Icons.Default.Link,
-            title = stringResource(R.string.settings_privacy_policy),
-            subtitle = stringResource(R.string.settings_privacy_policy_desc),
-            value = stringResource(R.string.settings_open),
-            isExternalLink = true,
-            isFocused = false,
-            showDivider = false,
-            onClick = { openExternalUrl(context, PRIVACY_POLICY_URL) }
-        )
-    }
-}
-
-@Composable
-private fun MobileCloudAccountSubPage(
-    uiState: SettingsUiState,
-    viewModel: SettingsViewModel,
-    stremioAddons: List<com.arflix.tv.data.model.Addon>,
-    onSwitchProfile: () -> Unit,
-    context: android.content.Context
-) {
-    val catalogsCount = uiState.catalogs.size
-    val addonsCount = stremioAddons.size
-    var showSignOutConfirmDialog by remember { mutableStateOf(false) }
-
-    // Section 1: SYNC STATS (2x2 chip grid like Tracking Integrations)
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier.fillMaxWidth()
+    ) {
         Text(
-            text = stringResource(R.string.settings_section_sync_stats),
+            text = title,
             style = ArflixTypography.caption.copy(fontSize = 12.sp, letterSpacing = 1.sp),
             color = TextSecondary,
             modifier = Modifier.padding(start = 16.dp, bottom = 8.dp)
         )
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(BackgroundElevated)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                TrackingStatChip(
-                    label = stringResource(R.string.watchlist),
-                    value = uiState.watchlistCount.toString(),
-                    modifier = Modifier.weight(1f)
+            content()
+        }
+    }
+}
+
+@Composable
+private fun MobileSettingsRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String = "",
+    value: String,
+    isFocused: Boolean = false,
+    showDivider: Boolean = true,
+    onClick: () -> Unit
+) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onClick() }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(24.dp)
                 )
-                TrackingStatChip(
-                    label = stringResource(R.string.continue_watching),
-                    value = uiState.historyCount.toString(),
-                    modifier = Modifier.weight(1f)
-                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = title,
+                        style = ArflixTypography.cardTitle.copy(fontSize = 16.sp),
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (subtitle.isNotEmpty()) {
+                        Text(
+                            text = subtitle,
+                            style = ArflixTypography.caption.copy(fontSize = 13.sp),
+                            color = TextSecondary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                TrackingStatChip(
-                    label = stringResource(R.string.addons),
-                    value = addonsCount.toString(),
-                    modifier = Modifier.weight(1f)
-                )
-                TrackingStatChip(
-                    label = stringResource(R.string.catalogs),
-                    value = catalogsCount.toString(),
-                    modifier = Modifier.weight(1f)
-                )
+            if (value.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(16.dp))
+                if (value == "On" || value == "Off") {
+                    val isChecked = value == "On"
+                    Box(
+                        modifier = Modifier
+                            .width(44.dp)
+                            .height(24.dp)
+                            .background(
+                                color = if (isChecked) SuccessGreen else Color.White.copy(alpha = 0.2f),
+                                shape = RoundedCornerShape(13.dp)
+                            )
+                            .padding(3.dp),
+                        contentAlignment = if (isChecked) Alignment.CenterEnd else Alignment.CenterStart
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(18.dp)
+                                .background(
+                                    color = Color.White,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                        )
+                    }
+                } else {
+                    Text(
+                        text = value,
+                        style = ArflixTypography.caption.copy(
+                            fontSize = 13.sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                        ),
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
-    }
-
-    var showForcePullConfirmDialog by remember { mutableStateOf(false) }
-
-    if (showForcePullConfirmDialog) {
-        AccountDisconnectConfirmDialog(
-            title = stringResource(R.string.settings_cloud_pull_confirm_title),
-            description = stringResource(R.string.settings_cloud_pull_confirm_desc),
-            confirmLabel = stringResource(R.string.settings_cloud_restore),
-            onConfirm = {
-                showForcePullConfirmDialog = false
-                viewModel.forceCloudPullOnly()
-            },
-            onDismiss = { showForcePullConfirmDialog = false }
-        )
-    }
-
-    if (showSignOutConfirmDialog) {
-        AccountDisconnectConfirmDialog(
-            title = stringResource(R.string.settings_cloud_disconnect_confirm_title),
-            description = stringResource(R.string.settings_cloud_disconnect_confirm_desc),
-            confirmLabel = stringResource(R.string.settings_sign_out),
-            onConfirm = {
-                showSignOutConfirmDialog = false
-                viewModel.logout()
-            },
-            onDismiss = { showSignOutConfirmDialog = false }
-        )
-    }
-
-    // Section 2: ACCOUNT PROFILE & STATUS
-    MobileSettingsCategory(title = stringResource(R.string.cloud_account).uppercase()) {
-        if (uiState.isLoggedIn) {
-            MobileSettingsRow(
-                icon = Icons.Default.Person,
-                title = uiState.accountEmail ?: stringResource(R.string.cloud_account),
-                subtitle = stringResource(R.string.settings_cloud_active),
-                value = "",
-                isFocused = false,
-                showDivider = true,
-                onClick = {}
-            )
-            MobileSettingsRow(
-                icon = Icons.Default.SwitchAccount,
-                title = stringResource(R.string.switch_profile),
-                subtitle = "",
-                value = "",
-                isFocused = false,
-                showDivider = true,
-                onClick = onSwitchProfile
-            )
-            MobileSettingsRow(
-                icon = Icons.Default.ExitToApp,
-                iconTint = androidx.compose.ui.graphics.Color(0xFFFF5252),
-                title = stringResource(R.string.settings_sign_out),
-                subtitle = stringResource(R.string.settings_sign_out_desc),
-                value = "",
-                isFocused = false,
-                showDivider = false,
-                onClick = { showSignOutConfirmDialog = true }
-            )
-        } else {
-            MobileSettingsRow(
-                icon = Icons.Default.Person,
-                title = stringResource(R.string.sign_in),
-                subtitle = stringResource(R.string.settings_cloud_signin_sub),
-                value = "",
-                isFocused = false,
-                showDivider = false,
-                onClick = { viewModel.openCloudEmailPasswordDialog() }
-            )
+        if (showDivider) {
+            Box(modifier = Modifier.fillMaxWidth().height(1.dp).padding(horizontal = 16.dp).background(Color.White.copy(alpha = 0.05f)))
         }
-    }
-
-    val handleCloudAction = { action: () -> Unit ->
-        if (uiState.isLoggedIn) {
-            action()
-        } else {
-            viewModel.openCloudEmailPasswordDialog()
-        }
-    }
-
-    // Section 3: MANUAL CLOUD OPERATIONS
-    MobileSettingsCategory(title = stringResource(R.string.settings_section_cloud_actions)) {
-        MobileSettingsRow(
-            icon = Icons.Default.Sync,
-            title = stringResource(R.string.settings_force_sync),
-            subtitle = uiState.lastCloudSyncStatus ?: stringResource(R.string.settings_cloud_manual_sync_sub),
-            value = if (uiState.isForceCloudSyncing) stringResource(R.string.settings_badge_syncing) else stringResource(R.string.settings_badge_sync),
-            isFocused = false,
-            showDivider = true,
-            onClick = { handleCloudAction { viewModel.forceCloudSyncNow() } }
-        )
-        MobileSettingsRow(
-            icon = Icons.Default.Upload,
-            title = stringResource(R.string.settings_force_push),
-            subtitle = stringResource(R.string.settings_force_push_desc),
-            value = if (uiState.isForceCloudSyncing) stringResource(R.string.settings_badge_syncing) else stringResource(R.string.settings_action_push),
-            isFocused = false,
-            showDivider = true,
-            onClick = { handleCloudAction { viewModel.forceCloudPushOnly() } }
-        )
-        MobileSettingsRow(
-            icon = Icons.Default.Download,
-            title = stringResource(R.string.settings_force_pull),
-            subtitle = stringResource(R.string.settings_force_pull_desc),
-            value = if (uiState.isForceCloudSyncing) stringResource(R.string.settings_badge_syncing) else stringResource(R.string.settings_action_pull),
-            isFocused = false,
-            showDivider = false,
-            onClick = { handleCloudAction { showForcePullConfirmDialog = true } }
-        )
-    }
-
-    // Section 4: ACCOUNT SECURITY & DELETION
-    MobileSettingsCategory(title = stringResource(R.string.settings_section_account_security)) {
-        MobileSettingsRow(
-            icon = Icons.Default.Delete,
-            title = stringResource(R.string.settings_account_data_deletion),
-            subtitle = stringResource(R.string.settings_account_data_deletion_desc),
-            value = stringResource(R.string.settings_open),
-            isExternalLink = true,
-            isFocused = false,
-            showDivider = false,
-            onClick = { openExternalUrl(context, ACCOUNT_DELETION_URL) }
-        )
     }
 }
 
@@ -4919,9 +4037,6 @@ private fun UnknownSourcesModal(
             usePlatformDefaultWidth = false
         )
     ) {
-        BackHandler {
-            onDismiss()
-        }
         ModalScrim(onDismiss = onDismiss) {
             Column(
                 modifier = Modifier
@@ -4947,17 +4062,17 @@ private fun UnknownSourcesModal(
                         }
                     }
             ) {
-                Text(stringResource(R.string.settings_allow_unknown_sources), style = ArflixTypography.sectionTitle, color = TextPrimary)
+                Text("Allow Unknown Sources", style = ArflixTypography.sectionTitle, color = TextPrimary)
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    stringResource(R.string.settings_allow_unknown_sources_desc),
+                    "Allow installs from unknown sources for ARVIO so the downloaded update APK can be installed.",
                     style = ArflixTypography.body,
                     color = TextSecondary
                 )
                 Spacer(modifier = Modifier.height(24.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    UpdateActionButton(stringResource(R.string.close), focusedIndex == 0, onDismiss)
-                    UpdateActionButton(stringResource(R.string.settings_open_settings), focusedIndex == 1, onOpenSettings, highlighted = true)
+                    UpdateActionButton("Close", focusedIndex == 0, onDismiss)
+                    UpdateActionButton("Open Settings", focusedIndex == 1, onOpenSettings, highlighted = true)
                 }
             }
         }
@@ -5015,13 +4130,12 @@ private fun UpdateActionButton(
     }
 }
 
-@Composable
 private fun tvSettingsSidebarGroup(section: String): String {
     return when (section) {
-        "accounts", "profiles" -> stringResource(R.string.settings_group_profile)
-        "playback", "language", "subtitles", "ai_subtitles" -> stringResource(R.string.playback)
-        "iptv", "stremio", "catalogs", "home_server" -> stringResource(R.string.sources)
-        else -> stringResource(R.string.settings_group_system)
+        "accounts", "profiles" -> "Profile"
+        "playback", "language", "subtitles", "ai_subtitles" -> "Playback"
+        "iptv", "stremio", "catalogs", "home_server" -> "Sources"
+        else -> "System"
     }
 }
 
@@ -5192,7 +4306,7 @@ private fun TvSettingsInsightPanel(
             .padding(22.dp)
     ) {
         Text(
-            text = stringResource(R.string.settings_overview),
+            text = "Overview",
             style = ArflixTypography.sectionTitle.copy(fontSize = 22.sp),
             color = TextPrimary,
             maxLines = 1,
@@ -5217,7 +4331,7 @@ private fun TvSettingsInsightPanel(
         ) {
             Column {
                 Text(
-                    text = if (focusedIndex >= 0) stringResource(R.string.settings_focused_setting) else stringResource(R.string.settings_section_label),
+                    text = if (focusedIndex >= 0) "Focused setting" else "Section",
                     style = ArflixTypography.caption,
                     color = resolveAccentColor(fallback = Pink),
                     maxLines = 1
@@ -5243,7 +4357,7 @@ private fun TvSettingsInsightPanel(
         Spacer(modifier = Modifier.height(22.dp))
 
         Text(
-            text = stringResource(R.string.settings_status),
+            text = "Status",
             style = ArflixTypography.caption.copy(fontSize = 11.sp),
             color = TextSecondary.copy(alpha = 0.54f),
             maxLines = 1
@@ -5297,8 +4411,8 @@ private fun tvSettingsSectionTitle(section: String): String {
         "appearance" -> stringResource(R.string.interface_label)
         "profiles" -> stringResource(R.string.profiles)
         "network" -> stringResource(R.string.network)
-        "iptv" -> stringResource(R.string.iptv)
-        "home_server" -> stringResource(R.string.settings_home_server)
+        "iptv" -> "TV"
+        "home_server" -> "Home Server"
         "catalogs" -> stringResource(R.string.catalogs)
         "stremio" -> stringResource(R.string.addons)
         "accounts" -> stringResource(R.string.accounts)
@@ -5306,26 +4420,24 @@ private fun tvSettingsSectionTitle(section: String): String {
     }
 }
 
-@Composable
 private fun tvSettingsSectionDescription(section: String): String {
     return when (section) {
-        "language" -> stringResource(R.string.settings_desc_language)
-        "subtitles" -> stringResource(R.string.settings_desc_subtitles)
-        "ai_subtitles" -> stringResource(R.string.settings_desc_ai_subtitles)
-        "playback" -> stringResource(R.string.settings_desc_playback)
-        "appearance" -> stringResource(R.string.settings_desc_appearance)
-        "profiles" -> stringResource(R.string.settings_desc_profiles)
-        "network" -> stringResource(R.string.settings_desc_network)
-        "iptv" -> stringResource(R.string.settings_desc_iptv)
-        "home_server" -> stringResource(R.string.settings_desc_home_server)
-        "catalogs" -> stringResource(R.string.settings_desc_catalogs)
-        "stremio" -> stringResource(R.string.settings_desc_stremio)
-        "accounts" -> stringResource(R.string.settings_desc_accounts)
-        else -> stringResource(R.string.settings_desc_default)
+        "language" -> "App text and preferred audio track."
+        "subtitles" -> "Subtitle language defaults, display style and filtering."
+        "ai_subtitles" -> "AI subtitle translation and cleanup options."
+        "playback" -> "Autoplay, trailers, source quality, frame-rate matching and audio boost."
+        "appearance" -> "Layout, OLED mode, focus styling and hero metadata."
+        "profiles" -> "Profile startup behavior for this device."
+        "network" -> "DNS and loading diagnostic preferences."
+        "iptv" -> "TV playlists, EPG refresh, channel loading and playlist management."
+        "home_server" -> "Connect personal media servers and use their libraries as sources."
+        "catalogs" -> "Discover, rename, order and remove home rows and list catalogs."
+        "stremio" -> "Manage third-party addons used for catalog and source discovery."
+        "accounts" -> "Cloud sync, Trakt connection, app updates and account controls."
+        else -> "Configure ARVIO for this profile."
     }
 }
 
-@Composable
 private fun tvSettingsSectionPills(
     section: String,
     uiState: SettingsUiState,
@@ -5333,48 +4445,47 @@ private fun tvSettingsSectionPills(
 ): List<String> {
     return when (section) {
         "language" -> listOf(
-            stringResource(R.string.settings_pill_app, uiState.contentLanguage.uppercase()),
-            stringResource(R.string.settings_pill_audio, localizeSettingValue(uiState.defaultAudioLanguage))
+            "App ${uiState.contentLanguage.uppercase()}",
+            "Audio ${uiState.defaultAudioLanguage}"
         )
         "subtitles" -> listOf(
-            stringResource(R.string.settings_pill_default, localizeSettingValue(uiState.defaultSubtitle)),
-            stringResource(R.string.settings_pill_size, localizeSettingValue(uiState.subtitleSize))
+            "Default ${uiState.defaultSubtitle}",
+            "Size ${uiState.subtitleSize}"
         )
         "ai_subtitles" -> listOf(
-            if (uiState.subtitleAiEnabled) stringResource(R.string.settings_pill_ai_on) else stringResource(R.string.settings_pill_ai_off),
-            if (uiState.subtitleAiAutoSelect) stringResource(R.string.settings_pill_autoselect_on) else stringResource(R.string.settings_pill_autoselect_off)
+            if (uiState.subtitleAiEnabled) "AI on" else "AI off",
+            if (uiState.subtitleAiAutoSelect) "Auto-select on" else "Auto-select off"
         )
         "playback" -> listOf(
-            stringResource(R.string.settings_pill_autoplay, if (uiState.autoPlaySingleSource) stringResource(R.string.settings_inline_on) else stringResource(R.string.settings_inline_off)),
-            stringResource(R.string.settings_pill_trailers, if (uiState.trailerAutoPlay) stringResource(R.string.settings_inline_on) else stringResource(R.string.settings_inline_off)),
-            stringResource(R.string.settings_pill_min, localizeSettingValue(uiState.autoPlayMinQuality)),
+            "Autoplay ${if (uiState.autoPlaySingleSource) "on" else "off"}",
+            "Trailers ${if (uiState.trailerAutoPlay) "on" else "off"}",
+            "Min ${uiState.autoPlayMinQuality}",
         )
         "appearance" -> listOf(
-            stringResource(R.string.settings_pill_oled, if (uiState.oledBlackBackground) stringResource(R.string.settings_inline_on) else stringResource(R.string.settings_inline_off))
+            "OLED ${if (uiState.oledBlackBackground) "on" else "off"}"
         )
-        "profiles" -> listOf(if (uiState.skipProfileSelection) stringResource(R.string.settings_pill_skip_on) else stringResource(R.string.settings_pill_picker_on))
-        "network" -> listOf(stringResource(R.string.settings_pill_dns, uiState.dnsProvider), if (uiState.showLoadingStats) stringResource(R.string.settings_pill_stats_on) else stringResource(R.string.settings_pill_stats_off))
+        "profiles" -> listOf(if (uiState.skipProfileSelection) "Skip on" else "Picker on")
+        "network" -> listOf("DNS ${uiState.dnsProvider}", if (uiState.showLoadingStats) "Stats on" else "Stats off")
         "iptv" -> listOf(
-            stringResource(R.string.settings_pill_playlists, uiState.iptvPlaylists.size),
-            stringResource(R.string.settings_pill_channels, formatCompactCount(uiState.iptvChannelCount)),
-            if (uiState.isIptvLoading) stringResource(R.string.settings_refreshing) else stringResource(R.string.settings_ready)
+            "${uiState.iptvPlaylists.size}/3 playlists",
+            "${formatCompactCount(uiState.iptvChannelCount)} channels",
+            if (uiState.isIptvLoading) "Refreshing" else "Ready"
         )
         "home_server" -> listOf(
-            stringResource(R.string.settings_pill_connected_count, uiState.homeServerConnections.size),
-            if (uiState.isHomeServerConnecting || uiState.isPlexHomeServerPolling) stringResource(R.string.settings_working) else stringResource(R.string.settings_idle)
+            "${uiState.homeServerConnections.size} connected",
+            if (uiState.isHomeServerConnecting || uiState.isPlexHomeServerPolling) "Working" else "Idle"
         )
-        "catalogs" -> listOf(stringResource(R.string.settings_pill_catalogs, uiState.catalogs.size), stringResource(R.string.settings_cloud_synced))
-        "stremio" -> listOf(stringResource(R.string.settings_pill_installed, addonCount), stringResource(R.string.settings_profile_scoped))
+        "catalogs" -> listOf("${uiState.catalogs.size} catalogs", "Cloud synced")
+        "stremio" -> listOf("$addonCount installed", "Profile scoped")
         "accounts" -> listOf(
-            if (uiState.isLoggedIn) stringResource(R.string.settings_cloud_connected) else stringResource(R.string.settings_cloud_off),
-            if (uiState.isTraktAuthenticated) stringResource(R.string.settings_trakt_connected) else stringResource(R.string.settings_trakt_off),
-            if (uiState.isForceCloudSyncing) stringResource(R.string.syncing) else stringResource(R.string.settings_ready)
+            if (uiState.isLoggedIn) "Cloud connected" else "Cloud off",
+            if (uiState.isTraktAuthenticated) "Trakt connected" else "Trakt off",
+            if (uiState.isForceCloudSyncing) "Syncing" else "Ready"
         )
         else -> emptyList()
     }
 }
 
-@Composable
 private fun tvSettingsPanelFacts(
     section: String,
     uiState: SettingsUiState,
@@ -5382,117 +4493,112 @@ private fun tvSettingsPanelFacts(
 ): List<Pair<String, String>> {
     return when (section) {
         "language" -> listOf(
-            stringResource(R.string.settings_fact_app_language) to uiState.contentLanguage.uppercase(),
-            stringResource(R.string.audio) to uiState.defaultAudioLanguage
+            "App language" to uiState.contentLanguage.uppercase(),
+            "Audio" to uiState.defaultAudioLanguage
         )
         "subtitles" -> listOf(
-            stringResource(R.string.settings_fact_default) to uiState.defaultSubtitle,
-            stringResource(R.string.settings_fact_secondary) to uiState.secondarySubtitle,
-            stringResource(R.string.settings_fact_style) to uiState.subtitleStyle
+            "Default" to uiState.defaultSubtitle,
+            "Secondary" to uiState.secondarySubtitle,
+            "Style" to uiState.subtitleStyle
         )
         "ai_subtitles" -> listOf(
-            stringResource(R.string.settings_fact_ai) to if (uiState.subtitleAiEnabled) stringResource(R.string.settings_enabled) else stringResource(R.string.off),
-            stringResource(R.string.settings_fact_autoselect) to if (uiState.subtitleAiAutoSelect) stringResource(R.string.on) else stringResource(R.string.off)
+            "AI" to if (uiState.subtitleAiEnabled) "Enabled" else "Off",
+            "Auto-select" to if (uiState.subtitleAiAutoSelect) "On" else "Off"
         )
         "playback" -> listOf(
-            stringResource(R.string.settings_fact_autoplay) to if (uiState.autoPlaySingleSource) stringResource(R.string.on) else stringResource(R.string.off),
-            stringResource(R.string.settings_fact_trailers) to if (uiState.trailerAutoPlay) stringResource(R.string.on) else stringResource(R.string.off),
-            stringResource(R.string.settings_fact_frame_rate) to uiState.frameRateMatchingMode
+            "Autoplay" to if (uiState.autoPlaySingleSource) "On" else "Off",
+            "Trailers" to if (uiState.trailerAutoPlay) "On" else "Off",
+            "Frame rate" to uiState.frameRateMatchingMode
         )
         "appearance" -> listOf(
-            stringResource(R.string.settings_fact_oled) to if (uiState.oledBlackBackground) stringResource(R.string.on) else stringResource(R.string.off),
-            stringResource(R.string.settings_fact_accent_color) to uiState.accentColor
+            "OLED" to if (uiState.oledBlackBackground) "On" else "Off",
+            "Accent color" to uiState.accentColor
         )
         "profiles" -> listOf(
-            stringResource(R.string.settings_fact_startup) to if (uiState.skipProfileSelection) stringResource(R.string.settings_skip_picker) else stringResource(R.string.settings_show_picker)
+            "Startup" to if (uiState.skipProfileSelection) "Skip picker" else "Show picker"
         )
         "network" -> listOf(
-            stringResource(R.string.settings_fact_dns) to uiState.dnsProvider,
-            stringResource(R.string.settings_fact_loading_stats) to if (uiState.showLoadingStats) stringResource(R.string.on) else stringResource(R.string.off),
-            stringResource(R.string.settings_fact_user_agent) to formatUserAgentPreview(uiState.customUserAgent, 40)
+            "DNS" to uiState.dnsProvider,
+            "Loading stats" to if (uiState.showLoadingStats) "On" else "Off",
+            "User-Agent" to formatUserAgentPreview(uiState.customUserAgent, 40)
         )
         "iptv" -> listOf(
-            stringResource(R.string.settings_fact_playlists) to "${uiState.iptvPlaylists.size}/3",
-            stringResource(R.string.settings_fact_channels) to formatCompactCount(uiState.iptvChannelCount),
-            stringResource(R.string.settings_fact_epg) to if (uiState.iptvPlaylists.any { it.epgUrl.isNotBlank() || it.epgUrls.orEmpty().isNotEmpty() }) stringResource(R.string.settings_configured) else stringResource(R.string.settings_optional),
-            stringResource(R.string.settings_fact_state) to if (uiState.isIptvLoading) stringResource(R.string.settings_refreshing) else stringResource(R.string.settings_ready)
+            "Playlists" to "${uiState.iptvPlaylists.size}/3",
+            "Channels" to formatCompactCount(uiState.iptvChannelCount),
+            "EPG" to if (uiState.iptvPlaylists.any { it.epgUrl.isNotBlank() || it.epgUrls.orEmpty().isNotEmpty() }) "Configured" else "Optional",
+            "State" to if (uiState.isIptvLoading) "Refreshing" else "Ready"
         )
         "home_server" -> listOf(
-            stringResource(R.string.settings_fact_servers) to uiState.homeServerConnections.size.toString(),
-            stringResource(R.string.settings_fact_status) to if (uiState.isHomeServerConnecting || uiState.isPlexHomeServerPolling) stringResource(R.string.settings_working) else stringResource(R.string.settings_ready)
+            "Servers" to uiState.homeServerConnections.size.toString(),
+            "Status" to if (uiState.isHomeServerConnecting || uiState.isPlexHomeServerPolling) "Working" else "Ready"
         )
         "catalogs" -> listOf(
-            stringResource(R.string.catalogs) to uiState.catalogs.size.toString(),
-            stringResource(R.string.settings_fact_discovery) to if (uiState.isCatalogSearching) stringResource(R.string.settings_searching) else stringResource(R.string.settings_ready)
+            "Catalogs" to uiState.catalogs.size.toString(),
+            "Discovery" to if (uiState.isCatalogSearching) "Searching" else "Ready"
         )
         "stremio" -> listOf(
-            stringResource(R.string.addons) to addonCount.toString(),
-            stringResource(R.string.settings_fact_scope) to stringResource(R.string.settings_current_profile)
+            "Addons" to addonCount.toString(),
+            "Scope" to "Current profile"
         )
         "accounts" -> listOf(
-            stringResource(R.string.settings_fact_cloud) to if (uiState.isLoggedIn) stringResource(R.string.connected) else stringResource(R.string.settings_disconnected),
-            stringResource(R.string.settings_fact_trakt) to if (uiState.isTraktAuthenticated) stringResource(R.string.connected) else stringResource(R.string.settings_disconnected),
-            stringResource(R.string.settings_fact_updates) to if (uiState.isSelfUpdateSupported) stringResource(R.string.settings_available) else stringResource(R.string.settings_play_build)
+            "Cloud" to if (uiState.isLoggedIn) "Connected" else "Disconnected",
+            "Trakt" to if (uiState.isTraktAuthenticated) "Connected" else "Disconnected",
+            "Updates" to if (uiState.isSelfUpdateSupported) "Available" else "Play build"
         )
         else -> emptyList()
     }
 }
 
-@Composable
 private fun tvSettingsFocusedHelp(section: String, focusedIndex: Int): TvSettingsHelp {
     if (focusedIndex < 0) {
         return TvSettingsHelp(
-            title = stringResource(R.string.settings_help_choose_title),
-            description = stringResource(R.string.settings_help_choose_desc)
+            title = "Choose a setting",
+            description = "Move into the center panel to edit the selected section."
         )
     }
     return when (section) {
         "language" -> when (focusedIndex) {
-            0 -> TvSettingsHelp(stringResource(R.string.settings_fact_app_language), stringResource(R.string.settings_help_app_language_desc))
-            else -> TvSettingsHelp(stringResource(R.string.default_audio), stringResource(R.string.settings_help_default_audio_desc))
+            0 -> TvSettingsHelp("App language", "Changes the interface and metadata language used by ARVIO.")
+            else -> TvSettingsHelp("Default audio", "Preferred audio language when multiple tracks exist.")
         }
         "subtitles" -> when (focusedIndex) {
-            0 -> TvSettingsHelp(stringResource(R.string.default_subtitle), stringResource(R.string.settings_help_default_subtitle_desc))
-            1 -> TvSettingsHelp(stringResource(R.string.settings_help_secondary_subtitle), stringResource(R.string.settings_help_secondary_subtitle_desc))
-            else -> TvSettingsHelp(stringResource(R.string.settings_help_subtitle_pref), stringResource(R.string.settings_help_subtitle_pref_desc))
+            0 -> TvSettingsHelp("Default subtitle", "Preferred subtitle language when playback starts.")
+            1 -> TvSettingsHelp("Secondary subtitle", "Optional second subtitle preference where available.")
+            else -> TvSettingsHelp("Subtitle preference", "Adjust subtitle size, color, position, style and filtering.")
         }
-        "ai_subtitles" -> TvSettingsHelp(stringResource(R.string.ai_subtitles_section), stringResource(R.string.settings_help_ai_subtitles_desc))
+        "ai_subtitles" -> TvSettingsHelp("AI subtitles", "Configure optional AI subtitle translation and cleanup.")
         "playback" -> when (focusedIndex) {
-            0 -> TvSettingsHelp(stringResource(R.string.settings_help_next_autoplay), stringResource(R.string.settings_help_next_autoplay_desc))
-            1 -> TvSettingsHelp(stringResource(R.string.settings_help_source_autoplay), stringResource(R.string.settings_help_source_autoplay_desc))
-            in 3..4 -> TvSettingsHelp(stringResource(R.string.settings_help_trailers), stringResource(R.string.settings_help_trailers_desc))
-            7 -> TvSettingsHelp(stringResource(R.string.volume_boost), stringResource(R.string.settings_help_volume_boost_desc))
-            else -> TvSettingsHelp(stringResource(R.string.playback), stringResource(R.string.settings_help_playback_desc))
+            0 -> TvSettingsHelp("Next episode autoplay", "Controls whether episodes continue automatically.")
+            1 -> TvSettingsHelp("Source autoplay", "Controls whether a single source starts immediately or opens the picker.")
+            in 3..4 -> TvSettingsHelp("Trailers", "Tune trailer autoplay and sound behavior on hero banners.")
+            7 -> TvSettingsHelp("Volume boost", "Boosts playback audio output when enabled.")
+            else -> TvSettingsHelp("Playback", "Tune source quality, frame-rate matching and playback behavior.")
         }
-        "appearance" -> TvSettingsHelp(stringResource(R.string.interface_label), stringResource(R.string.settings_help_interface_desc))
-        "profiles" -> TvSettingsHelp(stringResource(R.string.profiles), stringResource(R.string.settings_help_profiles_desc))
-        "network" -> TvSettingsHelp(stringResource(R.string.network), stringResource(R.string.settings_desc_network))
+        "appearance" -> TvSettingsHelp("Interface", "Control layout, OLED mode, clock and focus styling.")
+        "profiles" -> TvSettingsHelp("Profiles", "Control whether this device opens the profile picker on startup.")
+        "network" -> TvSettingsHelp("Network", "DNS and loading diagnostic preferences.")
         "iptv" -> when (focusedIndex) {
-            0 -> TvSettingsHelp(stringResource(R.string.settings_help_add_playlist), stringResource(R.string.settings_help_add_playlist_desc))
-            1 -> TvSettingsHelp(stringResource(R.string.settings_help_stalker), stringResource(R.string.settings_help_stalker_desc))
-            else -> TvSettingsHelp(stringResource(R.string.settings_help_iptv_playlist), stringResource(R.string.settings_help_iptv_playlist_desc))
+            0 -> TvSettingsHelp("Add playlist", "Add another IPTV playlist with M3U or Xtream details.")
+            else -> TvSettingsHelp("IPTV playlist", "Enable, edit, reorder, refresh or remove IPTV data.")
         }
         "home_server" -> when (focusedIndex) {
-            0 -> TvSettingsHelp(stringResource(R.string.settings_help_add_server), stringResource(R.string.settings_help_add_server_desc))
-            1 -> TvSettingsHelp(stringResource(R.string.settings_connect_with_code), stringResource(R.string.settings_help_connect_code_desc))
-            else -> TvSettingsHelp(stringResource(R.string.settings_help_server_connection), stringResource(R.string.settings_help_server_connection_desc))
+            0 -> TvSettingsHelp("Add server", "Connect a personal media server with URL and credentials.")
+            1 -> TvSettingsHelp("Connect with code", "Use device-code auth for supported personal servers.")
+            else -> TvSettingsHelp("Server connection", "Edit, test or remove connected personal media servers.")
         }
         "catalogs" -> when (focusedIndex) {
-            0 -> TvSettingsHelp(stringResource(R.string.settings_help_discover_catalog), stringResource(R.string.settings_help_discover_catalog_desc))
-            else -> TvSettingsHelp(stringResource(R.string.settings_help_catalog_row), stringResource(R.string.settings_help_catalog_row_desc))
+            0 -> TvSettingsHelp("Discover catalog", "Search public list catalogs or add a direct URL.")
+            else -> TvSettingsHelp("Catalog row", "Rename, reorder, change layout or remove this catalog.")
         }
-        "stremio" -> TvSettingsHelp(stringResource(R.string.settings_help_addon), stringResource(R.string.settings_help_addon_desc))
+        "stremio" -> TvSettingsHelp("Addon", "Enable, disable, add or remove third-party addon sources.")
         "accounts" -> when (focusedIndex) {
-            0 -> TvSettingsHelp(stringResource(R.string.cloud_account), stringResource(R.string.settings_help_cloud_account_desc))
-            1 -> TvSettingsHelp(stringResource(R.string.settings_help_trakt), stringResource(R.string.settings_help_trakt_desc))
-            10 -> TvSettingsHelp("Discord RPC", "Show your watch status on your Discord profile.")
-            11 -> TvSettingsHelp(stringResource(R.string.force_cloud_sync), stringResource(R.string.settings_help_force_sync_desc))
-            12 -> TvSettingsHelp(stringResource(R.string.settings_help_app_updates), stringResource(R.string.settings_help_app_updates_desc))
-            13 -> TvSettingsHelp(stringResource(R.string.settings_diagnostics_sharing), stringResource(R.string.settings_diagnostics_sharing_desc))
-            14 -> TvSettingsHelp(stringResource(R.string.settings_privacy_policy), stringResource(R.string.settings_privacy_policy_desc))
-            else -> TvSettingsHelp(stringResource(R.string.settings_help_account_data), stringResource(R.string.settings_help_account_data_desc))
+            0 -> TvSettingsHelp("Cloud account", "Connect or disconnect ARVIO cloud sync.")
+            1 -> TvSettingsHelp("Trakt", "Connect or disconnect Trakt watch history and lists.")
+            2 -> TvSettingsHelp("Force cloud sync", "Push/pull the latest synced profile data now.")
+            3 -> TvSettingsHelp("App updates", "Check for sideload app updates or install a downloaded update.")
+            else -> TvSettingsHelp("Account data", "Open account and data deletion information.")
         }
-        else -> TvSettingsHelp(stringResource(R.string.settings_help_setting), stringResource(R.string.settings_help_setting_desc))
+        else -> TvSettingsHelp("Setting", "Use OK to change this option.")
     }
 }
 
@@ -5521,13 +4627,11 @@ private fun TvGeneralSettingsRows(
     subtitleColor: String = "White",
     subtitleOffset: String = "Low",
     subtitleStyle: String = "Bold",
-    subtitleFont: String = "System",
     deviceModeOverride: String = "auto",
     skipProfileSelection: Boolean = false,
     oledBlackBackground: Boolean = false,
     clockFormat: String = "24h",
     showBudget: Boolean = true,
-    showEpisodeRatings: Boolean = true,
     smoothScrolling: Boolean = true,
     spoilerBlurEnabled: Boolean = false,
     accentColor: String = "White",
@@ -5548,7 +4652,6 @@ private fun TvGeneralSettingsRows(
     onOledBlackBackgroundToggle: (Boolean) -> Unit = {},
     onClockFormatClick: () -> Unit = {},
     onShowBudgetToggle: (Boolean) -> Unit = {},
-    onShowEpisodeRatingsToggle: (Boolean) -> Unit = {},
     onSmoothScrollingToggle: (Boolean) -> Unit = {},
     onSpoilerBlurToggle: (Boolean) -> Unit = {},
     onAccentColorClick: () -> Unit = {},
@@ -5561,7 +4664,6 @@ private fun TvGeneralSettingsRows(
     onSubtitleColorClick: () -> Unit = {},
     onSubtitleOffsetClick: () -> Unit = {},
     onSubtitleStyleClick: () -> Unit = {},
-    onSubtitleFontClick: () -> Unit = {},
     subtitleStylized: Boolean = true,
     onSubtitleStylizedToggle: () -> Unit = {},
     filterSubtitlesByLanguage: Boolean = true,
@@ -5576,18 +4678,12 @@ private fun TvGeneralSettingsRows(
     onQualityFiltersClick: () -> Unit = {},
     subtitleAiEnabled: Boolean = false,
     subtitleAiAutoSelect: Boolean = false,
-    subtitleAiFindBestMatch: Boolean = false,
-    subtitlePreloadEnabled: Boolean = false,
-    dolbyVisionCompatEnabled: Boolean = true,
     subtitleAiApiKey: String = "",
     subtitleAiModel: com.arflix.tv.ui.screens.player.SubtitleAiModel = com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B,
     subtitleRemoveHearingImpaired: Boolean = true,
     onSubtitleAiEnabledToggle: (Boolean) -> Unit = {},
     onSubtitleAiModelClick: () -> Unit = {},
     onSubtitleAiAutoSelectToggle: (Boolean) -> Unit = {},
-    onSubtitleAiFindBestMatchToggle: (Boolean) -> Unit = {},
-    onSubtitlePreloadToggle: (Boolean) -> Unit = {},
-    onDolbyVisionCompatToggle: (Boolean) -> Unit = {},
     onSubtitleRemoveHearingImpairedToggle: (Boolean) -> Unit = {},
     onSubtitleAiApiKeyClick: () -> Unit = {},
     onSubtitleAiQrClick: () -> Unit = {},
@@ -5638,7 +4734,6 @@ private fun TvGeneralSettingsRows(
                 5 -> SettingsRow(Icons.Default.Subtitles, stringResource(R.string.subtitle_color), stringResource(R.string.subtitle_color_desc), subtitleColor, focusedIndex == localIndex, onSubtitleColorClick, Modifier.settingsFocusSlot(localIndex))
                 6 -> SettingsRow(Icons.Default.Subtitles, stringResource(R.string.subtitle_offset), stringResource(R.string.subtitle_offset_desc), subtitleOffset, focusedIndex == localIndex, onSubtitleOffsetClick, Modifier.settingsFocusSlot(localIndex))
                 7 -> SettingsRow(Icons.Default.Subtitles, stringResource(R.string.subtitle_style), stringResource(R.string.subtitle_style_desc), subtitleStyle, focusedIndex == localIndex, onSubtitleStyleClick, Modifier.settingsFocusSlot(localIndex))
-                42 -> SettingsRow(Icons.Default.Subtitles, stringResource(R.string.subtitle_font), stringResource(R.string.subtitle_font_desc), subtitleFont, focusedIndex == localIndex, onSubtitleFontClick, Modifier.settingsFocusSlot(localIndex))
                 8 -> SettingsToggleRow(stringResource(R.string.subtitle_stylized), stringResource(R.string.subtitle_stylized_desc), subtitleStylized, focusedIndex == localIndex, { onSubtitleStylizedToggle() }, Modifier.settingsFocusSlot(localIndex))
                 9 -> SettingsToggleRow(stringResource(R.string.filter_subtitles), stringResource(R.string.filter_subtitles_desc), filterSubtitlesByLanguage, focusedIndex == localIndex, onFilterSubtitlesByLanguageToggle, Modifier.settingsFocusSlot(localIndex))
                 10 -> SettingsToggleRow(stringResource(R.string.auto_play_next_title), stringResource(R.string.auto_play_desc), autoPlayNext, focusedIndex == localIndex, onAutoPlayToggle, Modifier.settingsFocusSlot(localIndex))
@@ -5667,7 +4762,6 @@ private fun TvGeneralSettingsRows(
                 20 -> SettingsToggleRow(stringResource(R.string.oled_black_background), stringResource(R.string.oled_black_background_desc), oledBlackBackground, focusedIndex == localIndex, onOledBlackBackgroundToggle, Modifier.settingsFocusSlot(localIndex))
                 21 -> SettingsRow(Icons.Default.Schedule, stringResource(R.string.clock_format), stringResource(R.string.clock_format_desc), if (clockFormat == "12h") "12-hour" else "24-hour", focusedIndex == localIndex, onClockFormatClick, Modifier.settingsFocusSlot(localIndex))
                 22 -> SettingsToggleRow(stringResource(R.string.show_budget), stringResource(R.string.show_budget_desc), showBudget, focusedIndex == localIndex, onShowBudgetToggle, Modifier.settingsFocusSlot(localIndex))
-                41 -> SettingsToggleRow(stringResource(R.string.show_episode_ratings), stringResource(R.string.show_episode_ratings_desc), showEpisodeRatings, focusedIndex == localIndex, onShowEpisodeRatingsToggle, Modifier.settingsFocusSlot(localIndex))
                 36 -> SettingsToggleRow(stringResource(R.string.smooth_scrolling), stringResource(R.string.smooth_scrolling_desc), smoothScrolling, focusedIndex == localIndex, onSmoothScrollingToggle, Modifier.settingsFocusSlot(localIndex))
                 23 -> SettingsToggleRow(stringResource(R.string.spoiler_blur), stringResource(R.string.spoiler_blur_desc), spoilerBlurEnabled, focusedIndex == localIndex, onSpoilerBlurToggle, Modifier.settingsFocusSlot(localIndex))
                 24 -> SettingsRow(Icons.Default.Palette, stringResource(R.string.accent_color), stringResource(R.string.accent_color_desc), accentColor, focusedIndex == localIndex, onAccentColorClick, Modifier.settingsFocusSlot(localIndex))
@@ -5677,7 +4771,7 @@ private fun TvGeneralSettingsRows(
                     icon = Icons.Default.VolumeUp,
                     title = stringResource(R.string.volume_boost),
                     subtitle = stringResource(R.string.volume_boost_desc),
-                    value = if (volumeBoostDb == 0) "0 dB" else "+${volumeBoostDb} dB",
+                    value = if (volumeBoostDb == 0) "Off" else "+${volumeBoostDb} dB",
                     isFocused = focusedIndex == localIndex,
                     onClick = onVolumeBoostClick,
                     modifier = Modifier.settingsFocusSlot(localIndex)
@@ -5688,18 +4782,14 @@ private fun TvGeneralSettingsRows(
                     title = stringResource(R.string.ai_model_title),
                     subtitle = stringResource(R.string.ai_model_desc),
                     value = when (subtitleAiModel) {
-                        com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B -> "Groq - GPT-OSS 120B"
-                        com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25 -> "Google - Gemini 3.5 Flash Lite"
+                        com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B -> "Groq - Llama 3.3 70B"
+                        com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25 -> "Google - Gemini 2.5 Flash"
                     },
                     isFocused = focusedIndex == localIndex,
                     onClick = onSubtitleAiModelClick,
                     modifier = Modifier.settingsFocusSlot(localIndex).alpha(if (subtitleAiEnabled) 1f else 0.4f)
                 )
                 30 -> SettingsToggleRow(stringResource(R.string.ai_auto_select_title), stringResource(R.string.ai_auto_select_desc), subtitleAiAutoSelect, focusedIndex == localIndex, onSubtitleAiAutoSelectToggle, Modifier.settingsFocusSlot(localIndex).alpha(if (subtitleAiEnabled) 1f else 0.4f))
-                // AI-independent: the timing-based match scan needs no API key.
-                38 -> SettingsToggleRow(stringResource(R.string.ai_find_best_match_title), stringResource(R.string.ai_find_best_match_desc), subtitleAiFindBestMatch, focusedIndex == localIndex, onSubtitleAiFindBestMatchToggle, Modifier.settingsFocusSlot(localIndex))
-                39 -> SettingsToggleRow(stringResource(R.string.subtitle_preload_title), stringResource(R.string.subtitle_preload_desc), subtitlePreloadEnabled, focusedIndex == localIndex, onSubtitlePreloadToggle, Modifier.settingsFocusSlot(localIndex))
-                40 -> SettingsToggleRow(stringResource(R.string.dv_compat_title), stringResource(R.string.dv_compat_desc), dolbyVisionCompatEnabled, focusedIndex == localIndex, onDolbyVisionCompatToggle, Modifier.settingsFocusSlot(localIndex))
                 31 -> SettingsToggleRow(stringResource(R.string.ai_remove_hi_title), stringResource(R.string.ai_remove_hi_desc), subtitleRemoveHearingImpaired, focusedIndex == localIndex, onSubtitleRemoveHearingImpairedToggle, Modifier.settingsFocusSlot(localIndex).alpha(if (subtitleAiEnabled) 1f else 0.4f))
                 32 -> SettingsRow(Icons.Default.VpnKey, stringResource(R.string.ai_api_key_title), stringResource(R.string.ai_api_key_desc), maskAiApiKey(subtitleAiApiKey, stringResource(R.string.ai_key_not_set)), focusedIndex == localIndex, onSubtitleAiApiKeyClick, Modifier.settingsFocusSlot(localIndex).alpha(if (subtitleAiEnabled) 1f else 0.4f))
                 33 -> SettingsRow(Icons.Default.QrCode, stringResource(R.string.ai_scan_qr_title), stringResource(R.string.ai_scan_qr_desc), "", focusedIndex == localIndex, onSubtitleAiQrClick, Modifier.settingsFocusSlot(localIndex).alpha(if (subtitleAiEnabled) 1f else 0.4f))
@@ -5733,7 +4823,6 @@ private fun GeneralSettings(
     oledBlackBackground: Boolean = false,
     clockFormat: String = "24h",
     showBudget: Boolean = true,
-    showEpisodeRatings: Boolean = true,
     spoilerBlurEnabled: Boolean = false,
     accentColor: String = "White",
     volumeBoostDb: Int = 0,
@@ -5753,7 +4842,6 @@ private fun GeneralSettings(
     onOledBlackBackgroundToggle: (Boolean) -> Unit = {},
     onClockFormatClick: () -> Unit = {},
     onShowBudgetToggle: (Boolean) -> Unit = {},
-    onShowEpisodeRatingsToggle: (Boolean) -> Unit = {},
     onSpoilerBlurToggle: (Boolean) -> Unit = {},
     onAccentColorClick: () -> Unit = {},
     showLoadingStats: Boolean = true,
@@ -5765,7 +4853,6 @@ private fun GeneralSettings(
     onSubtitleColorClick: () -> Unit = {},
     onSubtitleOffsetClick: () -> Unit = {},
     onSubtitleStyleClick: () -> Unit = {},
-    onSubtitleFontClick: () -> Unit = {},
     subtitleStylized: Boolean = true,
     onSubtitleStylizedToggle: () -> Unit = {},
     filterSubtitlesByLanguage: Boolean = true,
@@ -5776,14 +4863,12 @@ private fun GeneralSettings(
     onQualityFiltersClick: () -> Unit = {},
     subtitleAiEnabled: Boolean = false,
     subtitleAiAutoSelect: Boolean = false,
-    subtitleAiFindBestMatch: Boolean = false,
     subtitleAiApiKey: String = "",
     subtitleAiModel: com.arflix.tv.ui.screens.player.SubtitleAiModel = com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B,
     subtitleRemoveHearingImpaired: Boolean = true,
     onSubtitleAiEnabledToggle: (Boolean) -> Unit = {},
     onSubtitleAiModelClick: () -> Unit = {},
     onSubtitleAiAutoSelectToggle: (Boolean) -> Unit = {},
-    onSubtitleAiFindBestMatchToggle: (Boolean) -> Unit = {},
     onSubtitleRemoveHearingImpairedToggle: (Boolean) -> Unit = {},
     onSubtitleAiApiKeyClick: () -> Unit = {},
     onSubtitleAiQrClick: () -> Unit = {},
@@ -6028,7 +5113,7 @@ private fun GeneralSettings(
             icon = Icons.Default.Schedule,
             title = stringResource(R.string.clock_format),
             subtitle = stringResource(R.string.clock_format_desc),
-            value = if (clockFormat == "12h") stringResource(R.string.settings_clock_12h) else stringResource(R.string.settings_clock_24h),
+            value = if (clockFormat == "12h") "12-hour" else "24-hour",
             isFocused = focusedIndex == 21,
             onClick = onClockFormatClick,
             modifier = Modifier.settingsFocusSlot(21)
@@ -6043,15 +5128,6 @@ private fun GeneralSettings(
             isFocused = focusedIndex == 22,
             onToggle = onShowBudgetToggle,
             modifier = Modifier.settingsFocusSlot(22)
-        )
-        Spacer(modifier = Modifier.height(10.dp))
-        SettingsToggleRow(
-            title = stringResource(R.string.show_episode_ratings),
-            subtitle = stringResource(R.string.show_episode_ratings_desc),
-            isEnabled = showEpisodeRatings,
-            isFocused = focusedIndex == 41,
-            onToggle = onShowEpisodeRatingsToggle,
-            modifier = Modifier.settingsFocusSlot(41)
         )
         Spacer(modifier = Modifier.height(10.dp))
         SettingsToggleRow(
@@ -6155,8 +5231,8 @@ private fun GeneralSettings(
             title = stringResource(R.string.ai_model_title),
             subtitle = stringResource(R.string.ai_model_desc),
             value = when (subtitleAiModel) {
-                com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B -> "Groq – GPT-OSS 120B"
-                com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25 -> "Google – Gemini 3.5 Flash Lite"
+                com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B -> "Groq – Llama 3.3 70B"
+                com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25 -> "Google – Gemini 2.5 Flash"
             },
             isFocused = focusedIndex == 29,
             onClick = onSubtitleAiModelClick,
@@ -6237,8 +5313,8 @@ private fun AiModelDialog(
 ) {
     val isMobile = LocalDeviceType.current.isTouchDevice()
     val options = listOf(
-        Triple(com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B, "Groq – GPT-OSS 120B", stringResource(R.string.ai_groq_model_note)),
-        Triple(com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25, "Google – Gemini 3.5 Flash Lite", stringResource(R.string.ai_gemini_model_note))
+        Triple(com.arflix.tv.ui.screens.player.SubtitleAiModel.GROQ_LLAMA_70B, "Groq – Llama 3.3 70B", stringResource(R.string.ai_groq_model_note)),
+        Triple(com.arflix.tv.ui.screens.player.SubtitleAiModel.GEMINI_FLASH_25, "Google – Gemini 2.5 Flash", stringResource(R.string.ai_gemini_model_note))
     )
     BackHandler { onDismiss() }
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
@@ -6270,10 +5346,7 @@ private fun AiModelDialog(
                     Surface(
                         onClick = { onModelSelected(model) },
                         modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                            .focusRequester(focusRequester)
-                            .pointerInput(Unit) {
-                                detectTapGestures(onTap = { onModelSelected(model) })
-                            },
+                            .focusRequester(focusRequester),
                         colors = ClickableSurfaceDefaults.colors(
                             containerColor = if (isSelected) Pink.copy(alpha = 0.15f) else BackgroundElevated,
                             focusedContainerColor = Pink.copy(alpha = 0.25f)
@@ -6362,9 +5435,7 @@ private fun AiApiKeyDialog(
                     val saveFocus = remember { FocusRequester() }
                     Surface(
                         onClick = onDismiss,
-                        modifier = Modifier.weight(1f).focusRequester(cancelFocus).pointerInput(Unit) {
-                            detectTapGestures(onTap = { onDismiss() })
-                        },
+                        modifier = Modifier.weight(1f).focusRequester(cancelFocus),
                         colors = ClickableSurfaceDefaults.colors(
                             containerColor = BackgroundElevated,
                             focusedContainerColor = BackgroundElevated.copy(alpha = 0.8f)
@@ -6385,9 +5456,7 @@ private fun AiApiKeyDialog(
                     }
                     Surface(
                         onClick = { onSave(value) },
-                        modifier = Modifier.weight(1f).focusRequester(saveFocus).pointerInput(Unit) {
-                            detectTapGestures(onTap = { onSave(value) })
-                        },
+                        modifier = Modifier.weight(1f).focusRequester(saveFocus),
                         colors = ClickableSurfaceDefaults.colors(
                             containerColor = Pink.copy(alpha = 0.15f),
                             focusedContainerColor = Pink.copy(alpha = 0.3f)
@@ -6553,7 +5622,7 @@ private fun AiKeyQrOverlay(
                 if (qrBitmap != null) {
                     androidx.compose.foundation.Image(
                         bitmap = qrBitmap.asImageBitmap(),
-                        contentDescription = stringResource(R.string.settings_cd_qr_code),
+                        contentDescription = "QR Code",
                         modifier = Modifier.size(220.dp),
                         contentScale = ContentScale.Fit
                     )
@@ -6565,20 +5634,17 @@ private fun AiKeyQrOverlay(
                 Spacer(modifier = Modifier.height(24.dp))
                 Surface(
                     onClick = onClose,
-                    modifier = Modifier.focusRequester(focusRequester).pointerInput(Unit) {
-                        detectTapGestures(onTap = { onClose() })
-                    },
+                    modifier = Modifier.focusRequester(focusRequester),
                     colors = ClickableSurfaceDefaults.colors(
                         containerColor = BackgroundElevated,
-                        contentColor = TextPrimary,
-                        focusedContainerColor = Pink,
-                        focusedContentColor = contrastingContentColor(Pink)
+                        focusedContainerColor = Pink
                     ),
                     shape = ClickableSurfaceDefaults.shape(RoundedCornerShape(8.dp))
                 ) {
                     Text(
                         text = stringResource(R.string.done),
-                        modifier = Modifier.padding(horizontal = 32.dp, vertical = 12.dp)
+                        modifier = Modifier.padding(horizontal = 32.dp, vertical = 12.dp),
+                        color = TextPrimary
                     )
                 }
             }
@@ -6606,20 +5672,20 @@ private fun HomeServerSettings(
     if (isMobile) {
         // Mobile UI: use MobileSettingsCategory/MobileSettingsRow style
         Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_connections)) {
+            MobileSettingsCategory(title = "CONNECTIONS") {
                 MobileSettingsRow(
                     icon = Icons.Default.Cloud,
-                    title = stringResource(R.string.settings_add_server),
-                    subtitle = stringResource(R.string.settings_add_server_subtitle),
-                    value = if (isWorking) stringResource(R.string.settings_working) else if (hasConnections) stringResource(R.string.settings_add_another) else "",
+                    title = "Add server",
+                    subtitle = "Personal media libraries as sources",
+                    value = if (isWorking) "Working" else if (hasConnections) "Add another" else "",
                     isFocused = false,
                     onClick = onConnect
                 )
                 MobileSettingsRow(
                     icon = Icons.Default.QrCode,
-                    title = stringResource(R.string.settings_connect_with_code),
-                    subtitle = stringResource(R.string.settings_connect_code_subtitle),
-                    value = if (isPlexWorking) stringResource(R.string.settings_waiting) else "",
+                    title = "Connect with code",
+                    subtitle = "Sign in with a server code",
+                    value = if (isPlexWorking) "Waiting" else "",
                     isFocused = false,
                     showDivider = hasConnections,
                     onClick = onConnectPlex
@@ -6629,7 +5695,7 @@ private fun HomeServerSettings(
                     val description = listOfNotNull(
                         homeServerKindLabel(connection.serverKind).takeIf { it.isNotBlank() },
                         connection.userName.takeIf { it.isNotBlank() },
-                        if (libraries > 0) stringResource(R.string.settings_collections_count, libraries) else null
+                        if (libraries > 0) "$libraries collections" else null
                     ).joinToString("  |  ").ifBlank { connection.serverUrl }
                     MobileSettingsRow(
                         icon = Icons.Default.Cloud,
@@ -6642,19 +5708,19 @@ private fun HomeServerSettings(
                     )
                 }
             }
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_actions)) {
+            MobileSettingsCategory(title = "ACTIONS") {
                 MobileSettingsRow(
                     icon = Icons.Default.Settings,
-                    title = stringResource(R.string.settings_test_connection),
-                    subtitle = if (!hasConnections) stringResource(R.string.settings_connect_server_first) else stringResource(R.string.settings_test_reach_servers),
+                    title = "Test connection",
+                    subtitle = if (!hasConnections) "Connect a server first" else "Check that this profile can reach every server",
                     value = "",
                     isFocused = false,
                     onClick = { if (hasConnections) onTest() }
                 )
                 MobileSettingsRow(
                     icon = Icons.Default.Delete,
-                    title = stringResource(R.string.settings_disconnect_all),
-                    subtitle = if (!hasConnections) stringResource(R.string.settings_no_server_connected) else stringResource(R.string.settings_remove_all_servers),
+                    title = "Disconnect all",
+                    subtitle = if (!hasConnections) "No server is connected" else "Remove all servers from the active profile",
                     value = "",
                     isFocused = false,
                     showDivider = false,
@@ -6675,9 +5741,9 @@ private fun HomeServerSettings(
         Column {
             SettingsRow(
                 icon = Icons.Default.Cloud,
-                title = stringResource(R.string.settings_add_server),
-                subtitle = stringResource(R.string.settings_add_server_subtitle),
-                value = if (isWorking) stringResource(R.string.settings_working) else if (hasConnections) stringResource(R.string.settings_add_another) else stringResource(R.string.connect),
+                title = "Add server",
+                subtitle = "Personal media libraries as sources",
+                value = if (isWorking) "Working" else if (hasConnections) "Add another" else "Connect",
                 isFocused = focusedIndex == 0,
                 onClick = onConnect,
                 modifier = Modifier.settingsFocusSlot(0)
@@ -6686,9 +5752,9 @@ private fun HomeServerSettings(
             Spacer(modifier = Modifier.height(16.dp))
 
             SettingsActionRow(
-                title = stringResource(R.string.settings_connect_with_code),
-                description = stringResource(R.string.settings_connect_code_description),
-                actionLabel = if (isPlexWorking) stringResource(R.string.settings_waiting) else stringResource(R.string.settings_code),
+                title = "Connect with code",
+                description = "Sign in with a server code and use media libraries as sources",
+                actionLabel = if (isPlexWorking) "Waiting" else "Code",
                 isFocused = focusedIndex == 1,
                 onClick = onConnectPlex,
                 modifier = Modifier.settingsFocusSlot(1)
@@ -6700,13 +5766,13 @@ private fun HomeServerSettings(
                 val description = listOfNotNull(
                     homeServerKindLabel(connection.serverKind).takeIf { it.isNotBlank() },
                     connection.userName.takeIf { it.isNotBlank() },
-                    if (libraries > 0) stringResource(R.string.settings_collections_count, libraries) else null
+                    if (libraries > 0) "$libraries collections" else null
                 ).joinToString("  |  ").ifBlank { connection.serverUrl }
 
                 SettingsActionRow(
                     title = connection.displayName.ifBlank { connection.serverName }.ifBlank { connection.serverUrl },
                     description = description,
-                    actionLabel = stringResource(R.string.settings_change),
+                    actionLabel = "Change",
                     isFocused = focusedIndex == index + 2,
                     onClick = { onEditConnection(connection) },
                     modifier = Modifier.settingsFocusSlot(index + 2)
@@ -6719,9 +5785,9 @@ private fun HomeServerSettings(
             Spacer(modifier = Modifier.height(16.dp))
 
             SettingsActionRow(
-                title = stringResource(R.string.settings_test_connection),
-                description = if (!hasConnections) stringResource(R.string.settings_connect_server_first) else stringResource(R.string.settings_test_reach_servers),
-                actionLabel = if (isWorking) stringResource(R.string.settings_working) else stringResource(R.string.settings_test),
+                title = "Test connection",
+                description = if (!hasConnections) "Connect a server first" else "Check that this profile can reach every server",
+                actionLabel = if (isWorking) "Working" else "Test",
                 isFocused = focusedIndex == testIndex,
                 onClick = { if (hasConnections) onTest() },
                 modifier = Modifier.settingsFocusSlot(testIndex)
@@ -6730,9 +5796,9 @@ private fun HomeServerSettings(
             Spacer(modifier = Modifier.height(16.dp))
 
             SettingsActionRow(
-                title = stringResource(R.string.settings_disconnect_all),
-                description = if (!hasConnections) stringResource(R.string.settings_no_server_connected) else stringResource(R.string.settings_remove_all_servers),
-                actionLabel = stringResource(R.string.settings_remove),
+                title = "Disconnect all",
+                description = if (!hasConnections) "No server is connected" else "Remove all servers from the active profile",
+                actionLabel = "Remove",
                 isFocused = focusedIndex == disconnectIndex,
                 onClick = { if (hasConnections) onDisconnect() },
                 modifier = Modifier.settingsFocusSlot(disconnectIndex)
@@ -6750,12 +5816,11 @@ private fun HomeServerSettings(
     }
 }
 
-@Composable
 private fun homeServerKindLabel(kind: HomeServerKind): String {
     return when (kind) {
         HomeServerKind.JELLYFIN,
         HomeServerKind.EMBY,
-        HomeServerKind.PLEX -> stringResource(R.string.settings_media_server)
+        HomeServerKind.PLEX -> "Media Server"
         HomeServerKind.UNKNOWN -> ""
     }
 }
@@ -6773,7 +5838,6 @@ private fun IptvSettings(
     progressPercent: Int,
     focusedIndex: Int,
     focusedActionIndex: Int,
-    onFocusedIndexChanged: (Int) -> Unit = {},
     onConfigure: () -> Unit,
     onEditPlaylist: (Int) -> Unit,
     onTogglePlaylist: (Int) -> Unit,
@@ -6782,25 +5846,11 @@ private fun IptvSettings(
     onDeletePlaylist: (Int) -> Unit,
     onRefresh: () -> Unit,
     onDelete: () -> Unit,
-    onManageCategories: (String) -> Unit = {},
-    sortOrder: String = "provider",
-    onSortOrderChange: (String) -> Unit = {},
-    epgVodActionsEnabled: Boolean = true,
-    onEpgVodActionsToggle: (Boolean) -> Unit = {},
-    onConfigureStalker: () -> Unit = {},
-    stalkerSubtitle: String = ""
+    onManageCategories: (String) -> Unit = {}
 ) {
     val isMobile = LocalDeviceType.current.isTouchDevice()
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIndices by remember { mutableStateOf(setOf<Int>()) }
-
-    if (!isMobile) {
-        LaunchedEffect(focusedIndex) {
-            if (focusedIndex >= 0) {
-                onFocusedIndexChanged(focusedIndex)
-            }
-        }
-    }
 
     if (isMobile) {
         Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -6809,7 +5859,7 @@ private fun IptvSettings(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(stringResource(R.string.settings_n_selected, selectedIndices.size), style = ArflixTypography.sectionTitle, color = TextPrimary)
+                    Text("${selectedIndices.size} ${stringResource(R.string.selected)}", style = ArflixTypography.sectionTitle, color = TextPrimary)
                     Spacer(modifier = Modifier.weight(1f))
                     if (selectedIndices.isNotEmpty()) {
                         Box(modifier = Modifier.size(36.dp).clickable { selectedIndices.sortedDescending().forEach { onDeletePlaylist(it) }; selectionMode = false; selectedIndices = emptySet() }.background(Color(0xFFDC2626), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
@@ -6822,9 +5872,8 @@ private fun IptvSettings(
                     }
                 }
             }
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_playlists)) {
-                MobileSettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.add_playlist), subtitle = if (playlists.isEmpty()) stringResource(R.string.settings_add_tv_lists_hint) else stringResource(R.string.settings_create_another_tv), value = if (playlists.size >= 3) stringResource(R.string.settings_badge_full_short) else "", isFocused = false, showDivider = true, onClick = onConfigure)
-                MobileSettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.settings_add_stalker_portal), subtitle = stalkerSubtitle, value = "", isFocused = false, showDivider = playlists.isNotEmpty(), onClick = onConfigureStalker)
+            MobileSettingsCategory(title = "PLAYLISTS") {
+                MobileSettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.add_playlist), subtitle = if (playlists.isEmpty()) "Add up to 3 M3U / Xtream TV lists" else "Create another TV list", value = if (playlists.size >= 3) "Full" else "", isFocused = false, showDivider = playlists.isNotEmpty(), onClick = onConfigure)
                 playlists.forEachIndexed { index, playlist ->
                     val isSelected = selectedIndices.contains(index)
                     val epgSourceCount = playlist.settingsEpgInput().lineSequence().count { it.isNotBlank() }
@@ -6848,17 +5897,17 @@ private fun IptvSettings(
                             }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(playlist.name, style = ArflixTypography.cardTitle.copy(fontSize = 16.sp), color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(buildString { append(playlist.m3uUrl.take(56)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(buildString { append(maskedIptvSourceLabel(playlist)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             if (selectionMode && selectedIndices.size == 1 && isSelected) {
-                                Icon(imageVector = Icons.Default.DragHandle, contentDescription = stringResource(R.string.settings_cd_drag_reorder), tint = TextSecondary, modifier = Modifier.size(24.dp).pointerInput(index) {
+                                Icon(imageVector = Icons.Default.DragHandle, contentDescription = "Drag to reorder", tint = TextSecondary, modifier = Modifier.size(24.dp).pointerInput(index) {
                                     var dragOffset = 0f; val itemHeight = 64.dp.toPx()
                                     detectVerticalDragGestures(onDragEnd = { dragOffset = 0f }, onDragCancel = { dragOffset = 0f }) { change, dragAmount -> change.consume(); dragOffset += dragAmount; if (dragOffset > itemHeight) { onMovePlaylistDown(index); dragOffset -= itemHeight } else if (dragOffset < -itemHeight) { onMovePlaylistUp(index); dragOffset += itemHeight } }
                                 })
                             } else if (!selectionMode) {
                                 Icon(
                                     imageVector = Icons.Default.List,
-                                    contentDescription = stringResource(R.string.settings_cd_manage_categories),
+                                    contentDescription = "Manage Categories",
                                     tint = TextSecondary,
                                     modifier = Modifier
                                         .size(36.dp)
@@ -6878,44 +5927,13 @@ private fun IptvSettings(
                     }
                 }
             }
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_options)) {
-                val sortDisplayValue = when (sortOrder) {
-                    "number" -> stringResource(R.string.settings_iptv_order_number)
-                    "name" -> stringResource(R.string.settings_iptv_order_name)
-                    else -> stringResource(R.string.settings_iptv_order_provider)
-                }
-                MobileSettingsRow(
-                    icon = Icons.Default.List,
-                    title = stringResource(R.string.settings_iptv_channel_order),
-                    subtitle = stringResource(R.string.settings_iptv_channel_order_description),
-                    value = sortDisplayValue,
-                    isFocused = false,
-                    onClick = {
-                        val next = when (sortOrder) {
-                            "provider" -> "number"
-                            "number" -> "name"
-                            else -> "provider"
-                        }
-                        onSortOrderChange(next)
-                    }
-                )
-                MobileSettingsRow(
-                    icon = Icons.Default.LiveTv,
-                    title = stringResource(R.string.settings_epg_vod_actions),
-                    subtitle = stringResource(R.string.settings_epg_vod_actions_desc),
-                    value = stringResource(if (epgVodActionsEnabled) R.string.on else R.string.off),
-                    isFocused = false,
-                    showDivider = false,
-                    onClick = { onEpgVodActionsToggle(!epgVodActionsEnabled) },
-                )
-            }
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_actions)) {
-                val refreshSubtitle = when { isLoading -> stringResource(R.string.settings_refreshing_channels_epg); error != null -> error; playlists.none { it.epgUrl.isNotBlank() || it.epgUrls.orEmpty().isNotEmpty() } -> stringResource(R.string.settings_reload_playlists_now); else -> stringResource(R.string.settings_reload_playlist_epg_now) }
-                MobileSettingsRow(icon = Icons.Default.Link, title = stringResource(R.string.refresh_iptv), subtitle = refreshSubtitle, value = if (isLoading) stringResource(R.string.loading_label) else "", isFocused = false, onClick = onRefresh)
-                MobileSettingsRow(icon = Icons.Default.Delete, title = stringResource(R.string.delete_iptv), subtitle = if (playlists.isEmpty()) stringResource(R.string.settings_no_playlists_configured) else stringResource(R.string.settings_remove_playlists_epg), value = "", isFocused = false, showDivider = false, onClick = onDelete)
+            MobileSettingsCategory(title = "ACTIONS") {
+                val refreshSubtitle = when { isLoading -> "Refreshing channels and EPG..."; error != null -> error; playlists.none { it.epgUrl.isNotBlank() || it.epgUrls.orEmpty().isNotEmpty() } -> "Reload playlists now"; else -> "Reload playlist and EPG now" }
+                MobileSettingsRow(icon = Icons.Default.Link, title = stringResource(R.string.refresh_iptv), subtitle = refreshSubtitle, value = if (isLoading) "Loading" else "", isFocused = false, onClick = onRefresh)
+                MobileSettingsRow(icon = Icons.Default.Delete, title = stringResource(R.string.delete_iptv), subtitle = if (playlists.isEmpty()) "No playlists configured" else "Remove playlists, EPG and favorites", value = "", isFocused = false, showDivider = false, onClick = onDelete)
             }
             if (isLoading && !progressText.isNullOrBlank()) {
-                Text(stringResource(R.string.settings_progress_format, progressText, progressPercent.coerceIn(0, 100)), style = ArflixTypography.caption, color = TextSecondary)
+                Text("$progressText (${progressPercent.coerceIn(0, 100)}%)", style = ArflixTypography.caption, color = TextSecondary)
                 Box(modifier = Modifier.fillMaxWidth().height(8.dp).background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(999.dp))) {
                     Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(progressPercent.coerceIn(0, 100) / 100f).background(Pink, RoundedCornerShape(999.dp)))
                 }
@@ -6924,19 +5942,17 @@ private fun IptvSettings(
     } else {
         // TV UI
         Column {
-            SettingsRow(icon = Icons.Default.LiveTv, title = stringResource(R.string.add_playlist), subtitle = if (playlists.isEmpty()) stringResource(R.string.settings_add_iptv_lists_hint) else stringResource(R.string.settings_create_another_iptv), value = if (playlists.size >= 3) stringResource(R.string.settings_badge_full) else stringResource(R.string.settings_badge_add), isFocused = focusedIndex == 0, onClick = onConfigure, modifier = Modifier.settingsFocusSlot(0))
-            Spacer(modifier = Modifier.height(6.dp))
-            SettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.settings_add_stalker_portal), subtitle = stalkerSubtitle, value = stringResource(R.string.settings_badge_add), isFocused = focusedIndex == 1, onClick = onConfigureStalker, modifier = Modifier.settingsFocusSlot(1))
+            SettingsRow(icon = Icons.Default.LiveTv, title = stringResource(R.string.add_playlist), subtitle = if (playlists.isEmpty()) "Add up to 3 M3U / Xtream IPTV lists with names" else "Create another IPTV list", value = if (playlists.size >= 3) "FULL" else "ADD", isFocused = focusedIndex == 0, onClick = onConfigure, modifier = Modifier.settingsFocusSlot(0))
             Spacer(modifier = Modifier.height(16.dp))
             playlists.forEachIndexed { index, playlist ->
-                val rowIndex = index + 2
+                val rowIndex = index + 1
                 val epgSourceCount = playlist.settingsEpgInput().lineSequence().count { it.isNotBlank() }
                 val focusRingColor = resolveAccentColor(fallback = Pink)
                 Row(modifier = Modifier.settingsFocusSlot(rowIndex).fillMaxWidth().background(if (focusedIndex == rowIndex) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp)).border(width = if (focusedIndex == rowIndex) 2.dp else 0.dp, color = if (focusedIndex == rowIndex) focusRingColor else Color.Transparent, shape = RoundedCornerShape(12.dp)).clickable { onEditPlaylist(index) }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(playlist.name, style = ArflixTypography.cardTitle.copy(fontSize = 16.sp), color = if (focusedIndex == rowIndex) TextPrimary else TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text(buildString { append(playlist.m3uUrl.take(56)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary.copy(alpha = 0.72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(buildString { append(maskedIptvSourceLabel(playlist)); when { epgSourceCount > 1 -> append(" • $epgSourceCount EPGs"); epgSourceCount == 1 -> append(" • EPG") } }, style = ArflixTypography.caption.copy(fontSize = 13.sp), color = TextSecondary.copy(alpha = 0.72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     CatalogActionChip(
                         icon = Icons.Default.List,
@@ -6978,43 +5994,13 @@ private fun IptvSettings(
                 Spacer(modifier = Modifier.height(10.dp))
             }
             Spacer(modifier = Modifier.height(6.dp))
-            SettingsRow(
-                icon = Icons.Default.List,
-                title = stringResource(R.string.settings_iptv_channel_order),
-                subtitle = stringResource(R.string.settings_iptv_channel_order_description),
-                value = when (sortOrder) {
-                    "number" -> stringResource(R.string.settings_iptv_order_number)
-                    "name" -> stringResource(R.string.settings_iptv_order_name)
-                    else -> stringResource(R.string.settings_iptv_order_provider)
-                },
-                isFocused = focusedIndex == playlists.size + 2,
-                onClick = {
-                    val next = when (sortOrder) {
-                        "provider" -> "number"
-                        "number" -> "name"
-                        else -> "provider"
-                    }
-                    onSortOrderChange(next)
-                },
-                modifier = Modifier.settingsFocusSlot(playlists.size + 2)
-            )
+            val refreshSubtitle = when { isLoading -> "Refreshing channels and EPG..."; error != null -> error; playlists.none { it.epgUrl.isNotBlank() || it.epgUrls.orEmpty().isNotEmpty() } -> "Reload playlists now"; else -> "Reload playlist and EPG now" }
+            SettingsRow(icon = Icons.Default.Link, title = stringResource(R.string.refresh_iptv), subtitle = refreshSubtitle, value = if (isLoading) "LOADING" else "REFRESH", isFocused = focusedIndex == playlists.size + 1, onClick = onRefresh, modifier = Modifier.settingsFocusSlot(playlists.size + 1))
             Spacer(modifier = Modifier.height(16.dp))
-            SettingsToggleRow(
-                title = stringResource(R.string.settings_epg_vod_actions),
-                subtitle = stringResource(R.string.settings_epg_vod_actions_desc),
-                isEnabled = epgVodActionsEnabled,
-                isFocused = focusedIndex == playlists.size + 3,
-                onToggle = onEpgVodActionsToggle,
-                modifier = Modifier.settingsFocusSlot(playlists.size + 3),
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            val refreshSubtitle = when { isLoading -> stringResource(R.string.settings_refreshing_channels_epg); error != null -> error; playlists.none { it.epgUrl.isNotBlank() || it.epgUrls.orEmpty().isNotEmpty() } -> stringResource(R.string.settings_reload_playlists_now); else -> stringResource(R.string.settings_reload_playlist_epg_now) }
-            SettingsRow(icon = Icons.Default.Link, title = stringResource(R.string.refresh_iptv), subtitle = refreshSubtitle, value = if (isLoading) stringResource(R.string.settings_badge_loading) else stringResource(R.string.settings_badge_refresh), isFocused = focusedIndex == playlists.size + 4, onClick = onRefresh, modifier = Modifier.settingsFocusSlot(playlists.size + 4))
-            Spacer(modifier = Modifier.height(16.dp))
-            SettingsRow(icon = Icons.Default.Delete, title = stringResource(R.string.delete_iptv), subtitle = if (playlists.isEmpty()) stringResource(R.string.settings_no_playlists_configured) else stringResource(R.string.settings_remove_playlists_epg), value = if (playlists.isEmpty()) stringResource(R.string.settings_badge_empty) else stringResource(R.string.settings_badge_delete), isFocused = focusedIndex == playlists.size + 5, onClick = onDelete, modifier = Modifier.settingsFocusSlot(playlists.size + 5))
+            SettingsRow(icon = Icons.Default.Delete, title = stringResource(R.string.delete_iptv), subtitle = if (playlists.isEmpty()) "No playlists configured" else "Remove playlists, EPG and favorites", value = if (playlists.isEmpty()) "EMPTY" else "DELETE", isFocused = focusedIndex == playlists.size + 2, onClick = onDelete, modifier = Modifier.settingsFocusSlot(playlists.size + 2))
             if (isLoading && !progressText.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(12.dp))
-                Text(stringResource(R.string.settings_progress_format, progressText, progressPercent.coerceIn(0, 100)), style = ArflixTypography.caption, color = TextSecondary)
+                Text("$progressText (${progressPercent.coerceIn(0, 100)}%)", style = ArflixTypography.caption, color = TextSecondary)
                 Spacer(modifier = Modifier.height(6.dp))
                 Box(modifier = Modifier.fillMaxWidth().height(8.dp).background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(999.dp))) { Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(progressPercent.coerceIn(0, 100) / 100f).background(Pink, RoundedCornerShape(999.dp))) }
             }
@@ -7101,38 +6087,38 @@ private fun CatalogDiscoveryModal(
                             .padding(10.dp)
                     ) {
                         CatalogDiscoveryInputButton(
-                            label = stringResource(R.string.settings_search_lists),
+                            label = "Search Lists",
                             value = query,
                             modifier = Modifier.fillMaxWidth(),
-                            placeholder = stringResource(R.string.settings_search_lists),
+                            placeholder = "Search Lists",
                             onClick = { editingInput = CatalogDiscoveryInputTarget.Search }
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             DiscoveryActionButton(
-                                label = if (isSearching) stringResource(R.string.settings_searching) else stringResource(R.string.search),
+                                label = if (isSearching) "Searching" else "Search",
                                 onClick = { submitSearch() },
                                 highlighted = true,
                                 enabled = !isSearching && query.isNotBlank(),
                                 modifier = Modifier.weight(1f)
                             )
                             DiscoveryActionButton(
-                                label = stringResource(R.string.close),
+                                label = "Close",
                                 onClick = onDismiss,
                                 modifier = Modifier.weight(1f)
                             )
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         CatalogDiscoveryInputButton(
-                            label = stringResource(R.string.settings_paste_url),
+                            label = "Paste URL",
                             value = manualUrl,
                             modifier = Modifier.fillMaxWidth(),
-                            placeholder = stringResource(R.string.settings_ph_trakt_mdblist),
+                            placeholder = "Trakt or MDBList URL",
                             onClick = { editingInput = CatalogDiscoveryInputTarget.ManualUrl }
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         DiscoveryActionButton(
-                            label = stringResource(R.string.settings_add_url),
+                            label = "Add URL",
                             onClick = onManualAdd,
                             enabled = manualUrl.isNotBlank(),
                             modifier = Modifier.fillMaxWidth()
@@ -7149,36 +6135,36 @@ private fun CatalogDiscoveryModal(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         CatalogDiscoveryInputButton(
-                            label = stringResource(R.string.settings_search_lists),
+                            label = "Search Lists",
                             value = query,
                             modifier = Modifier.weight(1f),
-                            placeholder = stringResource(R.string.settings_search_lists),
+                            placeholder = "Search Lists",
                             onClick = { editingInput = CatalogDiscoveryInputTarget.Search }
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         DiscoveryActionButton(
-                            label = if (isSearching) stringResource(R.string.settings_searching) else stringResource(R.string.search),
+                            label = if (isSearching) "Searching" else "Search",
                             onClick = { submitSearch() },
                             highlighted = true,
                             enabled = !isSearching && query.isNotBlank()
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         CatalogDiscoveryInputButton(
-                            label = stringResource(R.string.settings_paste_url),
+                            label = "Paste URL",
                             value = manualUrl,
                             modifier = Modifier.weight(1f),
-                            placeholder = stringResource(R.string.settings_ph_trakt_mdblist),
+                            placeholder = "Trakt or MDBList URL",
                             onClick = { editingInput = CatalogDiscoveryInputTarget.ManualUrl }
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         DiscoveryActionButton(
-                            label = stringResource(R.string.settings_add_url),
+                            label = "Add URL",
                             onClick = onManualAdd,
                             enabled = manualUrl.isNotBlank()
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         DiscoveryActionButton(
-                            label = stringResource(R.string.close),
+                            label = "Close",
                             onClick = onDismiss
                         )
                     }
@@ -7190,15 +6176,15 @@ private fun CatalogDiscoveryModal(
                     Column(modifier = Modifier.fillMaxWidth()) {
                         Text(
                             text = when {
-                                isSearching -> stringResource(R.string.settings_searching_both_sources)
-                                results.isNotEmpty() -> stringResource(R.string.settings_lists_found, results.size)
-                                else -> stringResource(R.string.settings_searches_trakt_mdblist)
+                                isSearching -> "Searching both sources"
+                                results.isNotEmpty() -> "${results.size} lists found"
+                                else -> "Searches Trakt and MDBList automatically"
                             },
                             style = ArflixTypography.caption,
                             color = TextSecondary
                         )
                         Text(
-                            text = stringResource(R.string.settings_tap_field_to_edit),
+                            text = "Tap a field to edit",
                             style = ArflixTypography.caption,
                             color = TextSecondary.copy(alpha = 0.75f)
                         )
@@ -7210,16 +6196,16 @@ private fun CatalogDiscoveryModal(
                     ) {
                     Text(
                         text = when {
-                            isSearching -> stringResource(R.string.settings_searching_both_sources)
-                            results.isNotEmpty() -> stringResource(R.string.settings_lists_found, results.size)
-                            else -> stringResource(R.string.settings_searches_trakt_mdblist)
+                            isSearching -> "Searching both sources"
+                            results.isNotEmpty() -> "${results.size} lists found"
+                            else -> "Searches Trakt and MDBList automatically"
                         },
                         style = ArflixTypography.caption,
                         color = TextSecondary
                     )
                     Spacer(modifier = Modifier.weight(1f))
                     Text(
-                        text = stringResource(R.string.settings_press_select_to_edit),
+                        text = "Press Select on a field to edit",
                         style = ArflixTypography.caption,
                         color = TextSecondary.copy(alpha = 0.75f)
                     )
@@ -7245,7 +6231,7 @@ private fun CatalogDiscoveryModal(
                             ) {
                                 LoadingIndicator(size = 30.dp)
                                 Spacer(modifier = Modifier.height(10.dp))
-                                Text(stringResource(R.string.settings_searching_lists), color = TextSecondary, style = ArflixTypography.body)
+                                Text("Searching lists", color = TextSecondary, style = ArflixTypography.body)
                             }
                         }
                         error != null -> {
@@ -7262,13 +6248,13 @@ private fun CatalogDiscoveryModal(
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
                                 Text(
-                                    text = stringResource(R.string.settings_start_with_search),
+                                    text = "Start with a search",
                                     color = TextPrimary,
                                     style = ArflixTypography.bodyLarge
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = stringResource(R.string.settings_search_examples),
+                                    text = "Try top trending anime, best horror, Marvel chronological, or 2025 movies.",
                                     color = TextSecondary,
                                     style = ArflixTypography.body,
                                     textAlign = TextAlign.Center,
@@ -7302,10 +6288,10 @@ private fun CatalogDiscoveryModal(
 
     editingInput?.let { target ->
         CatalogDiscoveryTextInputDialog(
-            title = if (target == CatalogDiscoveryInputTarget.Search) stringResource(R.string.settings_search_lists) else stringResource(R.string.settings_paste_catalog_url),
+            title = if (target == CatalogDiscoveryInputTarget.Search) "Search Lists" else "Paste catalog URL",
             initialValue = if (target == CatalogDiscoveryInputTarget.Search) query else manualUrl,
-            placeholder = if (target == CatalogDiscoveryInputTarget.Search) stringResource(R.string.settings_search_lists) else "https://trakt.tv/users/...",
-            confirmLabel = if (target == CatalogDiscoveryInputTarget.Search) stringResource(R.string.settings_use_search) else stringResource(R.string.settings_use_url),
+            placeholder = if (target == CatalogDiscoveryInputTarget.Search) "Search Lists" else "https://trakt.tv/users/...",
+            confirmLabel = if (target == CatalogDiscoveryInputTarget.Search) "Use Search" else "Use URL",
             onConfirm = { value ->
                 if (target == CatalogDiscoveryInputTarget.Search) {
                     onQueryChange(value)
@@ -7432,7 +6418,7 @@ private fun CatalogDiscoveryTextInputDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
                     DiscoveryActionButton(
-                        label = stringResource(R.string.cancel),
+                        label = "Cancel",
                         onClick = onDismiss,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -7442,7 +6428,7 @@ private fun CatalogDiscoveryTextInputDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    DiscoveryActionButton(label = stringResource(R.string.cancel), onClick = onDismiss)
+                    DiscoveryActionButton(label = "Cancel", onClick = onDismiss)
                     Spacer(modifier = Modifier.width(10.dp))
                     DiscoveryActionButton(
                         label = confirmLabel,
@@ -7468,10 +6454,10 @@ private fun CatalogDiscoveryResultRow(
     var isFocused by remember { mutableStateOf(false) }
     val compactFocusColor = resolveAccentColor(fallback = Color.White)
     val creator = result.creatorName ?: result.creatorHandle
-    val creatorMeta = creator?.let { stringResource(R.string.settings_by, it) }
-    val itemCountMeta = result.itemCount?.let { stringResource(R.string.settings_items_count, it.toString()) }
-    val likesMeta = result.likes?.let { stringResource(R.string.settings_likes_count, it.toString()) } ?: stringResource(R.string.settings_likes_count, "0")
-    val updatedMeta = result.updatedAt?.let { stringResource(R.string.settings_updated_meta, formatCatalogDiscoveryDate(it)) }
+    val creatorMeta = creator?.let { "by $it" }
+    val itemCountMeta = result.itemCount?.let { "$it items" }
+    val likesMeta = result.likes?.let { "$it likes" } ?: "0 likes"
+    val updatedMeta = result.updatedAt?.let { "Updated ${formatCatalogDiscoveryDate(it)}" }
 
     if (compact) {
         Column(
@@ -7759,7 +6745,7 @@ private fun CatalogDiscoveryAddPill(
                 Spacer(modifier = Modifier.width(6.dp))
             }
             Text(
-                text = if (isAdded) stringResource(R.string.settings_added) else stringResource(R.string.add),
+                text = if (isAdded) "Added" else "Add",
                 style = ArflixTypography.button,
                 color = TextPrimary,
                 maxLines = 1,
@@ -7866,14 +6852,13 @@ private fun normalizeCatalogDiscoveryUrl(url: String): String {
     return url.trim().trimEnd('/').lowercase()
 }
 
-@Composable
 private fun sourceLabel(sourceType: CatalogSourceType): String {
     return when (sourceType) {
         CatalogSourceType.TRAKT -> "Trakt"
         CatalogSourceType.MDBLIST -> "MDBList"
-        CatalogSourceType.PREINSTALLED -> stringResource(R.string.settings_source_builtin)
-        CatalogSourceType.ADDON -> stringResource(R.string.settings_source_addon)
-        CatalogSourceType.HOME_SERVER -> stringResource(R.string.settings_home_server)
+        CatalogSourceType.PREINSTALLED -> "Built-in"
+        CatalogSourceType.ADDON -> "Addon"
+        CatalogSourceType.HOME_SERVER -> "Home Server"
     }
 }
 
@@ -7890,12 +6875,10 @@ private fun CatalogsSettings(
     focusedIndex: Int,
     focusedActionIndex: Int,
     onAddCatalog: () -> Unit,
-    onImportCatalogPack: () -> Unit,
     onRenameCatalog: (CatalogConfig) -> Unit,
     onMoveCatalogUp: (CatalogConfig) -> Unit,
     onMoveCatalogDown: (CatalogConfig) -> Unit,
-    onDeleteCatalog: (CatalogConfig) -> Unit,
-    onUnpackCatalog: (CatalogConfig) -> Unit
+    onDeleteCatalog: (CatalogConfig) -> Unit
 ) {
     val isMobile = LocalDeviceType.current.isTouchDevice()
     var selectionMode by remember { mutableStateOf(false) }
@@ -7905,7 +6888,7 @@ private fun CatalogsSettings(
         Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
             if (selectionMode) {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.settings_n_selected, selectedIds.size), style = ArflixTypography.sectionTitle, color = TextPrimary)
+                    Text("${selectedIds.size} ${stringResource(R.string.selected)}", style = ArflixTypography.sectionTitle, color = TextPrimary)
                     Spacer(modifier = Modifier.weight(1f))
                     if (selectedIds.isNotEmpty()) {
                         Box(modifier = Modifier.size(36.dp).clickable { selectedIds.forEach { id -> val cat = catalogs.find { it.id == id }; if (cat != null) onDeleteCatalog(cat) }; selectionMode = false; selectedIds = emptySet() }.background(Color(0xFFDC2626), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
@@ -7918,69 +6901,18 @@ private fun CatalogsSettings(
                     }
                 }
             }
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_add_catalog)) {
-                MobileSettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.add_catalog), subtitle = stringResource(R.string.add_catalog_desc), value = "", isFocused = false, showDivider = true, onClick = onAddCatalog)
-                MobileSettingsRow(icon = Icons.Default.Widgets, title = "Import Catalog Pack", subtitle = "Import a bundle of catalogs from a JSON manifest URL", value = "", isFocused = false, showDivider = false, onClick = onImportCatalogPack)
+            MobileSettingsCategory(title = "ADD CATALOG") {
+                MobileSettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.add_catalog), subtitle = stringResource(R.string.add_catalog_desc), value = "", isFocused = false, showDivider = false, onClick = onAddCatalog)
             }
             if (catalogs.isNotEmpty()) {
-                MobileSettingsCategory(title = stringResource(R.string.settings_section_my_catalogs)) {
+                MobileSettingsCategory(title = "MY CATALOGS") {
                     catalogs.forEachIndexed { index, catalog ->
-                        val title = if (catalog.isPreinstalled) { when (catalog.kind) { CatalogKind.COLLECTION -> stringResource(R.string.settings_title_builtin_collection, catalog.title); CatalogKind.COLLECTION_RAIL -> stringResource(R.string.settings_title_builtin_rail, catalog.title); else -> stringResource(R.string.settings_title_builtin, catalog.title) } } else catalog.title
-                        val currentPackId = catalog.packId
-                        val prevPackId = if (index > 0) catalogs[index - 1].packId else null
-                        val showPackHeader = currentPackId != null && currentPackId != prevPackId && catalog.isBulkDeletablePack
-                        val collectionFallback = stringResource(R.string.settings_collection_fallback)
-                        val addonFallback = stringResource(R.string.settings_source_addon)
-                        val subtitle = run {
-                            val baseSubtitle = when {
-                                catalog.kind == CatalogKind.COLLECTION_RAIL -> {
-                                    val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: collectionFallback
-                                    stringResource(R.string.settings_group_rail, group)
-                                }
-                                catalog.kind == CatalogKind.COLLECTION -> {
-                                    val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: collectionFallback
-                                    stringResource(R.string.settings_group_collection, group)
-                                }
-                                catalog.sourceType == CatalogSourceType.PREINSTALLED -> stringResource(R.string.settings_preinstalled_catalog)
-                                catalog.sourceType == CatalogSourceType.ADDON -> {
-                                    val addonLabel = catalog.addonName?.takeIf { it.isNotBlank() } ?: addonFallback
-                                    stringResource(R.string.settings_from_source, addonLabel)
-                                }
-                                catalog.sourceType == CatalogSourceType.HOME_SERVER -> stringResource(R.string.settings_from_home_server)
-                                else -> catalog.sourceUrl ?: stringResource(R.string.settings_custom_catalog)
-                            }
-                            "Pack: ${catalog.effectivePackName} • $baseSubtitle"
-                        }
+                        val title = if (catalog.isPreinstalled) { when (catalog.kind) { CatalogKind.COLLECTION -> "${catalog.title} (Built-in Collection)"; CatalogKind.COLLECTION_RAIL -> "${catalog.title} (Built-in Rail)"; else -> "${catalog.title} (Built-in)" } } else catalog.title
+                        val subtitle = when { catalog.kind == CatalogKind.COLLECTION_RAIL -> { val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: "Collection"; "$group rail" }; catalog.kind == CatalogKind.COLLECTION -> { val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: "Collection"; "$group collection" }; catalog.sourceType == CatalogSourceType.PREINSTALLED -> "Preinstalled catalog"; else -> when (catalog.sourceType) { CatalogSourceType.ADDON -> { val addonLabel = catalog.addonName?.takeIf { it.isNotBlank() } ?: "Addon"; "From $addonLabel" }; CatalogSourceType.HOME_SERVER -> "From Home Server"; else -> catalog.sourceUrl ?: "Custom catalog" } }
                         val isSelected = selectedIds.contains(catalog.id)
                         val layoutToggleEnabled = catalog.kind != CatalogKind.COLLECTION_RAIL
                         val layoutRowKey = remember(catalog.id, catalog.kind) { catalogueLayoutRowKey(catalog) }
                         Column {
-                            if (showPackHeader) {
-                                if (index > 0) {
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Archive,
-                                        contentDescription = null,
-                                        tint = Pink,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = catalog.effectivePackName.uppercase(),
-                                        style = ArflixTypography.caption.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = androidx.compose.ui.unit.TextUnit.Unspecified),
-                                        color = Pink
-                                    )
-                                }
-                                Box(modifier = Modifier.fillMaxWidth().height(1.dp).padding(horizontal = 16.dp).background(Pink.copy(alpha = 0.2f)))
-                                Spacer(modifier = Modifier.height(4.dp))
-                            }
                             Row(
                                 modifier = Modifier.fillMaxWidth()
                                     .background(if (isSelected) Pink.copy(alpha = 0.15f) else Color.Transparent)
@@ -8005,26 +6937,9 @@ private fun CatalogsSettings(
                                 if (!selectionMode) {
                                     CatalogueRowLayoutToggleButton(rowKey = layoutRowKey, enabled = layoutToggleEnabled)
                                     Spacer(modifier = Modifier.width(8.dp))
-                                    if (catalog.packId != null && catalog.isBulkDeletablePack) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(36.dp)
-                                                .clickable { onUnpackCatalog(catalog) }
-                                                .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(8.dp)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Unarchive,
-                                                contentDescription = "Unpack catalog row",
-                                                tint = Color.White.copy(alpha = 0.7f),
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                    }
                                 }
                                 if (selectionMode && selectedIds.size == 1 && isSelected) {
-                                    Icon(imageVector = Icons.Default.DragHandle, contentDescription = stringResource(R.string.settings_cd_drag_reorder), tint = TextSecondary, modifier = Modifier.size(24.dp).pointerInput(catalog.id) {
+                                    Icon(imageVector = Icons.Default.DragHandle, contentDescription = "Drag to reorder", tint = TextSecondary, modifier = Modifier.size(24.dp).pointerInput(catalog.id) {
                                         var dragOffset = 0f; val itemHeight = 64.dp.toPx()
                                         detectVerticalDragGestures(onDragEnd = { dragOffset = 0f }, onDragCancel = { dragOffset = 0f }) { change, dragAmount -> change.consume(); dragOffset += dragAmount; if (dragOffset > itemHeight) { onMoveCatalogDown(catalog); dragOffset -= itemHeight } else if (dragOffset < -itemHeight) { onMoveCatalogUp(catalog); dragOffset += itemHeight } }
                                     })
@@ -8043,70 +6958,19 @@ private fun CatalogsSettings(
         Column {
             if (selectionMode) {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.settings_n_selected, selectedIds.size), style = ArflixTypography.sectionTitle, color = TextPrimary)
+                    Text("${selectedIds.size} ${stringResource(R.string.selected)}", style = ArflixTypography.sectionTitle, color = TextPrimary)
                     Spacer(modifier = Modifier.weight(1f))
                     if (selectedIds.isNotEmpty()) { Box(modifier = Modifier.size(36.dp).clickable { selectedIds.forEach { id -> val cat = catalogs.find { it.id == id }; if (cat != null) onDeleteCatalog(cat) }; selectionMode = false; selectedIds = emptySet() }.background(Color(0xFFDC2626), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) { Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.delete), tint = Color.White, modifier = Modifier.size(20.dp)) }; Spacer(modifier = Modifier.width(12.dp)) }
                     Box(modifier = Modifier.size(36.dp).clickable { selectionMode = false; selectedIds = emptySet() }.background(Color.White.copy(alpha = 0.15f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) { Icon(Icons.Default.Close, contentDescription = stringResource(R.string.close), tint = Color.White, modifier = Modifier.size(20.dp)) }
                 }
             }
             Text(text = stringResource(R.string.catalogs), style = ArflixTypography.caption, color = TextSecondary.copy(alpha = 0.65f), modifier = Modifier.padding(bottom = 20.dp))
-            SettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.add_catalog), subtitle = stringResource(R.string.add_catalog_desc), value = stringResource(R.string.settings_badge_add), isFocused = focusedIndex == 0, onClick = onAddCatalog, modifier = Modifier.settingsFocusSlot(0))
-            Spacer(modifier = Modifier.height(16.dp))
-            SettingsRow(icon = Icons.Default.Widgets, title = "Import Catalog Pack", subtitle = "Import a bundle of catalogs from a JSON manifest URL", value = "IMPORT", isFocused = focusedIndex == 1, onClick = onImportCatalogPack, modifier = Modifier.settingsFocusSlot(1))
+            SettingsRow(icon = Icons.Default.Add, title = stringResource(R.string.add_catalog), subtitle = stringResource(R.string.add_catalog_desc), value = "ADD", isFocused = focusedIndex == 0, onClick = onAddCatalog, modifier = Modifier.settingsFocusSlot(0))
             Spacer(modifier = Modifier.height(16.dp))
             catalogs.forEachIndexed { index, catalog ->
-                val rowFocusIndex = index + 2; val isRowFocused = focusedIndex == rowFocusIndex
-                val currentPackId = catalog.packId
-                val prevPackId = if (index > 0) catalogs[index - 1].packId else null
-                val showPackHeader = currentPackId != null && currentPackId != prevPackId && catalog.isBulkDeletablePack
-
-                if (showPackHeader) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Archive,
-                            contentDescription = null,
-                            tint = Pink,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = catalog.effectivePackName.uppercase(),
-                            style = ArflixTypography.caption.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, letterSpacing = androidx.compose.ui.unit.TextUnit.Unspecified),
-                            color = Pink
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-
-                val title = if (catalog.isPreinstalled) { when (catalog.kind) { CatalogKind.COLLECTION -> stringResource(R.string.settings_title_builtin_collection, catalog.title); CatalogKind.COLLECTION_RAIL -> stringResource(R.string.settings_title_builtin_rail, catalog.title); else -> stringResource(R.string.settings_title_builtin, catalog.title) } } else catalog.title
-                val collectionFallback = stringResource(R.string.settings_collection_fallback)
-                val addonFallback = stringResource(R.string.settings_source_addon)
-                val subtitle = run {
-                    val baseSubtitle = when {
-                        catalog.kind == CatalogKind.COLLECTION_RAIL -> {
-                            val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: collectionFallback
-                            stringResource(R.string.settings_group_rail, group)
-                        }
-                        catalog.kind == CatalogKind.COLLECTION -> {
-                            val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: collectionFallback
-                            stringResource(R.string.settings_group_collection, group)
-                        }
-                        catalog.sourceType == CatalogSourceType.PREINSTALLED -> stringResource(R.string.settings_preinstalled_catalog)
-                        catalog.sourceType == CatalogSourceType.ADDON -> {
-                            val addonLabel = catalog.addonName?.takeIf { it.isNotBlank() } ?: addonFallback
-                            stringResource(R.string.settings_from_source, addonLabel)
-                        }
-                        catalog.sourceType == CatalogSourceType.HOME_SERVER -> stringResource(R.string.settings_from_home_server)
-                        else -> catalog.sourceUrl ?: stringResource(R.string.settings_custom_catalog)
-                    }
-                    "Pack: ${catalog.effectivePackName} • $baseSubtitle"
-                }
+                val rowFocusIndex = index + 1; val isRowFocused = focusedIndex == rowFocusIndex
+                val title = if (catalog.isPreinstalled) { when (catalog.kind) { CatalogKind.COLLECTION -> "${catalog.title} (Built-in Collection)"; CatalogKind.COLLECTION_RAIL -> "${catalog.title} (Built-in Rail)"; else -> "${catalog.title} (Built-in)" } } else catalog.title
+                val subtitle = when { catalog.kind == CatalogKind.COLLECTION_RAIL -> { val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: "Collection"; "$group rail" }; catalog.kind == CatalogKind.COLLECTION -> { val group = catalog.collectionGroup?.name?.lowercase()?.replaceFirstChar { it.uppercase() } ?: "Collection"; "$group collection" }; catalog.sourceType == CatalogSourceType.PREINSTALLED -> "Preinstalled catalog"; else -> when (catalog.sourceType) { CatalogSourceType.ADDON -> { val addonLabel = catalog.addonName?.takeIf { it.isNotBlank() } ?: "Addon"; "From $addonLabel" }; CatalogSourceType.HOME_SERVER -> "From Home Server"; else -> catalog.sourceUrl ?: "Custom catalog" } }
                 val isSelected = selectedIds.contains(catalog.id)
                 val layoutToggleEnabled = catalog.kind != CatalogKind.COLLECTION_RAIL
                 val layoutRowKey = remember(catalog.id, catalog.kind) { catalogueLayoutRowKey(catalog) }
@@ -8125,9 +6989,7 @@ private fun CatalogsSettings(
                     Spacer(modifier = Modifier.width(6.dp))
                     CatalogueRowLayoutToggleButton(rowKey = layoutRowKey, enabled = layoutToggleEnabled, forceFocused = isRowFocused && focusedActionIndex == 3)
                     Spacer(modifier = Modifier.width(6.dp))
-                    CatalogActionChip(icon = Icons.Default.Unarchive, isFocused = isRowFocused && focusedActionIndex == 4, enabled = catalog.packId != null && catalog.isBulkDeletablePack, onClick = { onUnpackCatalog(catalog) })
-                    Spacer(modifier = Modifier.width(6.dp))
-                    CatalogActionChip(icon = Icons.Default.Delete, isFocused = isRowFocused && focusedActionIndex == 5, isDestructive = true, enabled = true, onClick = { onDeleteCatalog(catalog) })
+                    CatalogActionChip(icon = Icons.Default.Delete, isFocused = isRowFocused && focusedActionIndex == 4, isDestructive = true, enabled = true, onClick = { onDeleteCatalog(catalog) })
                 }
                 Spacer(modifier = Modifier.height(10.dp))
             }
@@ -8211,54 +7073,23 @@ private fun CatalogActionChip(
 @Composable
 private fun StremioAddonsSettings(
     addons: List<com.arflix.tv.data.model.Addon> = emptyList(),
-    isRefreshingAddons: Boolean = false,
     focusedIndex: Int = -1,
     focusedActionIndex: Int = 0,
     onToggleAddon: (String) -> Unit = {},
     onMoveAddonUp: (String) -> Unit = {},
     onMoveAddonDown: (String) -> Unit = {},
     onDeleteAddon: (String) -> Unit = {},
-    onAddCustomAddon: () -> Unit = {},
-    onRefreshAddons: () -> Unit = {}
+    onAddCustomAddon: () -> Unit = {}
 ) {
     val isMobile = LocalDeviceType.current.isTouchDevice()
 
     if (isMobile) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(24.dp)
-        ) {
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_add_addon)) {
-                MobileSettingsRow(
-                    icon = Icons.Default.Refresh,
-                    title = stringResource(R.string.refresh_addons),
-                    subtitle = stringResource(R.string.settings_refresh_addons_desc),
-                    value = if (isRefreshingAddons) {
-                        stringResource(R.string.settings_pulling_latest_addon)
-                    } else {
-                        ""
-                    },
-                    isFocused = false,
-                    onClick = {
-                        if (!isRefreshingAddons) onRefreshAddons()
-                    }
-                )
-                MobileSettingsRow(
-                    icon = Icons.Default.Add,
-                    title = stringResource(R.string.add_addon),
-                    subtitle = stringResource(R.string.settings_install_custom_addon),
-                    value = "",
-                    isFocused = false,
-                    showDivider = false,
-                    onClick = onAddCustomAddon
-                )
-            }
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_my_addons)) {
+        Column(verticalArrangement = Arrangement.spacedBy(24.dp)) {
+            MobileSettingsCategory(title = "MY ADDONS") {
                 if (addons.isEmpty()) {
-                    MobileSettingsRow(icon = Icons.Default.Extension, title = stringResource(R.string.settings_no_addons_installed), value = "", isFocused = false, showDivider = false, onClick = {})
+                    MobileSettingsRow(icon = Icons.Default.Extension, title = "No addons installed", value = "", isFocused = false, showDivider = false, onClick = {})
                 } else {
                     addons.forEachIndexed { index, addon ->
-                        val canDelete = !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
                         val canMoveUp = index > 0
                         val canMoveDown = index < addons.lastIndex
                         Row(
@@ -8286,7 +7117,7 @@ private fun StremioAddonsSettings(
                             ) {
                                 Icon(
                                     Icons.Default.ArrowUpward,
-                                    contentDescription = stringResource(R.string.settings_cd_move_addon_up),
+                                    contentDescription = "Move addon up",
                                     tint = TextSecondary.copy(alpha = if (canMoveUp) 1f else 0.35f),
                                     modifier = Modifier.size(18.dp)
                                 )
@@ -8301,16 +7132,10 @@ private fun StremioAddonsSettings(
                             ) {
                                 Icon(
                                     Icons.Default.ArrowDownward,
-                                    contentDescription = stringResource(R.string.settings_cd_move_addon_down),
+                                    contentDescription = "Move addon down",
                                     tint = TextSecondary.copy(alpha = if (canMoveDown) 1f else 0.35f),
                                     modifier = Modifier.size(18.dp)
                                 )
-                            }
-                            if (canDelete) {
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Box(modifier = Modifier.size(32.dp).clickable { onDeleteAddon(addon.id) }.background(Color.White.copy(alpha = 0.1f), RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.settings_cd_delete_addon), tint = TextSecondary, modifier = Modifier.size(18.dp))
-                                }
                             }
                         }
                         if (index < addons.size - 1) {
@@ -8323,17 +7148,16 @@ private fun StremioAddonsSettings(
     } else {
         // TV UI
         Column {
-            Text(stringResource(R.string.settings_section_stremio_addons), style = ArflixTypography.caption.copy(fontSize = 12.sp, letterSpacing = 1.sp), color = TextSecondary, modifier = Modifier.padding(bottom = 10.dp))
+            Text("STREMIO ADDONS", style = ArflixTypography.caption.copy(fontSize = 12.sp, letterSpacing = 1.sp), color = TextSecondary, modifier = Modifier.padding(bottom = 10.dp))
             if (addons.isEmpty()) {
-                Text(stringResource(R.string.settings_no_addons_installed), style = ArflixTypography.body, color = TextSecondary)
+                Text("No addons installed", style = ArflixTypography.body, color = TextSecondary)
             } else {
                 addons.forEachIndexed { index, addon ->
-                    val canDelete = !(addon.id == "opensubtitles" && addon.type == com.arflix.tv.data.model.AddonType.SUBTITLE)
                     AddonRow(
                         addon = addon,
                         isFocused = focusedIndex == index,
                         focusedAction = if (focusedIndex == index) focusedActionIndex else -1,
-                        canDelete = canDelete,
+                        canDelete = false,
                         onToggle = { onToggleAddon(addon.id) },
                         onMoveUp = { onMoveAddonUp(addon.id) },
                         onMoveDown = { onMoveAddonDown(addon.id) },
@@ -8342,48 +7166,6 @@ private fun StremioAddonsSettings(
                     )
                     if (index < addons.size - 1) { Spacer(modifier = Modifier.height(12.dp)) }
                 }
-            }
-            Spacer(modifier = Modifier.height(24.dp))
-            Row(
-                modifier = Modifier
-                    .settingsFocusSlot(addons.size)
-                    .fillMaxWidth()
-                    .clickable(enabled = !isRefreshingAddons, onClick = onRefreshAddons)
-                    .background(if (focusedIndex == addons.size) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
-                    .border(width = if (focusedIndex == addons.size) 2.dp else 0.dp, color = if (focusedIndex == addons.size) Pink else Color.Transparent, shape = RoundedCornerShape(12.dp))
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Icon(Icons.Default.Refresh, contentDescription = null, tint = Pink, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = stringResource(
-                        if (isRefreshingAddons) {
-                            R.string.settings_pulling_latest_addon
-                        } else {
-                            R.string.refresh_addons
-                        }
-                    ),
-                    style = ArflixTypography.button,
-                    color = Pink
-                )
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Row(
-                modifier = Modifier
-                    .settingsFocusSlot(addons.size + 1)
-                    .fillMaxWidth()
-                    .clickable(onClick = onAddCustomAddon)
-                    .background(if (focusedIndex == addons.size + 1) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.05f), RoundedCornerShape(12.dp))
-                    .border(width = if (focusedIndex == addons.size + 1) 2.dp else 0.dp, color = if (focusedIndex == addons.size + 1) Pink else Color.Transparent, shape = RoundedCornerShape(12.dp))
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Icon(Icons.Default.Widgets, contentDescription = null, tint = Pink, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(stringResource(R.string.add_addon), style = ArflixTypography.button, color = Pink)
             }
         }
     }
@@ -8484,12 +7266,12 @@ private fun AddonRow(
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AddonStatusChip(
-                        text = stringResource(R.string.settings_status_installed),
+                        text = "Installed",
                         background = Color(0xFF2563EB).copy(alpha = 0.18f),
                         textColor = Color(0xFF93C5FD)
                     )
                     AddonStatusChip(
-                        text = if (isEnabled) stringResource(R.string.settings_enabled) else stringResource(R.string.settings_disabled),
+                        text = if (isEnabled) "Enabled" else "Disabled",
                         background = if (isEnabled) SuccessGreen.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.08f),
                         textColor = if (isEnabled) SuccessGreen else TextSecondary
                     )
@@ -8567,26 +7349,8 @@ private fun AccountsSettings(
     traktUrl: String?,
     isTraktAuthStarting: Boolean,
     isTraktPolling: Boolean,
-    isMdbListConnected: Boolean,
-    onConnectMdbList: () -> Unit,
-    onDisconnectMdbList: () -> Unit,
-    isSimklConnected: Boolean = false,
-    simklCode: String? = null,
-    simklUrl: String? = null,
-    isSimklAuthStarting: Boolean = false,
-    isSimklPolling: Boolean = false,
-    onConnectSimkl: () -> Unit = {},
-    onCancelSimkl: () -> Unit = {},
-    onDisconnectSimkl: () -> Unit = {},
-    trackingUiState: SettingsUiState,
-    onTrackingReadMode: (
-        com.arflix.tv.data.repository.sync.TrackingFeature,
-        com.arflix.tv.data.repository.sync.TrackingReadMode
-    ) -> Unit,
-    onTrackingWriteTarget: (com.arflix.tv.data.repository.sync.SyncProvider, Boolean) -> Unit,
     isForceCloudSyncing: Boolean,
     lastCloudSyncStatus: String?,
-    diagnosticsSharingEnabled: Boolean,
     isSelfUpdateSupported: Boolean,
     updateStatus: com.arflix.tv.updater.UpdateStatus,
     focusedIndex: Int,
@@ -8599,8 +7363,6 @@ private fun AccountsSettings(
     onSwitchProfile: () -> Unit,
     onCheckUpdates: () -> Unit,
     onInstallUpdate: () -> Unit,
-    onDiagnosticsSharingToggle: (Boolean) -> Unit,
-    onOpenPrivacy: () -> Unit,
     onOpenDataDeletion: () -> Unit,
     onNavigateToTelegram: () -> Unit = {}
 ) {
@@ -8615,8 +7377,8 @@ private fun AccountsSettings(
         }
 
         AccountRow(
-            name = stringResource(R.string.settings_arvio_cloud),
-            description = cloudEmail ?: stringResource(R.string.settings_cloud_account_desc),
+            name = "ARVIO Cloud",
+            description = cloudEmail ?: "Optional account for syncing profiles, addons, catalogs and IPTV settings",
             isConnected = isCloudAuthenticated,
             isWorking = false,
             authCode = null,
@@ -8635,7 +7397,7 @@ private fun AccountsSettings(
         // Trakt.tv
         AccountRow(
             name = "Trakt.tv",
-            description = stringResource(R.string.settings_trakt_desc),
+            description = "Sync watch history, progress, and watchlist",
             isConnected = isTraktAuthenticated,
             isWorking = isTraktAuthStarting || isTraktPolling,
             authCode = traktCode,
@@ -8649,147 +7411,14 @@ private fun AccountsSettings(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // MDBList (per-profile alternative to Trakt)
-        AccountRow(
-            name = stringResource(R.string.mdblist_account),
-            description = stringResource(R.string.mdblist_key_help),
-            isConnected = isMdbListConnected,
-            isWorking = false,
-            authCode = null,
-            authUrl = null,
-            isFocused = focusedIndex == 2,
-            onConnect = onConnectMdbList,
-            onDisconnect = onDisconnectMdbList,
-            modifier = Modifier.settingsFocusSlot(2),
-            expirationText = null
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Simkl (per-profile alternative to Trakt)
-        AccountRow(
-            name = "Simkl",
-            description = stringResource(R.string.settings_simkl_tagline),
-            isConnected = isSimklConnected,
-            isWorking = isSimklAuthStarting || isSimklPolling,
-            authCode = simklCode,
-            authUrl = simklUrl,
-            isFocused = focusedIndex == 3,
-            onConnect = { if (isSimklPolling) onCancelSimkl() else onConnectSimkl() },
-            onDisconnect = onDisconnectSimkl,
-            modifier = Modifier.settingsFocusSlot(3),
-            expirationText = null
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        SettingsActionRow(
-            title = "Watchlist source",
-            description = "Choose which connected service supplies your watchlist.",
-            actionLabel = trackingModeLabel(trackingUiState.trackingWatchlistReadMode),
-            isFocused = focusedIndex == 4,
-            onClick = {
-                onTrackingReadMode(
-                    com.arflix.tv.data.repository.sync.TrackingFeature.WATCHLIST,
-                    nextTrackingMode(trackingUiState.trackingWatchlistReadMode, trackingUiState)
-                )
-            },
-            modifier = Modifier.settingsFocusSlot(4)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        SettingsActionRow(
-            title = "Continue Watching source",
-            description = "Choose where playback progress and Up Next are loaded from.",
-            actionLabel = trackingModeLabel(trackingUiState.trackingContinueReadMode),
-            isFocused = focusedIndex == 5,
-            onClick = {
-                onTrackingReadMode(
-                    com.arflix.tv.data.repository.sync.TrackingFeature.CONTINUE_WATCHING,
-                    nextTrackingMode(trackingUiState.trackingContinueReadMode, trackingUiState)
-                )
-            },
-            modifier = Modifier.settingsFocusSlot(5)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        SettingsActionRow(
-            title = "Watched history source",
-            description = "Choose which connected service supplies watched badges.",
-            actionLabel = trackingModeLabel(trackingUiState.trackingWatchedReadMode),
-            isFocused = focusedIndex == 6,
-            onClick = {
-                onTrackingReadMode(
-                    com.arflix.tv.data.repository.sync.TrackingFeature.WATCHED,
-                    nextTrackingMode(trackingUiState.trackingWatchedReadMode, trackingUiState)
-                )
-            },
-            modifier = Modifier.settingsFocusSlot(6)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        SettingsToggleRow(
-            title = "Update Trakt while watching",
-            subtitle = if (isTraktAuthenticated) "Send progress and watched changes to Trakt." else "Connect Trakt to enable this.",
-            isEnabled = isTraktAuthenticated && trackingUiState.trackingWriteToTrakt,
-            isFocused = focusedIndex == 7,
-            onToggle = { enabled -> if (isTraktAuthenticated) onTrackingWriteTarget(com.arflix.tv.data.repository.sync.SyncProvider.TRAKT, enabled) },
-            modifier = Modifier.settingsFocusSlot(7)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        SettingsToggleRow(
-            title = "Update Simkl while watching",
-            subtitle = if (isSimklConnected) "Send progress and watched changes to Simkl." else "Connect Simkl to enable this.",
-            isEnabled = isSimklConnected && trackingUiState.trackingWriteToSimkl,
-            isFocused = focusedIndex == 8,
-            onToggle = { enabled -> if (isSimklConnected) onTrackingWriteTarget(com.arflix.tv.data.repository.sync.SyncProvider.SIMKL, enabled) },
-            modifier = Modifier.settingsFocusSlot(8)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
         // Telegram
         SettingsActionRow(
             title = "Telegram",
-            description = stringResource(R.string.settings_telegram_desc),
-            actionLabel = stringResource(R.string.settings_badge_open),
-            isFocused = focusedIndex == 9,
+            description = "Search your channels and groups for video files",
+            actionLabel = "OPEN",
+            isFocused = focusedIndex == 2,
             onClick = onNavigateToTelegram,
-            modifier = Modifier.settingsFocusSlot(9)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Discord RPC
-        val context = LocalContext.current
-        val isDiscordLoggedIn by com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isLoggedInFlow.collectAsStateWithLifecycle(initialValue = false)
-        val discordUsername by com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.usernameFlow.collectAsStateWithLifecycle(initialValue = null)
-        val isDiscordSupported = com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.isSupported
-        AccountRow(
-            name = "Discord Rich Presence",
-            description = when {
-                !isDiscordSupported -> "Not included in this build"
-                isDiscordLoggedIn && !discordUsername.isNullOrBlank() -> "Connected as $discordUsername"
-                else -> ""
-            },
-            isConnected = isDiscordLoggedIn,
-            isWorking = false,
-            isEnabled = isDiscordSupported,
-            authCode = null,
-            authUrl = null,
-            isFocused = focusedIndex == 10,
-            onConnect = {
-                com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.login(context)
-            },
-            onDisconnect = {
-                com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.logout()
-            },
-            modifier = Modifier.settingsFocusSlot(10)
+            modifier = Modifier.settingsFocusSlot(2)
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -8797,18 +7426,18 @@ private fun AccountsSettings(
         SettingsActionRow(
             title = stringResource(R.string.force_cloud_sync),
             description = if (isForceCloudSyncing) {
-                stringResource(R.string.settings_sync_local_cloud_now)
+                "Syncing local and cloud state now"
             } else if (!lastCloudSyncStatus.isNullOrBlank()) {
                 lastCloudSyncStatus
             } else if (isCloudAuthenticated) {
-                stringResource(R.string.settings_upload_restore_now)
+                "Upload local state, then restore from cloud now"
             } else {
-                stringResource(R.string.settings_signin_to_force_sync)
+                "Sign in to ARVIO Cloud to force sync"
             },
-            actionLabel = if (isForceCloudSyncing) stringResource(R.string.settings_badge_syncing) else stringResource(R.string.settings_badge_sync),
-            isFocused = focusedIndex == 11,
+            actionLabel = if (isForceCloudSyncing) "SYNCING" else "SYNC",
+            isFocused = focusedIndex == 3,
             onClick = { if (!isForceCloudSyncing) onForceCloudSync() },
-            modifier = Modifier.settingsFocusSlot(11)
+            modifier = Modifier.settingsFocusSlot(3)
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -8816,103 +7445,38 @@ private fun AccountsSettings(
         SettingsActionRow(
             title = stringResource(R.string.app_update),
             description = when {
-                !isSelfUpdateSupported -> stringResource(R.string.settings_update_managed_play)
-                updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall -> stringResource(R.string.settings_update_ready_install)
-                updateStatus is com.arflix.tv.updater.UpdateStatus.Checking -> stringResource(R.string.settings_update_checking)
-                updateStatus is com.arflix.tv.updater.UpdateStatus.UpdateAvailable -> stringResource(R.string.settings_update_available_format, updateStatus.update.title.ifBlank { updateStatus.update.tag })
-                updateStatus is com.arflix.tv.updater.UpdateStatus.Success -> stringResource(R.string.settings_update_latest)
-                else -> stringResource(R.string.settings_update_check_releases)
+                !isSelfUpdateSupported -> "This install is managed by the Play Store"
+                updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall -> "Latest update downloaded and ready to install"
+                updateStatus is com.arflix.tv.updater.UpdateStatus.Checking -> "Checking GitHub Releases for a newer APK"
+                updateStatus is com.arflix.tv.updater.UpdateStatus.UpdateAvailable -> "Update available: ${updateStatus.update.title.ifBlank { updateStatus.update.tag }}"
+                updateStatus is com.arflix.tv.updater.UpdateStatus.Success -> "You already have the latest ARVIO version"
+                else -> "Check GitHub Releases for the latest ARVIO APK"
             },
             actionLabel = when {
-                !isSelfUpdateSupported -> stringResource(R.string.settings_badge_play)
-                updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall -> stringResource(R.string.settings_badge_install)
-                updateStatus is com.arflix.tv.updater.UpdateStatus.Checking -> stringResource(R.string.settings_badge_checking)
-                updateStatus is com.arflix.tv.updater.UpdateStatus.UpdateAvailable -> stringResource(R.string.settings_badge_update)
-                else -> stringResource(R.string.settings_badge_check)
+                !isSelfUpdateSupported -> "PLAY"
+                updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall -> "INSTALL"
+                updateStatus is com.arflix.tv.updater.UpdateStatus.Checking -> "CHECKING"
+                updateStatus is com.arflix.tv.updater.UpdateStatus.UpdateAvailable -> "UPDATE"
+                else -> "CHECK"
             },
-            isFocused = focusedIndex == 12,
+            isFocused = focusedIndex == 4,
             onClick = {
                 if (updateStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall) onInstallUpdate() else onCheckUpdates()
             },
-            modifier = Modifier.settingsFocusSlot(12)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        SettingsToggleRow(
-            title = stringResource(R.string.settings_diagnostics_sharing),
-            subtitle = stringResource(R.string.settings_diagnostics_sharing_desc),
-            isEnabled = diagnosticsSharingEnabled,
-            isFocused = focusedIndex == 13,
-            onToggle = onDiagnosticsSharingToggle,
-            modifier = Modifier.settingsFocusSlot(13)
+            modifier = Modifier.settingsFocusSlot(4)
         )
 
         Spacer(modifier = Modifier.height(16.dp))
 
         SettingsActionRow(
-            title = stringResource(R.string.settings_privacy_policy),
-            description = stringResource(R.string.settings_privacy_policy_desc),
-            actionLabel = stringResource(R.string.settings_badge_open),
-            isFocused = focusedIndex == 14,
-            onClick = onOpenPrivacy,
-            modifier = Modifier.settingsFocusSlot(14)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        SettingsActionRow(
-            title = stringResource(R.string.settings_account_data_deletion),
-            description = stringResource(R.string.settings_account_data_deletion_desc),
-            actionLabel = stringResource(R.string.settings_badge_open),
-            isFocused = focusedIndex == 15,
+            title = "Privacy and data deletion",
+            description = "Open privacy and ARVIO Cloud account deletion instructions",
+            actionLabel = "OPEN",
+            isFocused = focusedIndex == 5,
             onClick = onOpenDataDeletion,
-            modifier = Modifier.settingsFocusSlot(15)
+            modifier = Modifier.settingsFocusSlot(5)
         )
     }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun MdbListConnectDialog(
-    connecting: Boolean,
-    onConnect: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    var apiKey by remember { mutableStateOf("") }
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.mdblist_connect_title)) },
-        text = {
-            Column {
-                androidx.compose.material3.TextField(
-                    value = apiKey,
-                    onValueChange = { apiKey = it },
-                    singleLine = true,
-                    enabled = !connecting,
-                    label = { Text(stringResource(R.string.mdblist_key_hint)) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = stringResource(R.string.mdblist_key_help),
-                    style = ArflixTypography.caption,
-                    color = TextSecondary
-                )
-            }
-        },
-        confirmButton = {
-            androidx.compose.material3.TextButton(
-                onClick = { if (apiKey.isNotBlank()) onConnect(apiKey) },
-                enabled = !connecting && apiKey.isNotBlank()
-            ) { Text(stringResource(R.string.connect)) }
-        },
-        dismissButton = {
-            androidx.compose.material3.TextButton(onClick = onDismiss) {
-                Text(stringResource(R.string.cancel))
-            }
-        }
-    )
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)
@@ -9052,565 +7616,11 @@ private fun SettingsActionRow(
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
-private fun AccountDisconnectConfirmDialog(
-    title: String,
-    description: String,
-    confirmLabel: String = stringResource(R.string.settings_disconnect),
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    val focusRequester = remember { FocusRequester() }
-    var focusedButton by remember { mutableIntStateOf(0) } // 0 = cancel, 1 = disconnect
-    val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-
-    LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
-
-    // onPreviewKeyEvent on the root Box fires for ANY focused child (Cancel button,
-    // Disconnect button, or the Box itself). This is intentional: it intercepts key
-    // events BEFORE clickable children can handle them, preventing the Cancel button
-    // from firing via its own clickable when the user presses OK/Enter to open the dialog.
-    BackHandler {
-        onDismiss()
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.65f))
-            .focusRequester(focusRequester)
-            .focusable()
-            .onPreviewKeyEvent { event ->
-                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                when (event.key) {
-                    Key.Back, Key.Escape -> { onDismiss(); true }
-                    Key.DirectionLeft  -> { focusedButton = if (isRtl) 1 else 0; true }
-                    Key.DirectionRight -> { focusedButton = if (isRtl) 0 else 1; true }
-                    Key.Enter, Key.DirectionCenter -> {
-                        if (focusedButton == 0) onDismiss() else onConfirm()
-                        true
-                    }
-                    else -> false
-                }
-            }
-            .clickable(onClick = onDismiss),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = 360.dp)
-                .background(BackgroundElevated, RoundedCornerShape(16.dp))
-                .clickable(enabled = false) {}
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = title,
-                style = ArflixTypography.cardTitle.copy(fontSize = 18.sp),
-                color = TextPrimary
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = description,
-                style = ArflixTypography.caption.copy(fontSize = 13.sp),
-                color = TextSecondary,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .background(
-                            if (focusedButton == 0) Color.White.copy(alpha = 0.15f) else Color.White.copy(alpha = 0.06f),
-                            RoundedCornerShape(8.dp)
-                        )
-                        .border(
-                            width = if (focusedButton == 0) 2.dp else 0.dp,
-                            color = if (focusedButton == 0) Color.White.copy(alpha = 0.5f) else Color.Transparent,
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        .clickable { onDismiss() }
-                        .padding(vertical = 13.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = stringResource(R.string.cancel).uppercase(),
-                        style = ArflixTypography.label.copy(fontSize = 12.sp),
-                        color = TextPrimary
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .background(
-                            if (focusedButton == 1) Pink.copy(alpha = 0.3f) else Pink.copy(alpha = 0.12f),
-                            RoundedCornerShape(8.dp)
-                        )
-                        .border(
-                            width = if (focusedButton == 1) 2.dp else 1.dp,
-                            color = if (focusedButton == 1) Pink else Pink.copy(alpha = 0.35f),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        .clickable { onConfirm() }
-                        .padding(vertical = 13.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = confirmLabel.uppercase(),
-                        style = ArflixTypography.label.copy(fontSize = 12.sp),
-                        color = Pink
-                    )
-                }
-            }
-        }
-    }
-}
-
-// ========== Tracking Integrations Mobile Sub-Page ==========
-
-/**
- * Full Tracking Integrations sub-page rendered inside MobileSettingsSubPage.
- * Uses standard MobileSettingsCategory blocks matching the rest of the settings UI.
- */
-@Composable
-private fun TrackingIntegrationsPage(
-    uiState: SettingsUiState,
-    onConnectTrakt: () -> Unit,
-    onDisconnectTrakt: () -> Unit,
-    onConnectMdbList: (String) -> Unit,
-    onDisconnectMdbList: () -> Unit,
-    onConnectSimkl: () -> Unit = {},
-    onDisconnectSimkl: () -> Unit = {},
-    onReadMode: (
-        com.arflix.tv.data.repository.sync.TrackingFeature,
-        com.arflix.tv.data.repository.sync.TrackingReadMode
-    ) -> Unit = { _, _ -> },
-    onWriteTarget: (com.arflix.tv.data.repository.sync.SyncProvider, Boolean) -> Unit = { _, _ -> }
-) {
-    var showMdbListConnect by remember { mutableStateOf(false) }
-    var showMdbListDisconnectConfirm by remember { mutableStateOf(false) }
-    var showTraktDisconnectConfirm by remember { mutableStateOf(false) }
-
-    if (showMdbListConnect) {
-        MdbListConnectDialog(
-            connecting = uiState.mdbListConnecting,
-            onConnect = { key ->
-                showMdbListConnect = false
-                onConnectMdbList(key)
-            },
-            onDismiss = { showMdbListConnect = false }
-        )
-    }
-    if (showMdbListDisconnectConfirm) {
-        AccountDisconnectConfirmDialog(
-            title = stringResource(R.string.mdblist_disconnect_confirm_title),
-            description = stringResource(R.string.mdblist_disconnect_confirm_desc),
-            onConfirm = {
-                showMdbListDisconnectConfirm = false
-                onDisconnectMdbList()
-            },
-            onDismiss = { showMdbListDisconnectConfirm = false }
-        )
-    }
-    if (showTraktDisconnectConfirm) {
-        AccountDisconnectConfirmDialog(
-            title = stringResource(R.string.settings_trakt_disconnect_confirm_title),
-            description = stringResource(R.string.settings_trakt_disconnect_confirm_desc),
-            onConfirm = {
-                showTraktDisconnectConfirm = false
-                onDisconnectTrakt()
-            },
-            onDismiss = { showTraktDisconnectConfirm = false }
-        )
-    }
-
-    val activeProviders = buildList {
-        if (uiState.isTraktAuthenticated) add("Trakt")
-        if (uiState.isMdbListConnected) add("MDBList")
-        if (uiState.isSimklConnected) add("Simkl")
-    }
-    val activeProvider = if (activeProviders.isNotEmpty()) {
-        activeProviders.joinToString(", ")
-    } else {
-        stringResource(R.string.settings_tracking_none)
-    }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(24.dp)
-    ) {
-        // Section 1: SYNC STATS (2x2 grid with BackgroundElevated chips)
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = stringResource(R.string.settings_tracking_section_stats),
-                style = ArflixTypography.caption.copy(fontSize = 12.sp, letterSpacing = 1.sp),
-                color = TextSecondary,
-                modifier = Modifier.padding(start = 16.dp, bottom = 8.dp)
-            )
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    TrackingStatChip(
-                        label = stringResource(R.string.settings_tracking_movies),
-                        value = if (uiState.syncedMovies > 0) uiState.syncedMovies.toString() else "\u2014",
-                        modifier = Modifier.weight(1f)
-                    )
-                    TrackingStatChip(
-                        label = stringResource(R.string.settings_tracking_episodes),
-                        value = if (uiState.syncedEpisodes > 0) uiState.syncedEpisodes.toString() else "\u2014",
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    TrackingStatChip(
-                        label = stringResource(R.string.settings_tracking_provider),
-                        value = activeProvider,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TrackingStatChip(
-                        label = stringResource(R.string.settings_tracking_last_sync),
-                        value = uiState.lastSyncTime ?: "\u2014",
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-
-        // Section 2: SERVICES
-        MobileSettingsCategory(title = stringResource(R.string.settings_tracking_section_services)) {
-            // Trakt
-            TrackingServiceRow(
-                iconRes = R.drawable.ic_trakt,
-                title = "Trakt",
-                tagline = stringResource(R.string.settings_trakt_tagline),
-                isConnected = uiState.isTraktAuthenticated,
-                isWorking = uiState.isTraktPolling || uiState.isTraktAuthStarting,
-                connectedAs = uiState.traktUsername,
-                showDivider = true,
-                onConnect = onConnectTrakt,
-                onDisconnect = { showTraktDisconnectConfirm = true }
-            )
-
-            // MDBList
-            TrackingServiceRow(
-                iconRes = R.drawable.ic_mdblist,
-                title = "MDBList",
-                tagline = stringResource(R.string.settings_mdblist_tagline),
-                isConnected = uiState.isMdbListConnected,
-                isWorking = uiState.mdbListConnecting,
-                connectedAs = uiState.mdbListUsername,
-                showDivider = true,
-                onConnect = { showMdbListConnect = true },
-                onDisconnect = { showMdbListDisconnectConfirm = true }
-            )
-
-            // Simkl
-            TrackingServiceRow(
-                iconRes = R.drawable.ic_simkl,
-                title = "Simkl",
-                tagline = stringResource(R.string.settings_simkl_tagline),
-                isConnected = uiState.isSimklConnected,
-                isWorking = uiState.isSimklAuthStarting || uiState.isSimklPolling,
-                connectedAs = if (uiState.isSimklConnected) (uiState.simklUsername ?: "Connected") else null,
-                comingSoon = false,
-                showDivider = false,
-                onConnect = {
-                    if (uiState.isSimklPolling || uiState.isSimklConnected) {
-                        onDisconnectSimkl()
-                    } else {
-                        onConnectSimkl()
-                    }
-                },
-                onDisconnect = onDisconnectSimkl
-            )
-        }
-
-        if (uiState.isTraktAuthenticated || uiState.isSimklConnected || uiState.isMdbListConnected) {
-            MobileSettingsCategory(title = "DATA ROUTING") {
-                TrackingRoutingRow(
-                    title = "Watchlist source",
-                    value = trackingModeLabel(uiState.trackingWatchlistReadMode),
-                    showDivider = true,
-                    onClick = {
-                        onReadMode(
-                            com.arflix.tv.data.repository.sync.TrackingFeature.WATCHLIST,
-                            nextTrackingMode(uiState.trackingWatchlistReadMode, uiState)
-                        )
-                    }
-                )
-                TrackingRoutingRow(
-                    title = "Continue Watching source",
-                    value = trackingModeLabel(uiState.trackingContinueReadMode),
-                    showDivider = true,
-                    onClick = {
-                        onReadMode(
-                            com.arflix.tv.data.repository.sync.TrackingFeature.CONTINUE_WATCHING,
-                            nextTrackingMode(uiState.trackingContinueReadMode, uiState)
-                        )
-                    }
-                )
-                TrackingRoutingRow(
-                    title = "Watched history source",
-                    value = trackingModeLabel(uiState.trackingWatchedReadMode),
-                    showDivider = uiState.isTraktAuthenticated || uiState.isSimklConnected,
-                    onClick = {
-                        onReadMode(
-                            com.arflix.tv.data.repository.sync.TrackingFeature.WATCHED,
-                            nextTrackingMode(uiState.trackingWatchedReadMode, uiState)
-                        )
-                    }
-                )
-                if (uiState.isTraktAuthenticated) {
-                    TrackingRoutingRow(
-                        title = "Update Trakt while watching",
-                        value = if (uiState.trackingWriteToTrakt) "On" else "Off",
-                        showDivider = uiState.isSimklConnected,
-                        onClick = {
-                            onWriteTarget(
-                                com.arflix.tv.data.repository.sync.SyncProvider.TRAKT,
-                                !uiState.trackingWriteToTrakt
-                            )
-                        }
-                    )
-                }
-                if (uiState.isSimklConnected) {
-                    TrackingRoutingRow(
-                        title = "Update Simkl while watching",
-                        value = if (uiState.trackingWriteToSimkl) "On" else "Off",
-                        showDivider = false,
-                        onClick = {
-                            onWriteTarget(
-                                com.arflix.tv.data.repository.sync.SyncProvider.SIMKL,
-                                !uiState.trackingWriteToSimkl
-                            )
-                        }
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun trackingModeLabel(mode: com.arflix.tv.data.repository.sync.TrackingReadMode): String = when (mode) {
-    com.arflix.tv.data.repository.sync.TrackingReadMode.BOTH -> "Trakt + Simkl"
-    com.arflix.tv.data.repository.sync.TrackingReadMode.TRAKT -> "Trakt"
-    com.arflix.tv.data.repository.sync.TrackingReadMode.SIMKL -> "Simkl"
-    com.arflix.tv.data.repository.sync.TrackingReadMode.MDBLIST -> "MDBList"
-    com.arflix.tv.data.repository.sync.TrackingReadMode.AUTO -> "Automatic"
-}
-
-private fun nextTrackingMode(
-    current: com.arflix.tv.data.repository.sync.TrackingReadMode,
-    state: SettingsUiState
-): com.arflix.tv.data.repository.sync.TrackingReadMode {
-    val choices = buildList {
-        if (state.isTraktAuthenticated && state.isSimklConnected) {
-            add(com.arflix.tv.data.repository.sync.TrackingReadMode.BOTH)
-        }
-        if (state.isTraktAuthenticated) add(com.arflix.tv.data.repository.sync.TrackingReadMode.TRAKT)
-        if (state.isSimklConnected) add(com.arflix.tv.data.repository.sync.TrackingReadMode.SIMKL)
-        if (state.isMdbListConnected) add(com.arflix.tv.data.repository.sync.TrackingReadMode.MDBLIST)
-    }.distinct()
-    if (choices.isEmpty()) return com.arflix.tv.data.repository.sync.TrackingReadMode.AUTO
-    val index = choices.indexOf(current)
-    return choices[(index + 1).mod(choices.size)]
-}
-
-@Composable
-private fun TrackingRoutingRow(
-    title: String,
-    value: String,
-    showDivider: Boolean,
-    onClick: () -> Unit
-) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(horizontal = 16.dp, vertical = 15.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = title,
-                style = ArflixTypography.cardTitle.copy(fontSize = 15.sp),
-                color = TextPrimary,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(modifier = Modifier.width(16.dp))
-            Text(
-                text = value,
-                style = ArflixTypography.caption.copy(fontSize = 13.sp),
-                color = Pink
-            )
-        }
-        if (showDivider) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .padding(horizontal = 16.dp)
-                    .background(Color.White.copy(alpha = 0.05f))
-            )
-        }
-    }
-}
-
-@Composable
-private fun TrackingStatChip(
-    label: String,
-    value: String,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(BackgroundElevated)
-            .padding(horizontal = 16.dp, vertical = 14.dp)
-    ) {
-        Text(
-            text = value,
-            style = ArflixTypography.cardTitle.copy(fontSize = 18.sp),
-            color = TextPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = label,
-            style = ArflixTypography.caption.copy(fontSize = 11.sp),
-            color = TextSecondary
-        )
-    }
-}
-
-@Composable
-private fun TrackingServiceRow(
-    @androidx.annotation.DrawableRes iconRes: Int,
-    title: String,
-    tagline: String,
-    isConnected: Boolean,
-    isWorking: Boolean,
-    connectedAs: String?,
-    comingSoon: Boolean = false,
-    showDivider: Boolean = true,
-    onConnect: () -> Unit,
-    onDisconnect: () -> Unit
-) {
-    val rowAlpha = if (comingSoon) 0.5f else 1f
-
-    Column(modifier = Modifier.alpha(rowAlpha)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .then(
-                    if (!comingSoon && !isWorking) {
-                        Modifier.clickable { if (isConnected) onDisconnect() else onConnect() }
-                    } else Modifier
-                )
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                Icon(
-                    painter = painterResource(id = iconRes),
-                    contentDescription = null,
-                    tint = TextSecondary,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(16.dp))
-                Column {
-                    Text(
-                        text = title,
-                        style = ArflixTypography.cardTitle.copy(fontSize = 16.sp),
-                        color = TextPrimary
-                    )
-                    Text(
-                        text = tagline,
-                        style = ArflixTypography.caption.copy(fontSize = 13.sp),
-                        color = TextSecondary
-                    )
-                    if (isConnected && !connectedAs.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = stringResource(R.string.settings_connected_as, "@$connectedAs"),
-                            style = ArflixTypography.caption.copy(fontSize = 12.sp),
-                            color = TextSecondary
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            // Status pill
-            val (pillText, pillBg, pillText2) = when {
-                comingSoon -> Triple(
-                    stringResource(R.string.settings_coming_soon),
-                    Color.White.copy(alpha = 0.10f),
-                    TextSecondary
-                )
-                isWorking -> Triple(
-                    stringResource(R.string.settings_connecting),
-                    Color.White.copy(alpha = 0.10f),
-                    TextSecondary
-                )
-                isConnected -> Triple(
-                    stringResource(R.string.connected),
-                    Color(0xFF1CE783).copy(alpha = 0.15f),
-                    Color(0xFF1CE783)
-                )
-                else -> Triple(
-                    stringResource(R.string.connect),
-                    Pink.copy(alpha = 0.15f),
-                    Pink
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(pillBg)
-                    .padding(horizontal = 12.dp, vertical = 5.dp)
-            ) {
-                Text(
-                    text = pillText,
-                    style = ArflixTypography.caption.copy(fontSize = 12.sp),
-                    color = pillText2
-                )
-            }
-        }
-
-        if (showDivider) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .padding(horizontal = 16.dp)
-                    .background(Color.White.copy(alpha = 0.05f))
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
 private fun AccountRow(
-
     name: String,
     description: String,
     isConnected: Boolean,
     isWorking: Boolean,
-    isEnabled: Boolean = true,
     authCode: String?,
     authUrl: String?,
     isFocused: Boolean,
@@ -9624,7 +7634,7 @@ private fun AccountRow(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(enabled = isEnabled && !isWorking) {
+            .clickable(enabled = !isWorking) {
                 if (isConnected) onDisconnect() else onConnect()
             }
             .background(
@@ -9684,7 +7694,7 @@ private fun AccountRow(
                     size = 24.dp,
                     strokeWidth = 2.dp
                 )
-            } else if (isEnabled) {
+            } else {
                 Box(
                     modifier = Modifier
                         .background(Pink.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
@@ -9699,13 +7709,6 @@ private fun AccountRow(
                         maxLines = 1
                     )
                 }
-            } else {
-                Text(
-                    text = "UNAVAILABLE",
-                    style = ArflixTypography.label.copy(fontSize = 11.sp, letterSpacing = 0.5.sp),
-                    color = TextSecondary,
-                    maxLines = 1
-                )
             }
         }
 
@@ -9724,7 +7727,7 @@ private fun AccountRow(
             Spacer(modifier = Modifier.height(12.dp))
 
             Text(
-                text = stringResource(R.string.settings_go_to, authUrl),
+                text = "Go to: $authUrl",
                 style = ArflixTypography.caption.copy(fontSize = 13.sp),
                 color = TextSecondary.copy(alpha = 0.9f)
             )
@@ -9773,8 +7776,53 @@ data class InputField(
     val helper: String = "",
     val isSecret: Boolean = false,
     val singleLine: Boolean = true,
+    val options: List<InputOption> = emptyList(),
     val onValueChange: (String) -> Unit
 )
+
+data class InputOption(
+    val label: String,
+    val value: String
+)
+
+private data class XtreamParts(
+    val host: String,
+    val username: String,
+    val password: String
+)
+
+private fun splitXtreamHostCredentials(value: String): XtreamParts? {
+    val parts = value.trim().split(Regex("\\s+"))
+    if (parts.size < 3) return null
+    val host = parts.first().trim()
+    val username = parts[1].trim()
+    val password = parts.drop(2).joinToString(" ").trim()
+    if (!host.startsWith("http", ignoreCase = true) || username.isBlank() || password.isBlank()) return null
+    return XtreamParts(host, username, password)
+}
+
+private fun ArvioPortal.toInputOption(): InputOption {
+    return InputOption(label = name.ifBlank { url }, value = url.trimEnd('/'))
+}
+
+private fun isPanelApiPortalUrl(value: String): Boolean {
+    val normalized = value.trim().lowercase()
+    return normalized.contains("/api/arvio")
+}
+
+private fun maskedIptvSourceLabel(playlist: IptvPlaylistEntry): String {
+    val source = playlist.m3uUrl.trim()
+    if (source.isBlank()) return "Panel playlist"
+    val xtream = splitXtreamHostCredentials(source)
+    if (xtream != null) return playlist.name.ifBlank { "Arvio Portal" }
+    val uri = runCatching { Uri.parse(source) }.getOrNull()
+    if (uri?.getQueryParameter("username")?.isNotBlank() == true ||
+        uri?.getQueryParameter("password")?.isNotBlank() == true
+    ) {
+        return playlist.name.ifBlank { "Arvio Portal" }
+    }
+    return playlist.name.ifBlank { "Arvio Portal" }
+}
 
 private fun IptvPlaylistEntry.settingsEpgInput(): String {
     return (epgUrls.orEmpty().ifEmpty { listOf(epgUrl) })
@@ -9835,9 +7883,6 @@ private fun InputModalLegacy(
             usePlatformDefaultWidth = false
         )
     ) {
-        BackHandler {
-            onDismiss()
-        }
         ModalScrim(onDismiss = onDismiss) {
             Column(
                 modifier = Modifier
@@ -9928,7 +7973,7 @@ private fun InputModalLegacy(
                         singleLine = true,
                         placeholder = {
                             Text(
-                                text = stringResource(R.string.settings_enter_field, field.label.lowercase()),
+                                text = "Enter ${field.label.lowercase()}...",
                                 color = TextSecondary.copy(alpha = 0.5f)
                             )
                         },
@@ -9981,13 +8026,13 @@ private fun InputModalLegacy(
             ) {
                 Icon(
                     imageVector = Icons.Default.ContentPaste,
-                    contentDescription = stringResource(R.string.settings_cd_paste),
+                    contentDescription = "Paste",
                     tint = if (isPasteFocused) Pink else TextSecondary,
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = stringResource(R.string.settings_paste_from_clipboard),
+                    text = "Paste from Clipboard",
                     style = ArflixTypography.button,
                     color = if (isPasteFocused) Pink else TextSecondary
                 )
@@ -10052,7 +8097,7 @@ private fun InputModalLegacy(
             // Hint text
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = stringResource(R.string.settings_hint_enter_dpad),
+                text = "Press Enter to select • Navigate with D-pad",
                 style = ArflixTypography.caption,
                 color = TextSecondary.copy(alpha = 0.5f)
             )
@@ -10072,13 +8117,16 @@ private fun InputModalLegacy(
 private fun InputModal(
     title: String,
     supportingText: String? = null,
+    showPasteButton: Boolean = true,
     fields: List<InputField>,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var focusedIndex by remember(title, fields.size) { mutableIntStateOf(0) }
     var lastFocusedFieldIndex by remember(title, fields.size) { mutableStateOf<Int?>(null) }
-    val totalItems = fields.size + 3 // inputs + paste + cancel + confirm
+    val cancelIndex = fields.size + if (showPasteButton) 1 else 0
+    val confirmIndex = cancelIndex + 1
+    val totalItems = confirmIndex + 1
     val isTouchDevice = LocalDeviceType.current.isTouchDevice()
     val screenHeightDp = LocalConfiguration.current.screenHeightDp.dp
     val maxDialogHeight = (screenHeightDp * 0.88f).coerceAtMost(if (isTouchDevice) 620.dp else 660.dp)
@@ -10129,6 +8177,7 @@ private fun InputModal(
     }
 
     fun showKeyboardFor(index: Int) {
+        if (fields.getOrNull(index)?.options?.isNotEmpty() == true) return
         val edit = editTextRefs.getOrNull(index) ?: return
         val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         edit.post {
@@ -10136,6 +8185,14 @@ private fun InputModal(
             val shown = imm?.showSoftInput(edit, InputMethodManager.SHOW_IMPLICIT) ?: false
             if (!shown) imm?.showSoftInput(edit, InputMethodManager.SHOW_FORCED)
         }
+    }
+
+    fun cycleFieldOption(index: Int) {
+        val field = fields.getOrNull(index) ?: return
+        if (field.options.isEmpty()) return
+        val currentIndex = field.options.indexOfFirst { it.value == field.value }
+        val nextIndex = if (currentIndex >= 0) (currentIndex + 1) % field.options.size else 0
+        field.onValueChange(field.options[nextIndex].value)
     }
 
     LaunchedEffect(title, fields.size) {
@@ -10172,10 +8229,6 @@ private fun InputModal(
             usePlatformDefaultWidth = false
         )
     ) {
-        BackHandler {
-            hideKeyboardAll()
-            onDismiss()
-        }
         ModalScrim(
             onDismiss = {
                 hideKeyboardAll()
@@ -10223,29 +8276,33 @@ private fun InputModal(
                                     true
                                 }
                                 Key.DirectionLeft -> {
-                                    if (focusedIndex == fields.size + 2) focusedIndex = fields.size + 1
+                                    if (focusedIndex == confirmIndex) focusedIndex = cancelIndex
                                     true
                                 }
                                 Key.DirectionRight -> {
-                                    if (focusedIndex == fields.size + 1) focusedIndex = fields.size + 2
+                                    if (focusedIndex == cancelIndex) focusedIndex = confirmIndex
                                     true
                                 }
                                 Key.Enter, Key.DirectionCenter -> {
                                     when {
                                         focusedIndex in 0 until fields.size -> {
-                                            showKeyboardFor(focusedIndex)
+                                            if (fields[focusedIndex].options.isNotEmpty()) {
+                                                cycleFieldOption(focusedIndex)
+                                            } else {
+                                                showKeyboardFor(focusedIndex)
+                                            }
                                             true
                                         }
-                                        focusedIndex == fields.size -> {
+                                        showPasteButton && focusedIndex == fields.size -> {
                                             pasteClipboardIntoTarget()
                                             true
                                         }
-                                        focusedIndex == fields.size + 1 -> {
+                                        focusedIndex == cancelIndex -> {
                                             hideKeyboardAll()
                                             onDismiss()
                                             true
                                         }
-                                        focusedIndex == fields.size + 2 -> {
+                                        focusedIndex == confirmIndex -> {
                                             hideKeyboardAll()
                                             onConfirm()
                                             true
@@ -10266,9 +8323,9 @@ private fun InputModal(
                 )
                 Text(
                     text = if (LocalDeviceType.current.isTouchDevice()) {
-                        stringResource(R.string.settings_modal_hint_touch)
+                        "Tap a field to edit, then tap Confirm"
                     } else {
-                        stringResource(R.string.settings_modal_hint_tv)
+                        "Use D-pad to move, press OK to edit a field"
                     },
                     style = ArflixTypography.caption,
                     color = TextSecondary.copy(alpha = 0.75f),
@@ -10340,6 +8397,10 @@ private fun InputModal(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .clickable(enabled = field.options.isNotEmpty()) {
+                                        focusedIndex = index
+                                        cycleFieldOption(index)
+                                    }
                                     .background(Color.White.copy(alpha = if (isFocused) 0.12f else 0.05f), RoundedCornerShape(10.dp))
                                     .border(
                                         width = if (isFocused) 2.dp else 1.dp,
@@ -10348,7 +8409,32 @@ private fun InputModal(
                                     )
                                     .padding(2.dp)
                             ) {
-                                AndroidView(
+                                if (field.options.isNotEmpty()) {
+                                    val selectedLabel = field.options.firstOrNull { it.value == field.value }?.label
+                                        ?: field.value.ifBlank { field.placeholder.ifBlank { "Select" } }
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = selectedLabel,
+                                            style = ArflixTypography.body,
+                                            color = TextPrimary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Text(
+                                            text = "Change",
+                                            style = ArflixTypography.caption,
+                                            color = if (isFocused) Pink else TextSecondary
+                                        )
+                                    }
+                                } else {
+                                    AndroidView(
                                     factory = { ctx ->
                                         EditText(ctx).apply {
                                             editTextRefs[index] = this
@@ -10454,7 +8540,8 @@ private fun InputModal(
                                             editText.setSelection(field.value.length)
                                         }
                                     }
-                                )
+                                    )
+                                }
                             }
 
                             if (index < fields.size - 1) {
@@ -10465,57 +8552,58 @@ private fun InputModal(
                 }
                 Spacer(modifier = Modifier.height(12.dp))
 
-                val isPasteFocused = focusedIndex == fields.size
-                val fieldFallbackLabel = stringResource(R.string.settings_field_fallback)
-                val pasteTargetLabel = fields.getOrNull(pasteTargetIndex())
-                    ?.label
-                    ?.substringBefore("(")
-                    ?.trim()
-                    ?.ifBlank { fieldFallbackLabel }
-                    ?: fieldFallbackLabel
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(
-                            color = if (isPasteFocused) Color.White else Color.Black.copy(alpha = 0.82f),
-                            shape = RoundedCornerShape(10.dp)
+                if (showPasteButton) {
+                    val isPasteFocused = focusedIndex == fields.size
+                    val pasteTargetLabel = fields.getOrNull(pasteTargetIndex())
+                        ?.label
+                        ?.substringBefore("(")
+                        ?.trim()
+                        ?.ifBlank { "field" }
+                        ?: "field"
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                color = if (isPasteFocused) Color.White else Color.Black.copy(alpha = 0.82f),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isPasteFocused) Color.White else Color.White.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(10.dp)
+                            )
+                            .clickable {
+                                pasteClipboardIntoTarget()
+                            }
+                            .padding(vertical = 11.dp, horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentPaste,
+                            contentDescription = "Paste",
+                            tint = if (isPasteFocused) Color.Black else Color.White,
+                            modifier = Modifier.size(18.dp)
                         )
-                        .border(
-                            width = 1.dp,
-                            color = if (isPasteFocused) Color.White else Color.White.copy(alpha = 0.14f),
-                            shape = RoundedCornerShape(10.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Paste into $pasteTargetLabel",
+                            style = ArflixTypography.button,
+                            color = if (isPasteFocused) Color.Black else Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        .clickable {
-                            pasteClipboardIntoTarget()
-                        }
-                        .padding(vertical = 11.dp, horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ContentPaste,
-                        contentDescription = stringResource(R.string.settings_cd_paste),
-                        tint = if (isPasteFocused) Color.Black else Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = stringResource(R.string.settings_paste_into, pasteTargetLabel),
-                        style = ArflixTypography.button,
-                        color = if (isPasteFocused) Color.Black else Color.White,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                    }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    val isCancelFocused = focusedIndex == fields.size + 1
+                    val isCancelFocused = focusedIndex == cancelIndex
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -10543,7 +8631,7 @@ private fun InputModal(
                         )
                     }
 
-                    val isConfirmFocused = focusedIndex == fields.size + 2
+                    val isConfirmFocused = focusedIndex == confirmIndex
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -10574,7 +8662,7 @@ private fun InputModal(
 
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = if (LocalDeviceType.current.isTouchDevice()) stringResource(R.string.settings_modal_footer_touch) else stringResource(R.string.settings_modal_footer_tv),
+                    text = if (LocalDeviceType.current.isTouchDevice()) "Tap a field to edit, tap Confirm when done" else "OK: edit/select \u2022 Back: close keyboard first",
                     style = ArflixTypography.caption,
                     color = TextSecondary.copy(alpha = 0.56f)
                     )
@@ -10615,9 +8703,6 @@ private fun SubtitlePickerModal(
             usePlatformDefaultWidth = false
         )
     ) {
-        BackHandler {
-            onDismiss()
-        }
         ModalScrim(onDismiss = onDismiss) {
             Column(
                 modifier = Modifier
@@ -10709,7 +8794,7 @@ private fun SubtitlePickerModal(
 
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
-                    text = stringResource(R.string.settings_press_enter_to_select),
+                    text = "Press Enter to select",
                     style = ArflixTypography.caption,
                     color = TextSecondary.copy(alpha = 0.6f),
                     textAlign = TextAlign.Center,
@@ -10742,9 +8827,6 @@ private fun UiModeWarningDialog(
             usePlatformDefaultWidth = false
         )
     ) {
-        BackHandler {
-            onDismiss()
-        }
         ModalScrim(onDismiss = onDismiss) {
             Column(
                 modifier = Modifier
@@ -10781,7 +8863,7 @@ private fun UiModeWarningDialog(
                     }
             ) {
                 Text(
-                    text = stringResource(R.string.settings_change_ui_mode),
+                    text = "Change UI Mode",
                     style = ArflixTypography.sectionTitle,
                     color = TextPrimary
                 )
@@ -10789,14 +8871,14 @@ private fun UiModeWarningDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 val modeString = when (nextMode) {
-                    "tv" -> stringResource(R.string.settings_mode_tv)
-                    "tablet" -> stringResource(R.string.settings_mode_tablet)
-                    "phone" -> stringResource(R.string.settings_mode_phone)
-                    else -> stringResource(R.string.auto)
+                    "tv" -> "TV"
+                    "tablet" -> "Tablet"
+                    "phone" -> "Phone"
+                    else -> "Auto"
                 }
 
                 Text(
-                    text = stringResource(R.string.settings_change_ui_mode_confirm, modeString),
+                    text = "Are you sure you want to change the UI mode to $modeString?",
                     style = ArflixTypography.body,
                     color = TextSecondary
                 )
@@ -10861,62 +8943,57 @@ private fun UiModeWarningDialog(
 }
 
 val TMDB_LANGUAGES = listOf(
-    "af-ZA" to "Afrikaans",
-    "sq-AL" to "Albanian (Shqip)",
-    "ar-SA" to "Arabic",
-    "eu-ES" to "Basque (Euskara)",
-    "bn-BD" to "Bengali",
-    "bg-BG" to "Bulgarian",
-    "ca-ES" to "Catalan",
-    "zh-CN" to "Chinese (Simplified)",
-    "zh-TW" to "Chinese (Traditional)",
-    "hr-HR" to "Croatian (Hrvatski)",
-    "cs-CZ" to "Czech (Cesky)",
-    "da-DK" to "Danish (Dansk)",
-    "nl-NL" to "Dutch (Nederlands)",
     "en-US" to "English",
-    "et-EE" to "Estonian",
-    "tl-PH" to "Filipino/Tagalog",
-    "fi-FI" to "Finnish (Suomi)",
+    "nl-NL" to "Dutch (Nederlands)",
     "fr-FR" to "French (Francais)",
-    "gl-ES" to "Galician (Galego)",
     "de-DE" to "German (Deutsch)",
-    "el-GR" to "Greek",
-    "gu-IN" to "Gujarati",
-    "he-IL" to "Hebrew",
-    "hi-IN" to "Hindi",
-    "hu-HU" to "Hungarian (Magyar)",
-    "id-ID" to "Indonesian",
-    "it-IT" to "Italian (Italiano)",
-    "ja-JP" to "Japanese",
-    "kn-IN" to "Kannada",
-    "ko-KR" to "Korean",
-    "lv-LV" to "Latvian",
-    "lt-LT" to "Lithuanian",
-    "ms-MY" to "Malay",
-    "ml-IN" to "Malayalam",
-    "mr-IN" to "Marathi",
-    "no-NO" to "Norwegian (Norsk)",
-    "fa-IR" to "Persian (Farsi)",
-    "pl-PL" to "Polish (Polski)",
+    "es-ES" to "Spanish (Espanol)",
     "pt-PT" to "Portuguese (Portugues)",
     "pt-BR" to "Portuguese - Brazil",
-    "pa-IN" to "Punjabi",
-    "ro-RO" to "Romanian (Romana)",
+    "it-IT" to "Italian (Italiano)",
     "ru-RU" to "Russian",
+    "ja-JP" to "Japanese",
+    "ko-KR" to "Korean",
+    "zh-CN" to "Chinese (Simplified)",
+    "zh-TW" to "Chinese (Traditional)",
+    "ar-SA" to "Arabic",
+    "hi-IN" to "Hindi",
+    "tr-TR" to "Turkish (Turkce)",
+    "pl-PL" to "Polish (Polski)",
+    "sv-SE" to "Swedish (Svenska)",
+    "da-DK" to "Danish (Dansk)",
+    "no-NO" to "Norwegian (Norsk)",
+    "fi-FI" to "Finnish (Suomi)",
+    "el-GR" to "Greek",
+    "cs-CZ" to "Czech (Cesky)",
+    "hu-HU" to "Hungarian (Magyar)",
+    "ro-RO" to "Romanian (Romana)",
+    "th-TH" to "Thai",
+    "vi-VN" to "Vietnamese",
+    "id-ID" to "Indonesian",
+    "ms-MY" to "Malay",
+    "tl-PH" to "Filipino/Tagalog",
+    "uk-UA" to "Ukrainian",
+    "bg-BG" to "Bulgarian",
+    "hr-HR" to "Croatian (Hrvatski)",
     "sr-RS" to "Serbian (Srpski)",
     "sk-SK" to "Slovak (Slovensky)",
     "sl-SI" to "Slovenian (Slovenscina)",
-    "es-ES" to "Spanish (Espanol)",
-    "sw-KE" to "Swahili",
-    "sv-SE" to "Swedish (Svenska)",
+    "he-IL" to "Hebrew",
+    "fa-IR" to "Persian (Farsi)",
+    "bn-BD" to "Bengali",
     "ta-IN" to "Tamil",
     "te-IN" to "Telugu",
-    "th-TH" to "Thai",
-    "tr-TR" to "Turkish (Turkce)",
-    "uk-UA" to "Ukrainian",
     "ur-PK" to "Urdu",
-    "vi-VN" to "Vietnamese"
+    "ca-ES" to "Catalan",
+    "eu-ES" to "Basque (Euskara)",
+    "gl-ES" to "Galician (Galego)",
+    "lt-LT" to "Lithuanian",
+    "lv-LV" to "Latvian",
+    "et-EE" to "Estonian",
+    "af-ZA" to "Afrikaans",
+    "sw-KE" to "Swahili",
+    "sq-AL" to "Albanian (Shqip)"
 )
 
 @OptIn(ExperimentalTvMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -10952,7 +9029,7 @@ private fun IptvCategoriesSettings(
     Column {
         if (!isMobile) {
             Text(
-                text = stringResource(R.string.settings_iptv_categories),
+                text = "IPTV CATEGORIES",
                 style = ArflixTypography.sectionTitle,
                 color = TextPrimary,
                 modifier = Modifier.padding(bottom = 12.dp)
@@ -10961,9 +9038,9 @@ private fun IptvCategoriesSettings(
 
         SettingsRow(
             icon = Icons.Default.Refresh,
-            title = stringResource(R.string.settings_reset_order),
-            subtitle = stringResource(R.string.settings_reset_order_desc),
-            value = stringResource(R.string.settings_badge_reset),
+            title = "Reset Order",
+            subtitle = "Restore default category order",
+            value = "RESET",
             isFocused = focusedIndex == 0,
             onClick = onReset,
             modifier = Modifier.settingsFocusSlot(0)
@@ -10972,10 +9049,10 @@ private fun IptvCategoriesSettings(
         Spacer(modifier = Modifier.height(16.dp))
 
         if (isMobile) {
-            MobileSettingsCategory(title = stringResource(R.string.settings_section_categories)) {
+            MobileSettingsCategory(title = "CATEGORIES") {
                 if (orderedGroups.isEmpty()) {
                     Text(
-                        text = stringResource(R.string.settings_no_categories_available),
+                        text = "No categories available",
                         style = ArflixTypography.body,
                         color = TextSecondary,
                         modifier = Modifier.padding(16.dp)
@@ -10987,7 +9064,7 @@ private fun IptvCategoriesSettings(
                         MobileSettingsRow(
                             icon = if (isHidden) Icons.Default.VisibilityOff else Icons.Default.Check,
                             title = group,
-                            subtitle = if (isHidden) stringResource(R.string.settings_hidden) else stringResource(R.string.settings_visible),
+                            subtitle = if (isHidden) "Hidden" else "Visible",
                             value = "",
                             onClick = { onToggleHidden(group) },
                             showDivider = index < orderedGroups.lastIndex
@@ -10998,7 +9075,7 @@ private fun IptvCategoriesSettings(
         } else {
             if (orderedGroups.isEmpty()) {
                 Text(
-                    text = stringResource(R.string.settings_no_categories_available),
+                    text = "No categories available",
                     style = ArflixTypography.body,
                     color = TextSecondary,
                     modifier = Modifier.padding(16.dp)
@@ -11044,7 +9121,7 @@ private fun IptvCategoriesSettings(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = if (isHidden) stringResource(R.string.settings_hidden) else stringResource(R.string.settings_visible),
+                                    text = if (isHidden) "Hidden" else "Visible",
                                     style = ArflixTypography.caption,
                                     color = TextSecondary.copy(alpha = 0.7f)
                                 )
@@ -11068,384 +9145,6 @@ private fun IptvCategoriesSettings(
                                 onClick = { onMoveDown(group) }
                             )
                         }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun CatalogPackImportDialog(
-    pendingPack: CatalogPackManifest?,
-    isLoading: Boolean,
-    error: String?,
-    onConfirm: (CatalogPackManifest) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val focusRequester = remember { FocusRequester() }
-    var focusedIndex by remember(pendingPack) { mutableIntStateOf(0) } // 0 = Confirm, 1 = Cancel/Dismiss
-    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
-
-    LaunchedEffect(pendingPack, isLoading, error) {
-        focusRequester.requestFocus()
-    }
-
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(
-            dismissOnBackPress = true,
-            dismissOnClickOutside = true,
-            usePlatformDefaultWidth = false
-        )
-    ) {
-        BackHandler {
-            onDismiss()
-        }
-        ModalScrim(onDismiss = onDismiss) {
-            Column(
-                modifier = Modifier
-                    .then(
-                        if (isTouchDevice) Modifier.fillMaxWidth(0.92f).widthIn(max = 480.dp)
-                        else Modifier.width(480.dp)
-                    )
-                    .background(BackgroundElevated, RoundedCornerShape(16.dp))
-                    .padding(if (isTouchDevice) 20.dp else 28.dp)
-                    .focusRequester(focusRequester)
-                    .focusable()
-                    .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown) {
-                            when (event.key) {
-                                Key.Back, Key.Escape -> {
-                                    onDismiss()
-                                    true
-                                }
-                                Key.DirectionLeft -> {
-                                    if (focusedIndex > 0) focusedIndex--
-                                    true
-                                }
-                                Key.DirectionRight -> {
-                                    if (focusedIndex < 1) focusedIndex++
-                                    true
-                                }
-                                Key.Enter, Key.DirectionCenter -> {
-                                    if (isLoading) {
-                                        // Ignore clicks while loading
-                                    } else if (error != null) {
-                                        onDismiss()
-                                    } else if (pendingPack != null) {
-                                        if (focusedIndex == 0) {
-                                            onConfirm(pendingPack)
-                                        } else {
-                                            onDismiss()
-                                        }
-                                    }
-                                    true
-                                }
-                                else -> false
-                            }
-                        } else false
-                    }
-            ) {
-                if (isLoading) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        LoadingIndicator(size = 40.dp)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Loading catalog pack details...",
-                            style = ArflixTypography.body,
-                            color = TextPrimary
-                        )
-                    }
-                } else if (error != null) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Import Failed",
-                            style = ArflixTypography.sectionTitle,
-                            color = Color(0xFFDC2626)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = error,
-                            style = ArflixTypography.body,
-                            color = TextSecondary
-                        )
-                        Spacer(modifier = Modifier.height(24.dp))
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color.White)
-                                .clickable { onDismiss() }
-                                .padding(vertical = 12.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Close",
-                                style = ArflixTypography.button,
-                                color = Color.Black
-                            )
-                        }
-                    }
-                } else if (pendingPack != null) {
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = "Import Catalog Pack",
-                            style = ArflixTypography.sectionTitle,
-                            color = TextPrimary
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = pendingPack.name ?: "",
-                            style = ArflixTypography.cardTitle.copy(fontSize = 18.sp),
-                            color = resolveAccentColor(fallback = Pink)
-                        )
-                        if (!pendingPack.author.isNullOrBlank()) {
-                            Text(
-                                text = "Author: ${pendingPack.author} • v${pendingPack.version ?: "1.0.0"}",
-                                style = ArflixTypography.caption,
-                                color = TextSecondary.copy(alpha = 0.8f)
-                            )
-                        }
-                        if (!pendingPack.description.isNullOrBlank()) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = pendingPack.description,
-                                style = ArflixTypography.body.copy(fontSize = 14.sp),
-                                color = TextSecondary
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Catalogs included (${pendingPack.catalogs?.size ?: 0}):",
-                            style = ArflixTypography.caption,
-                            color = TextSecondary.copy(alpha = 0.6f)
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        // Display a preview list of catalogs (scrollable if many)
-                        val previewScrollState = rememberScrollState()
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 160.dp)
-                                .verticalScroll(previewScrollState)
-                                .background(Color.Black.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
-                                .padding(8.dp)
-                        ) {
-                            pendingPack.catalogs?.forEach { cat ->
-                                Row(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Widgets,
-                                        contentDescription = null,
-                                        tint = TextSecondary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = cat.name ?: "",
-                                        style = ArflixTypography.body.copy(fontSize = 14.sp),
-                                        color = TextPrimary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(24.dp))
-                        // Action buttons
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            val isConfirmFocused = focusedIndex == 0
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(
-                                        color = if (isConfirmFocused) Color.White else Color.Black.copy(alpha = 0.82f),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (isConfirmFocused) Color.White else Color.White.copy(alpha = 0.14f),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    .clickable { onConfirm(pendingPack) }
-                                    .padding(vertical = 12.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "Install Pack",
-                                    style = ArflixTypography.button,
-                                    color = if (isConfirmFocused) Color.Black else Color.White
-                                )
-                            }
-
-                            val isCancelFocused = focusedIndex == 1
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(
-                                        color = if (isCancelFocused) Color.White else Color.Black.copy(alpha = 0.82f),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (isCancelFocused) Color.White else Color.White.copy(alpha = 0.14f),
-                                        shape = RoundedCornerShape(10.dp)
-                                    )
-                                    .clickable { onDismiss() }
-                                    .padding(vertical = 12.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "Cancel",
-                                    style = ArflixTypography.button,
-                                    color = if (isCancelFocused) Color.Black else Color.White
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun CatalogPackDeleteConfirmDialog(
-    packName: String,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    val focusRequester = remember { FocusRequester() }
-    var focusedIndex by remember { mutableIntStateOf(0) } // 0 = Confirm, 1 = Cancel
-    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
-
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
-    }
-
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = onDismiss,
-        properties = androidx.compose.ui.window.DialogProperties(
-            dismissOnBackPress = true,
-            dismissOnClickOutside = true,
-            usePlatformDefaultWidth = false
-        )
-    ) {
-        BackHandler {
-            onDismiss()
-        }
-        ModalScrim(onDismiss = onDismiss) {
-            Column(
-                modifier = Modifier
-                    .then(
-                        if (isTouchDevice) Modifier.fillMaxWidth(0.92f).widthIn(max = 400.dp)
-                        else Modifier.width(400.dp)
-                    )
-                    .background(BackgroundElevated, RoundedCornerShape(16.dp))
-                    .padding(if (isTouchDevice) 20.dp else 28.dp)
-                    .focusRequester(focusRequester)
-                    .focusable()
-                    .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown) {
-                            when (event.key) {
-                                Key.Back, Key.Escape -> {
-                                    onDismiss()
-                                    true
-                                }
-                                Key.DirectionLeft -> {
-                                    if (focusedIndex > 0) focusedIndex--
-                                    true
-                                }
-                                Key.DirectionRight -> {
-                                    if (focusedIndex < 1) focusedIndex++
-                                    true
-                                }
-                                Key.Enter, Key.DirectionCenter -> {
-                                    if (focusedIndex == 0) onConfirm() else onDismiss()
-                                    true
-                                }
-                                else -> false
-                            }
-                        } else false
-                    }
-            ) {
-                Text(
-                    text = "Delete Catalog Pack",
-                    style = ArflixTypography.sectionTitle,
-                    color = Color(0xFFDC2626)
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = "Do you want to delete the pack \"$packName\"? This will remove all catalogs that were imported with this pack.",
-                    style = ArflixTypography.body,
-                    color = TextSecondary
-                )
-                Spacer(modifier = Modifier.height(24.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    val isConfirmFocused = focusedIndex == 0
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                color = if (isConfirmFocused) Color.White else Color.Black.copy(alpha = 0.82f),
-                                shape = RoundedCornerShape(10.dp)
-                            )
-                            .border(
-                                width = 1.dp,
-                                color = if (isConfirmFocused) Color.White else Color.White.copy(alpha = 0.14f),
-                                shape = RoundedCornerShape(10.dp)
-                            )
-                            .clickable { onConfirm() }
-                            .padding(vertical = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Delete Pack",
-                            style = ArflixTypography.button,
-                            color = if (isConfirmFocused) Color.Black else Color.White
-                        )
-                    }
-
-                    val isCancelFocused = focusedIndex == 1
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                color = if (isCancelFocused) Color.White else Color.Black.copy(alpha = 0.82f),
-                                shape = RoundedCornerShape(10.dp)
-                            )
-                            .border(
-                                width = 1.dp,
-                                color = if (isCancelFocused) Color.White else Color.White.copy(alpha = 0.14f),
-                                shape = RoundedCornerShape(10.dp)
-                            )
-                            .clickable { onDismiss() }
-                            .padding(vertical = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Cancel",
-                            style = ArflixTypography.button,
-                            color = if (isCancelFocused) Color.Black else Color.White
-                        )
                     }
                 }
             }

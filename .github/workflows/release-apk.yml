@@ -1,0 +1,110 @@
+name: Build APK Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_run:
+    workflows: ["Upstream Sync"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-apk-main
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    name: Build and publish APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Read app version
+        id: version
+        shell: bash
+        run: |
+          version_name="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"/\1/p' app/build.gradle.kts | head -n 1)"
+          version_code="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)/\1/p' app/build.gradle.kts | head -n 1)"
+          commit_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=8 HEAD)"
+          if [ -z "$version_name" ] || [ -z "$version_code" ]; then
+            echo "Unable to read versionName/versionCode from app/build.gradle.kts" >&2
+            exit 1
+          fi
+          echo "name=$version_name" >> "$GITHUB_OUTPUT"
+          echo "code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=cockpit-v$version_name-$short_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check release tag
+        id: release
+        shell: bash
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+            echo "$tag already exists; APK will be retained as a workflow artifact only."
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Build release APK
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon
+
+      - name: Verify universal ABI coverage
+        shell: bash
+        run: |
+          apk="app/build/outputs/apk/sideload/release/app-sideload-release.apk"
+          unzip -l "$apk" > "$RUNNER_TEMP/arvio-apk-entries.txt"
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            grep -q "lib/$abi/" "$RUNNER_TEMP/arvio-apk-entries.txt" || {
+              echo "Universal APK is missing ABI: $abi" >&2
+              exit 1
+            }
+          done
+
+      - name: Collect release APK
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/sideload/release/app-sideload-release.apk \
+            "release-artifacts/ARVIO-${{ steps.version.outputs.name }}-${{ steps.version.outputs.short_sha }}-universal.apk"
+          sha256sum release-artifacts/*.apk > release-artifacts/SHA256SUMS.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARVIO-${{ steps.version.outputs.name }}-${{ steps.version.outputs.short_sha }}
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: Create version release
+        if: steps.release.outputs.new == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            release-artifacts/* \
+            --target "${{ steps.version.outputs.sha }}" \
+            --title "ARVIO ${{ steps.version.outputs.name }} Cockpit (${{ steps.version.outputs.short_sha }})" \
+            --generate-notes \
+            --latest

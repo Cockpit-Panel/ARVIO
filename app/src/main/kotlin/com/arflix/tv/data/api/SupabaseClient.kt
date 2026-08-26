@@ -406,3 +406,31 @@ data class SyncStateRecord(
     @SerializedName("last_error") val lastError: String? = null,
     @SerializedName("updated_at") val updatedAt: String? = null
 )
+
+class NoOpSupabaseApi : SupabaseApi {
+    override suspend fun getWatchHistory(auth: String, apiKey: String, userId: String, profileId: String?, source: String?, mediaType: String?, select: String, order: String, limit: Int, offset: Int?): List<WatchHistoryRecord> = emptyList()
+    override suspend fun upsertWatchHistory(auth: String, apiKey: String, prefer: String, item: WatchHistoryRecord) {}
+    override suspend fun getWatchHistoryItem(auth: String, apiKey: String, userId: String, profileId: String?, showTmdbId: String, mediaType: String, source: String?, season: String?, episode: String?, select: String, order: String?, limit: Int?): List<WatchHistoryRecord> = emptyList()
+    override suspend fun deleteWatchHistory(auth: String, apiKey: String, userId: String, profileId: String?, showTmdbId: String?, mediaType: String?, season: String?, episode: String?, source: String?) {}
+    override suspend fun deleteWatchHistoryByIds(auth: String, apiKey: String, idIn: String) {}
+    override suspend fun getProfile(auth: String, apiKey: String, userId: String, select: String): List<UserProfile> = emptyList()
+    override suspend fun updateProfile(auth: String, apiKey: String, userId: String, profile: UserProfileUpdate) {}
+    override suspend fun getWatchlist(auth: String, apiKey: String, userId: String, mediaType: String?, tmdbId: String?, select: String, order: String): List<WatchlistRecord> = emptyList()
+    override suspend fun upsertWatchlist(auth: String, apiKey: String, prefer: String, record: WatchlistRecord) {}
+    override suspend fun deleteWatchlist(auth: String, apiKey: String, userId: String, tmdbId: String, mediaType: String) {}
+    override suspend fun getWatchedMovies(auth: String, apiKey: String, userId: String, profileId: String?, select: String, order: String, offset: Int, limit: Int): List<WatchedMovieRecord> = emptyList()
+    override suspend fun getWatchedEpisodes(auth: String, apiKey: String, userId: String, profileId: String?, select: String, order: String, offset: Int, limit: Int): List<WatchedEpisodeRecord> = emptyList()
+    override suspend fun getWatchedEpisodesForShow(auth: String, apiKey: String, userId: String, profileId: String?, tmdbId: String, select: String): List<WatchedEpisodeRecord> = emptyList()
+    override suspend fun markMovieWatched(auth: String, apiKey: String, prefer: String, record: WatchedMovieRecord) {}
+    override suspend fun markEpisodeWatched(auth: String, apiKey: String, prefer: String, record: WatchedEpisodeRecord) {}
+    override suspend fun markEpisodeWatchedRpc(auth: String, apiKey: String, cacheControl: String, params: MarkEpisodeWatchedParams) {}
+    override suspend fun deleteWatchedMovie(auth: String, apiKey: String, userId: String, profileId: String?, tmdbId: String) {}
+    override suspend fun deleteWatchedEpisode(auth: String, apiKey: String, userId: String, profileId: String?, tmdbId: String, season: String, episode: String) {}
+    override suspend fun getEpisodeProgress(auth: String, apiKey: String, userId: String, select: String, order: String): List<EpisodeProgressRecord> = emptyList()
+    override suspend fun upsertEpisodeProgress(auth: String, apiKey: String, prefer: String, record: EpisodeProgressRecord) {}
+    override suspend fun deleteEpisodeProgress(auth: String, apiKey: String, userId: String, tmdbId: String, season: String, episode: String) {}
+    override suspend fun getSyncState(auth: String, apiKey: String, userId: String, profileId: String?, select: String): List<SyncStateRecord> = emptyList()
+    override suspend fun upsertSyncState(auth: String, apiKey: String, prefer: String, record: SyncStateRecord) {}
+    override suspend fun bulkUpsertWatchedEpisodes(auth: String, apiKey: String, prefer: String, records: List<WatchedEpisodeRecord>) {}
+    override suspend fun bulkUpsertWatchedMovies(auth: String, apiKey: String, prefer: String, records: List<WatchedMovieRecord>) {}
+}
