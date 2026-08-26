@@ -47,6 +47,7 @@ jobs:
         with:
           ref: ${{ github.event.inputs.target_branch || 'main' }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Configure git identity
         run: |
@@ -181,13 +182,18 @@ jobs:
 
       - name: Push verified target branch
         if: steps.overlay.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ARVIO_RELEASE_TOKEN }}
         run: |
-          git push --force-with-lease="refs/heads/$TARGET_BRANCH:$(git rev-parse "origin/$TARGET_BRANCH")" origin "HEAD:$TARGET_BRANCH"
+          basic_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" \
+            push --force-with-lease="refs/heads/$TARGET_BRANCH:$(git rev-parse "origin/$TARGET_BRANCH")" \
+            origin "HEAD:$TARGET_BRANCH"
 
       - name: Publish verified GitHub release
         if: steps.overlay.outputs.no_changes != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ARVIO_RELEASE_TOKEN }}
         shell: bash
         run: |
           gh release create "${{ steps.release.outputs.tag }}" \
