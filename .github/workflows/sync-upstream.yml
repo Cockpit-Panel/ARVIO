@@ -37,8 +37,10 @@ jobs:
         run: |
           upstream_ref="${{ github.event.inputs.upstream_ref }}"
           target_branch="${{ github.event.inputs.target_branch }}"
-          echo "UPSTREAM_REF=${upstream_ref:-$DEFAULT_UPSTREAM_REF}" >> "$GITHUB_ENV"
-          echo "TARGET_BRANCH=${target_branch:-$DEFAULT_TARGET_BRANCH}" >> "$GITHUB_ENV"
+          {
+            echo "UPSTREAM_REF=${upstream_ref:-$DEFAULT_UPSTREAM_REF}"
+            echo "TARGET_BRANCH=${target_branch:-$DEFAULT_TARGET_BRANCH}"
+          } >> "$GITHUB_ENV"
 
       - name: Checkout target branch
         uses: actions/checkout@v4
@@ -93,8 +95,10 @@ jobs:
           fi
 
           git commit -m "chore: sync upstream $UPSTREAM_REF and apply Cockpit overlay"
-          echo "old_head=$old_head" >> "$GITHUB_OUTPUT"
-          echo "new_upstream=$new_upstream" >> "$GITHUB_OUTPUT"
+          {
+            echo "old_head=$old_head"
+            echo "new_upstream=$new_upstream"
+          } >> "$GITHUB_OUTPUT"
           echo "Rebuilt $TARGET_BRANCH from upstream/$UPSTREAM_REF at $new_upstream and reapplied Cockpit changes." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Java
@@ -159,11 +163,13 @@ jobs:
             "release-artifacts/ARVIO-$version_name-$short_sha-universal.apk"
           sha256sum release-artifacts/*.apk > release-artifacts/SHA256SUMS.txt
 
-          echo "name=$version_name" >> "$GITHUB_OUTPUT"
-          echo "code=$version_code" >> "$GITHUB_OUTPUT"
-          echo "sha=$commit_sha" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
-          echo "tag=cockpit-v$version_name-$short_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "name=$version_name"
+            echo "code=$version_code"
+            echo "sha=$commit_sha"
+            echo "short_sha=$short_sha"
+            echo "tag=cockpit-v$version_name-$short_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload verified universal APK
         if: steps.overlay.outputs.no_changes != 'true'

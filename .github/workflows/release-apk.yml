@@ -37,11 +37,13 @@ jobs:
             echo "Unable to read versionName/versionCode from app/build.gradle.kts" >&2
             exit 1
           fi
-          echo "name=$version_name" >> "$GITHUB_OUTPUT"
-          echo "code=$version_code" >> "$GITHUB_OUTPUT"
-          echo "sha=$commit_sha" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
-          echo "tag=cockpit-v$version_name-$short_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "name=$version_name"
+            echo "code=$version_code"
+            echo "sha=$commit_sha"
+            echo "short_sha=$short_sha"
+            echo "tag=cockpit-v$version_name-$short_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check release tag
         id: release
