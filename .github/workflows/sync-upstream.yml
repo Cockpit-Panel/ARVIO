@@ -140,15 +140,53 @@ jobs:
             }
           done
 
+      - name: Collect release artifacts
+        if: steps.overlay.outputs.no_changes != 'true'
+        id: release
+        shell: bash
+        run: |
+          version_name="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"/\1/p' app/build.gradle.kts | head -n 1)"
+          version_code="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)/\1/p' app/build.gradle.kts | head -n 1)"
+          commit_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=8 HEAD)"
+          if [ -z "$version_name" ] || [ -z "$version_code" ]; then
+            echo "Unable to read ARVIO version metadata." >&2
+            exit 1
+          fi
+
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/sideload/release/app-sideload-release.apk \
+            "release-artifacts/ARVIO-$version_name-$short_sha-universal.apk"
+          sha256sum release-artifacts/*.apk > release-artifacts/SHA256SUMS.txt
+
+          echo "name=$version_name" >> "$GITHUB_OUTPUT"
+          echo "code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=cockpit-v$version_name-$short_sha" >> "$GITHUB_OUTPUT"
+
       - name: Upload verified universal APK
         if: steps.overlay.outputs.no_changes != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ARVIO-upstream-sync-${{ github.run_number }}
-          path: app/build/outputs/apk/sideload/release/*.apk
+          name: ARVIO-${{ steps.release.outputs.name }}-${{ steps.release.outputs.short_sha }}
+          path: release-artifacts/*
           if-no-files-found: error
 
       - name: Push verified target branch
         if: steps.overlay.outputs.no_changes != 'true'
         run: |
           git push --force-with-lease="refs/heads/$TARGET_BRANCH:$(git rev-parse "origin/$TARGET_BRANCH")" origin "HEAD:$TARGET_BRANCH"
+
+      - name: Publish verified GitHub release
+        if: steps.overlay.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "${{ steps.release.outputs.tag }}" \
+            release-artifacts/* \
+            --target "${{ steps.release.outputs.sha }}" \
+            --title "ARVIO ${{ steps.release.outputs.name }} Cockpit (${{ steps.release.outputs.short_sha }})" \
+            --generate-notes \
+            --latest
