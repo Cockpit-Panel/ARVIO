@@ -231,9 +231,6 @@ fun AppNavigation(
         composable(Screen.Search.route) {
             SearchScreen(
                 currentProfile = currentProfile,
-                onNavigateToDetails = { mediaType, mediaId ->
-                    navController.navigate(Screen.Details.createRoute(mediaType, mediaId))
-                },
                 onNavigateToHome = { navigateHome() },
                 onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
                 onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
@@ -252,9 +249,6 @@ fun AppNavigation(
         composable(Screen.Watchlist.route) {
             WatchlistScreen(
                 currentProfile = currentProfile,
-                onNavigateToDetails = { mediaType, mediaId ->
-                    navController.navigate(Screen.Details.createRoute(mediaType, mediaId))
-                },
                 onNavigateToHome = { navigateHome() },
                 onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
                 onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },
@@ -291,9 +285,6 @@ fun AppNavigation(
                 onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
                 onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
                 onNavigateToIptvSettings = { navigateTopLevel(Screen.Settings.createRoute(initialSection = "iptv")) },
-                onNavigateToDetails = { mediaType, mediaId ->
-                    navController.navigate(Screen.Details.createRoute(mediaType, mediaId))
-                },
                 onSwitchProfile = {
                     onSwitchProfile()
                     navController.navigate(Screen.ProfileSelection.route) {
@@ -331,7 +322,6 @@ fun AppNavigation(
                 currentProfile = currentProfile,
                 autoStartCloudAuth = autoCloudAuth,
                 initialSection = initialSection,
-                installPackUrl = installPackUrl,
                 onNavigateToHome = { navigateHome() },
                 onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
                 onNavigateToTv = { navigateTopLevel(Screen.Tv.createRoute()) },

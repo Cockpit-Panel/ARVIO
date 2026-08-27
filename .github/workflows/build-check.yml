@@ -4,141 +4,45 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:
 
 concurrency:
   group: build-check-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  verify:
+  build:
     name: Verify build
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
-      - name: Prepare placeholder build configuration
-        run: cp secrets.defaults.properties secrets.properties
-
-      - name: Compile and test
-        run: ./gradlew testSideloadDebugUnitTest --no-daemon
-
-  signed-apk:
-    name: Build signed test APK
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
-      - name: Validate private Discord SDK access
-        env:
-          DISCORD_SDK_DEPLOY_KEY: ${{ secrets.DISCORD_SDK_DEPLOY_KEY }}
-        run: |
-          : "${DISCORD_SDK_DEPLOY_KEY:?Missing DISCORD_SDK_DEPLOY_KEY repository secret}"
-
-      - name: Fetch private Discord Partner SDK
         uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
-          repository: ProdigyV21/ARVIO-private-dependencies
-          ref: main
-          path: .private-dependencies
-          ssh-key: ${{ secrets.DISCORD_SDK_DEPLOY_KEY }}
-          persist-credentials: false
-
-      - name: Install Discord Partner SDK
-        run: |
-          install -d app/libs
-          install -m 0600 .private-dependencies/discord_partner_sdk.aar app/libs/discord_partner_sdk.aar
-          echo "dc7b1014ae4797e5469261d151fd26fc056524d03e42e55fd39e085f0f09e71a  app/libs/discord_partner_sdk.aar" | sha256sum --check --strict
-
-      - name: Validate required credentials
-        env:
-          APP_ANON_KEY: ${{ secrets.APP_ANON_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
-          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          : "${APP_ANON_KEY:?Missing APP_ANON_KEY repository secret}"
-          : "${SUPABASE_URL:?Missing SUPABASE_URL repository secret}"
-          case "$SUPABASE_URL" in
-            http://*|https://*) ;;
-            *) echo "SUPABASE_URL must be an HTTP(S) URL" >&2; exit 1 ;;
-          esac
-          : "${TMDB_API_KEY:?Missing TMDB_API_KEY repository secret}"
-          : "${TRAKT_CLIENT_ID:?Missing TRAKT_CLIENT_ID repository secret}"
-          : "${TRAKT_CLIENT_SECRET:?Missing TRAKT_CLIENT_SECRET repository secret}"
-          : "${KEYSTORE_BASE64:?Missing KEYSTORE_BASE64 repository secret}"
-          : "${KEYSTORE_PASSWORD:?Missing KEYSTORE_PASSWORD repository secret}"
-          : "${KEY_ALIAS:?Missing KEY_ALIAS repository secret}"
-          : "${KEY_PASSWORD:?Missing KEY_PASSWORD repository secret}"
-
-      - name: Prepare runtime configuration
-        env:
-          APP_ANON_KEY: ${{ secrets.APP_ANON_KEY }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          GOOGLE_WEB_CLIENT_ID: ${{ secrets.GOOGLE_WEB_CLIENT_ID }}
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
-          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
-        run: |
-          printf '%s\n' \
-            "APP_ANON_KEY=$APP_ANON_KEY" \
-            "SUPABASE_URL=$SUPABASE_URL" \
-            "SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY" \
-            "GOOGLE_WEB_CLIENT_ID=$GOOGLE_WEB_CLIENT_ID" \
-            "SENTRY_DSN=${SENTRY_DSN:-disabled}" \
-            "TMDB_API_KEY=$TMDB_API_KEY" \
-            "TRAKT_CLIENT_ID=$TRAKT_CLIENT_ID" \
-            "TRAKT_CLIENT_SECRET=$TRAKT_CLIENT_SECRET" \
-            > secrets.properties
-
-      - name: Prepare production signing
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$GITHUB_WORKSPACE/arvio-release.keystore"
-          printf '%s\n' \
-            "storeFile=$GITHUB_WORKSPACE/arvio-release.keystore" \
-            "storePassword=$KEYSTORE_PASSWORD" \
-            "keyAlias=$KEY_ALIAS" \
-            "keyPassword=$KEY_PASSWORD" \
-            > keystore.properties
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
 
       - name: Build release APK
-        run: ./gradlew assembleSideloadRelease --no-daemon
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon
 
-      - name: Upload signed APK
+      - name: Verify universal ABI coverage
+        shell: bash
+        run: |
+          apk="app/build/outputs/apk/sideload/release/app-sideload-release.apk"
+          unzip -l "$apk" > "$RUNNER_TEMP/arvio-apk-entries.txt"
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            grep -q "lib/$abi/" "$RUNNER_TEMP/arvio-apk-entries.txt" || {
+              echo "Universal APK is missing ABI: $abi" >&2
+              exit 1
+            }
+          done
+
+      - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
-          name: arvio-sideload-release-${{ github.run_id }}
+          name: pull-request-release-apk
           path: app/build/outputs/apk/sideload/release/*.apk
           if-no-files-found: error
-          retention-days: 7

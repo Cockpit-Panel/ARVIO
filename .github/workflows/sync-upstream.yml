@@ -1,0 +1,204 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: '27 4 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream branch to sync from
+        required: true
+        default: main
+        type: string
+      target_branch:
+        description: Fork branch to update automatically
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-${{ github.event.inputs.target_branch || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: ProdigyV21/ARVIO
+      DEFAULT_UPSTREAM_REF: main
+      DEFAULT_TARGET_BRANCH: main
+
+    steps:
+      - name: Resolve sync configuration
+        shell: bash
+        run: |
+          upstream_ref="${{ github.event.inputs.upstream_ref }}"
+          target_branch="${{ github.event.inputs.target_branch }}"
+          {
+            echo "UPSTREAM_REF=${upstream_ref:-$DEFAULT_UPSTREAM_REF}"
+            echo "TARGET_BRANCH=${target_branch:-$DEFAULT_TARGET_BRANCH}"
+          } >> "$GITHUB_ENV"
+
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream and target history
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch origin "$TARGET_BRANCH"
+          git fetch upstream "$UPSTREAM_REF"
+
+      - name: Rebuild target and overlay Cockpit changes
+        id: overlay
+        shell: bash
+        run: |
+          git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+          old_head="$(git rev-parse HEAD)"
+          old_base="$(git merge-base HEAD "upstream/$UPSTREAM_REF")"
+          new_upstream="$(git rev-parse "upstream/$UPSTREAM_REF")"
+
+          if [ "$old_base" = "$new_upstream" ]; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            echo "Already based on upstream/$UPSTREAM_REF at $new_upstream." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          overlay_patch="$RUNNER_TEMP/cockpit-overlay.patch"
+          git diff --binary "$old_base..$old_head" > "$overlay_patch"
+          test -s "$overlay_patch"
+
+          git reset --hard "upstream/$UPSTREAM_REF"
+          if ! git apply --3way --index "$overlay_patch"; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            if (( ${#conflicts[@]} == 0 )); then
+              echo "Cockpit overlay failed without resolvable index conflicts." >&2
+              exit 1
+            fi
+            git checkout --theirs -- "${conflicts[@]}"
+            git add -- "${conflicts[@]}"
+          fi
+
+          if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ':!*.md'; then
+            echo "Conflict markers remain after applying the Cockpit overlay." >&2
+            exit 1
+          fi
+
+          git commit -m "chore: sync upstream $UPSTREAM_REF and apply Cockpit overlay"
+          {
+            echo "old_head=$old_head"
+            echo "new_upstream=$new_upstream"
+          } >> "$GITHUB_OUTPUT"
+          echo "Rebuilt $TARGET_BRANCH from upstream/$UPSTREAM_REF at $new_upstream and reapplied Cockpit changes." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Java
+        if: steps.overlay.outputs.no_changes != 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Set up Android SDK
+        if: steps.overlay.outputs.no_changes != 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Verify Cockpit overlay
+        if: steps.overlay.outputs.no_changes != 'true'
+        shell: bash
+        run: |
+          grep -q 'https://demo.cockpit.lol/api/arvio/' app/src/main/kotlin/com/arflix/tv/util/Constants.kt
+          grep -q 'CockpitArvioApi' app/src/main/kotlin/com/arflix/tv/data/repository/AuthRepository.kt
+          grep -q 'panel_sign_in_success' app/src/main/kotlin/com/arflix/tv/data/repository/AuthRepository.kt
+          grep -q 'Constants.COCKPIT_API_URL + "update.php"' app/src/main/kotlin/com/arflix/tv/updater/AppUpdateRepository.kt
+          grep -q 'FEATURE_PLUGINS_ENABLED", "false"' app/build.gradle.kts
+
+      - name: Verify debug Kotlin compile
+        if: steps.overlay.outputs.no_changes != 'true'
+        run: ./gradlew :app:compileSideloadDebugKotlin --no-daemon
+
+      - name: Verify universal release APK
+        if: steps.overlay.outputs.no_changes != 'true'
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon
+
+      - name: Verify universal ABI coverage
+        if: steps.overlay.outputs.no_changes != 'true'
+        shell: bash
+        run: |
+          apk="app/build/outputs/apk/sideload/release/app-sideload-release.apk"
+          unzip -l "$apk" > "$RUNNER_TEMP/arvio-apk-entries.txt"
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            grep -q "lib/$abi/" "$RUNNER_TEMP/arvio-apk-entries.txt" || {
+              echo "Universal APK is missing ABI: $abi" >&2
+              exit 1
+            }
+          done
+
+      - name: Collect release artifacts
+        if: steps.overlay.outputs.no_changes != 'true'
+        id: release
+        shell: bash
+        run: |
+          version_name="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"/\1/p' app/build.gradle.kts | head -n 1)"
+          version_code="$(sed -nE 's/^[[:space:]]*versionCode = ([0-9]+)/\1/p' app/build.gradle.kts | head -n 1)"
+          commit_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=8 HEAD)"
+          if [ -z "$version_name" ] || [ -z "$version_code" ]; then
+            echo "Unable to read ARVIO version metadata." >&2
+            exit 1
+          fi
+
+          mkdir -p release-artifacts
+          cp app/build/outputs/apk/sideload/release/app-sideload-release.apk \
+            "release-artifacts/ARVIO-$version_name-$short_sha-universal.apk"
+          sha256sum release-artifacts/*.apk > release-artifacts/SHA256SUMS.txt
+
+          {
+            echo "name=$version_name"
+            echo "code=$version_code"
+            echo "sha=$commit_sha"
+            echo "short_sha=$short_sha"
+            echo "tag=cockpit-v$version_name-$short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified universal APK
+        if: steps.overlay.outputs.no_changes != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARVIO-${{ steps.release.outputs.name }}-${{ steps.release.outputs.short_sha }}
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: Push verified target branch
+        if: steps.overlay.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ARVIO_RELEASE_TOKEN }}
+        run: |
+          basic_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic_auth" \
+            push --force-with-lease="refs/heads/$TARGET_BRANCH:$(git rev-parse "origin/$TARGET_BRANCH")" \
+            origin "HEAD:$TARGET_BRANCH"
+
+      - name: Publish verified GitHub release
+        if: steps.overlay.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ARVIO_RELEASE_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "${{ steps.release.outputs.tag }}" \
+            release-artifacts/* \
+            --target "${{ steps.release.outputs.sha }}" \
+            --title "ARVIO ${{ steps.release.outputs.name }} Cockpit (${{ steps.release.outputs.short_sha }})" \
+            --generate-notes \
+            --latest
