@@ -130,7 +130,7 @@ jobs:
 
       - name: Verify universal release APK
         if: steps.overlay.outputs.no_changes != 'true'
-        run: ./gradlew :app:assembleSideloadRelease --no-daemon
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon -PincludeX86Abis=true
 
       - name: Verify universal ABI coverage
         if: steps.overlay.outputs.no_changes != 'true'

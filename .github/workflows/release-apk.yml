@@ -62,7 +62,7 @@ jobs:
           cache: gradle
 
       - name: Build release APK
-        run: ./gradlew :app:assembleSideloadRelease --no-daemon
+        run: ./gradlew :app:assembleSideloadRelease --no-daemon -PincludeX86Abis=true
 
       - name: Verify universal ABI coverage
         shell: bash
