@@ -1,6 +1,10 @@
 package com.arflix.tv.ui.screens.watchlist
 
 import android.content.Context
+import coil.imageLoader
+import coil.request.ImageRequest
+import coil.size.Precision
+import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.arflix.tv.R
@@ -13,11 +17,16 @@ import com.arflix.tv.data.model.MediaType.TV
 import com.arflix.tv.data.repository.CatalogRepository
 import com.arflix.tv.data.repository.CloudSyncRepository
 import com.arflix.tv.data.repository.HomeServerCatalogCandidate
+import com.arflix.tv.data.repository.HomeServerConnection
 import com.arflix.tv.data.repository.HomeServerKind
 import com.arflix.tv.data.repository.HomeServerLibrarySort
 import com.arflix.tv.data.repository.HomeServerRepository
+import com.arflix.tv.data.repository.PersonalListsRepository
+import com.arflix.tv.data.repository.KidsContentFilter
+import com.arflix.tv.data.repository.MdbListAuthUnavailable
 import com.arflix.tv.data.repository.MediaRepository
 import com.arflix.tv.data.repository.ProfileManager
+import com.arflix.tv.data.repository.TraktAuthUnavailable
 import com.arflix.tv.data.repository.TraktRepository
 import com.arflix.tv.data.repository.WatchHistoryEntry
 import com.arflix.tv.data.repository.WatchHistoryRepository
@@ -28,6 +37,7 @@ import com.arflix.tv.util.AppLogger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -43,6 +53,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
+import java.util.Locale
 
 enum class ToastType {
     SUCCESS, ERROR, INFO
@@ -50,7 +61,9 @@ enum class ToastType {
 
 enum class TrackerLibraryProvider(val displayName: String) {
     TRAKT("Trakt"),
-    SIMKL("Simkl")
+    SIMKL("Simkl"),
+    MDBLIST("MDBList"),
+    WETRAKR("WeTrakr")
 }
 
 sealed interface WatchlistSourceItem {
@@ -73,7 +86,9 @@ sealed interface WatchlistSourceItem {
         override val title: String = config.title
         override val subtitle: String? = when {
             config.sourceType == CatalogSourceType.TRAKT -> "Trakt"
+            config.sourceType == CatalogSourceType.SIMKL -> "SIMKL"
             config.sourceType == CatalogSourceType.MDBLIST -> "MDBList"
+            config.sourceType == CatalogSourceType.TMDB -> "TMDB"
             config.sourceType == CatalogSourceType.ADDON -> config.addonName ?: "Addon"
             config.sourceUrl?.contains("simkl", ignoreCase = true) == true -> "Simkl"
             else -> null
@@ -101,7 +116,11 @@ sealed interface WatchlistSourceItem {
     data class TrackerList(
         val provider: TrackerLibraryProvider,
         val listKey: String,
-        override val title: String
+        override val title: String,
+        @param:StringRes val titleRes: Int? = null,
+        // MDBList only: "user/slug" of the list's mdblist.com URL, so a Home catalog added
+        // from that URL is not shown a second time next to it.
+        val urlPath: String? = null
     ) : WatchlistSourceItem {
         override val id: String = "tracker_${provider.name.lowercase()}_$listKey"
         override val subtitle: String = provider.displayName
@@ -137,6 +156,7 @@ data class HomeLibraryUiState(
     val isLoading: Boolean = false,
     val isLoadingMore: Boolean = false,
     val hasMore: Boolean = false,
+    val totalCount: Int? = null,
     val sort: HomeServerLibrarySort = HomeServerLibrarySort.RECENTLY_ADDED,
     val searchQuery: String = "",
     val error: String? = null
@@ -176,6 +196,11 @@ internal fun buildWatchlistSources(
             config.kind != CatalogKind.COLLECTION_RAIL &&
             config.sourceType != CatalogSourceType.PREINSTALLED &&
             config.sourceType != CatalogSourceType.HOME_SERVER
+    }.filterNot { config ->
+        config.sourceType == CatalogSourceType.MDBLIST && trackerLists.any { list ->
+            list.urlPath != null &&
+                config.sourceUrl?.trimEnd('/')?.endsWith("/lists/${list.urlPath}", ignoreCase = true) == true
+        }
     }.map { WatchlistSourceItem.Catalog(it) }
     val homeServers = homeServerCandidates.map { WatchlistSourceItem.HomeServer(it) }
     return (listOf<WatchlistSourceItem>(WatchlistSourceItem.MyWatchlist) + homeServers + trackerLists + customCatalogs)
@@ -193,10 +218,28 @@ class WatchlistViewModel @Inject constructor(
     private val homeServerRepository: HomeServerRepository,
     private val catalogRepository: CatalogRepository,
     private val watchHistoryRepository: WatchHistoryRepository,
+    private val weTrakr: com.arflix.tv.data.repository.wetrakr.WeTrakrRemoteProvider,
     private val simklAuthManager: SimklAuthManager,
     private val simklSyncService: SimklSyncService,
-    private val profileManager: ProfileManager
+    private val profileManager: ProfileManager,
+    private val personalListsRepository: PersonalListsRepository,
+    private val kidsContentFilter: KidsContentFilter
 ) : ViewModel() {
+    val kidsFilterState: StateFlow<KidsContentFilter.State> = kidsContentFilter.state
+
+    /** The watchlist as a kids profile may see it; others get [state] unchanged. */
+    fun applyKidsFilter(state: WatchlistUiState, kids: KidsContentFilter.State): WatchlistUiState {
+        if (!kids.isActive) return state
+        return state.copy(
+            movies = kidsContentFilter.filter(state.movies, kids),
+            series = kidsContentFilter.filter(state.series, kids)
+        )
+    }
+
+    fun applyKidsFilter(state: HomeLibraryUiState, kids: KidsContentFilter.State): HomeLibraryUiState {
+        if (!kids.isActive) return state
+        return state.copy(items = kidsContentFilter.filter(state.items, kids))
+    }
     private val _uiState = MutableStateFlow(WatchlistUiState())
     val uiState: StateFlow<WatchlistUiState> = _uiState.asStateFlow()
 
@@ -205,15 +248,39 @@ class WatchlistViewModel @Inject constructor(
 
     private val _libraryState = MutableStateFlow(HomeLibraryUiState())
     val libraryState: StateFlow<HomeLibraryUiState> = _libraryState.asStateFlow()
-    private val libraryCache = linkedMapOf<String, Pair<List<MediaItem>, Boolean>>()
+    private val libraryCache = linkedMapOf<String, MediaRepository.CategoryPageResult>()
+    private val libraryOffsets = mutableMapOf<String, Int>()
     private var libraryLoadJob: Job? = null
     private var librarySearchJob: Job? = null
     private var libraryRequestId = 0
 
     private val sourceItemsCache = linkedMapOf<String, List<MediaItem>>()
     private val sourcePageStates = mutableMapOf<String, SourcePageState>()
+    /** Bumped to rebuild the tracker lists, e.g. once an unreachable MDBList answers again. */
+    private val trackerListsReload = MutableStateFlow(0)
+
+    init {
+        // A list edited through "Add to list" must not be shown from this screen's cache.
+        viewModelScope.launch {
+            personalListsRepository.changes.collect { list ->
+                val provider = when (list.provider) {
+                    PersonalListsRepository.Provider.TRAKT -> TrackerLibraryProvider.TRAKT
+                    PersonalListsRepository.Provider.MDBLIST -> TrackerLibraryProvider.MDBLIST
+                    PersonalListsRepository.Provider.WETRAKR -> TrackerLibraryProvider.WETRAKR
+                }
+                val listKey = if (list.provider == PersonalListsRepository.Provider.WETRAKR) {
+                    com.arflix.tv.data.repository.wetrakr.WeTrakrLists.LIST_KEY_PREFIX + list.id
+                } else list.id
+                val sourceId = WatchlistSourceItem.TrackerList(provider, listKey, list.title).id
+                sourceItemsCache.remove(sourceId)
+                sourcePageStates.remove(sourceId)
+                if (_uiState.value.selectedSourceId == sourceId) loadActiveSourceItems(forceRefresh = true)
+            }
+        }
+    }
     private var currentCatalogs: List<CatalogConfig> = emptyList()
     private var currentHomeServerCandidates: List<HomeServerCatalogCandidate> = emptyList()
+    private val libraryRecoveryAttempts = mutableSetOf<Pair<String, HomeServerConnection>>()
     private var currentTrackerLists: List<WatchlistSourceItem.TrackerList> = emptyList()
     private var sourceLoadJob: Job? = null
     private var sourceLoadMoreJob: Job? = null
@@ -222,6 +289,7 @@ class WatchlistViewModel @Inject constructor(
     private var enrichmentInFlight = false
     private var enrichmentRequested = false
     private val logoRequestsInFlight = mutableSetOf<String>()
+    private val logoPermits = Semaphore(5)
 
     private fun watchlistDiagnosticContext(
         phase: String,
@@ -278,49 +346,105 @@ class WatchlistViewModel @Inject constructor(
         viewModelScope.launch {
             homeServerRepository.connections.collect { connections ->
                 val usable = connections.filter { it.isUsable }.map { it.serverKind }.distinct()
-                val candidates = runCatching { homeServerRepository.getCatalogCandidates() }
-                    .getOrDefault(emptyList())
-                    .filter { it.serverKind in usable && it.collectionType.lowercase() in BROWSABLE_LIBRARY_TYPES }
+                // Box-set discovery is for catalog settings, not the Library sidebar.
+                // It can take multiple server timeouts and its results are not used here.
+                val candidates = homeServerRepository.getSavedCatalogCandidates(connections)
+                    .filter { it.collectionType.trim().lowercase(Locale.ROOT) in BROWSABLE_LIBRARY_TYPES }
                 updateHomeLibraryState(usable, candidates)
                 updateAvailableSources(homeServerCandidates = candidates)
+                val profileId = profileManager.getProfileId()
+                val needsRecovery = connections.filter { it.isUsable && it.collections.isEmpty() }
+                    .map { profileId to it }.filter { libraryRecoveryAttempts.add(it) }
+                if (needsRecovery.isNotEmpty()) {
+                    viewModelScope.launch { homeServerRepository.refreshMissingLibraries() }
+                }
             }
         }
     }
 
     private fun observeTrackerLibraries() {
         viewModelScope.launch {
-            profileManager.activeProfileId
-                .combine(traktRepository.isAuthenticated) { profileId, traktConnected ->
-                    profileId to traktConnected
-                }
+            combine(
+                profileManager.activeProfileId,
+                traktRepository.connection,
+                personalListsRepository.mdbListConnection,
+                trackerListsReload
+            ) { profileId, trakt, mdbList, reload ->
+                TrackerConnections(
+                    profileId = profileId,
+                    traktConnected = trakt.connected,
+                    traktReconnectRequired = trakt.reconnectRequired,
+                    mdbListConnected = mdbList.connected,
+                    mdbListReconnectRequired = mdbList.reconnectRequired,
+                    reload = reload
+                )
+            }
                 .distinctUntilChanged()
-                .collectLatest { (_, traktConnected) ->
+                .collectLatest { connections ->
                     sourceLoadJob?.cancel()
                     sourceLoadMoreJob?.cancel()
                     sourceItemsCache.keys.removeAll { it.startsWith("tracker_") }
                     sourcePageStates.keys.removeAll { it.startsWith("tracker_") }
                     currentTrackerLists = emptyList()
                     updateAvailableSources()
-                    refreshTrackerLibraries(traktConnected)
+                    refreshTrackerLibraries(
+                        traktConnected = connections.traktConnected,
+                        traktReconnectRequired = connections.traktReconnectRequired,
+                        mdbListConnected = connections.mdbListConnected
+                    )
                 }
         }
     }
 
-    private suspend fun refreshTrackerLibraries(traktConnected: Boolean) {
+    private data class TrackerConnections(
+        val profileId: String,
+        val traktConnected: Boolean,
+        val traktReconnectRequired: Boolean,
+        val mdbListConnected: Boolean,
+        val mdbListReconnectRequired: Boolean,
+        val reload: Int
+    )
+
+    private suspend fun refreshTrackerLibraries(
+        traktConnected: Boolean,
+        traktReconnectRequired: Boolean = false,
+        mdbListConnected: Boolean = false
+    ) {
         val simklConnected = runCatching { simklAuthManager.isConnected() }.getOrDefault(false)
+        val weTrakrConnected = weTrakr.isConnected()
         val trackerLists = buildList {
-            if (traktConnected) {
-                val personalLists = runCatching { traktRepository.getPersonalLists() }
-                    .getOrDefault(emptyList())
-                if (personalLists.isEmpty()) {
+            if (weTrakrConnected) {
+                listOf("planning" to "Watchlist", "watching" to "Watching", "watched" to "Watched", "hold" to "On hold", "dropped" to "Dropped").forEach { (key, title) ->
+                    add(WatchlistSourceItem.TrackerList(provider = TrackerLibraryProvider.WETRAKR, listKey = key, title = title))
+                }
+                // The user's own WeTrakr lists, after the status lists.
+                runCatching { personalListsRepository.weTrakrLibraryLists() }.getOrDefault(emptyList()).forEach { list ->
+                    add(WatchlistSourceItem.TrackerList(
+                        provider = TrackerLibraryProvider.WETRAKR,
+                        listKey = com.arflix.tv.data.repository.wetrakr.WeTrakrLists.LIST_KEY_PREFIX + list.id,
+                        title = list.name
+                    ))
+                }
+            }
+            // A lost session keeps its Watchlist entry, which then explains that Trakt needs
+            // reconnecting, instead of Trakt silently vanishing from the library.
+            if (traktConnected || traktReconnectRequired) {
+                val personalLists = if (traktConnected) {
+                    runCatching { traktRepository.getPersonalLists() }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
+                run {
                     add(
                         WatchlistSourceItem.TrackerList(
                             provider = TrackerLibraryProvider.TRAKT,
                             listKey = TRAKT_WATCHLIST_KEY,
-                            title = "Watchlist"
+                            title = "Watchlist",
+                            titleRes = R.string.watchlist_tracker_default_list
                         )
                     )
-                } else {
+                }
+                run {
                     personalLists.forEach { list ->
                         add(
                             WatchlistSourceItem.TrackerList(
@@ -332,13 +456,41 @@ class WatchlistViewModel @Inject constructor(
                     }
                 }
             }
+            if (mdbListConnected) {
+                // An unreadable MDBList keeps one entry that explains why (and retries), instead
+                // of its lists silently vanishing from the library.
+                try {
+                    personalListsRepository.mdbListLibraryLists().forEach { list ->
+                        add(
+                            WatchlistSourceItem.TrackerList(
+                                provider = TrackerLibraryProvider.MDBLIST,
+                                listKey = list.id.toString(),
+                                title = list.title,
+                                urlPath = list.path
+                            )
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLogger.w("WatchlistViewModel", "MDBList lists unavailable: ${e.message}")
+                    add(
+                        WatchlistSourceItem.TrackerList(
+                            provider = TrackerLibraryProvider.MDBLIST,
+                            listKey = MDBLIST_STATUS_KEY,
+                            title = "MDBList"
+                        )
+                    )
+                }
+            }
             if (simklConnected) {
-                SIMKL_LIBRARY_LISTS.forEach { (status, title) ->
+                SIMKL_LIBRARY_LISTS.forEach { (status, title, titleRes) ->
                     add(
                         WatchlistSourceItem.TrackerList(
                             provider = TrackerLibraryProvider.SIMKL,
                             listKey = status,
-                            title = title
+                            title = title,
+                            titleRes = titleRes
                         )
                     )
                 }
@@ -365,24 +517,39 @@ class WatchlistViewModel @Inject constructor(
         val selectedProvider = current.selectedProvider?.takeIf { it in providers }
         val selectedSource = current.selectedSourceRef?.takeIf { source ->
             candidates.any { it.sourceRef == source && it.serverKind == selectedProvider }
+        } ?: candidates.firstOrNull { it.serverKind == selectedProvider }?.sourceRef
+        val selectionChanged = current.selectedSourceRef != selectedSource || current.selectedProvider != selectedProvider
+        libraryCache.keys.removeAll { key -> candidates.none { key.startsWith("${it.sourceRef}|") } }
+        if (selectionChanged) {
+            libraryRequestId++
+            libraryLoadJob?.cancel()
+            librarySearchJob?.cancel()
         }
         _libraryState.value = current.copy(
             providers = providers,
             libraries = candidates,
             selectedProvider = selectedProvider,
             selectedSourceRef = selectedSource,
-            items = if (selectedProvider == null) emptyList() else current.items
+            items = if (selectionChanged || selectedProvider == null) emptyList() else current.items,
+            totalCount = if (selectionChanged || selectedProvider == null) null else current.totalCount,
+            isLoading = if (selectionChanged) selectedSource != null else current.isLoading,
+            isLoadingMore = if (selectionChanged) false else current.isLoadingMore,
+            hasMore = if (selectionChanged) false else current.hasMore,
+            error = if (selectionChanged) null else current.error
         )
+        if (selectionChanged && selectedSource != null) loadLibraryFirstPage()
     }
 
     fun selectLibraryProvider(provider: HomeServerKind?) {
         val current = _libraryState.value
         if (current.selectedProvider == provider) return
+        libraryRequestId++
         libraryLoadJob?.cancel()
         librarySearchJob?.cancel()
         if (provider == null) {
             _libraryState.value = current.copy(
                 selectedProvider = null,
+                totalCount = null,
                 selectedSourceRef = null,
                 items = emptyList(),
                 isLoading = false,
@@ -394,6 +561,7 @@ class WatchlistViewModel @Inject constructor(
         val firstLibrary = current.libraries.firstOrNull { it.serverKind == provider }
         _libraryState.value = current.copy(
             selectedProvider = provider,
+            totalCount = null,
             selectedSourceRef = firstLibrary?.sourceRef,
             items = emptyList(),
             isLoading = firstLibrary != null,
@@ -408,6 +576,7 @@ class WatchlistViewModel @Inject constructor(
         librarySearchJob?.cancel()
         _libraryState.value = _libraryState.value.copy(
             selectedSourceRef = sourceRef,
+            totalCount = null,
             items = emptyList(),
             isLoadingMore = false,
             error = null
@@ -425,7 +594,7 @@ class WatchlistViewModel @Inject constructor(
         if (_libraryState.value.searchQuery == query) return
         libraryRequestId++
         libraryLoadJob?.cancel()
-        _libraryState.value = _libraryState.value.copy(searchQuery = query)
+        _libraryState.value = _libraryState.value.copy(searchQuery = query, totalCount = null)
         librarySearchJob?.cancel()
         librarySearchJob = viewModelScope.launch {
             delay(300L)
@@ -433,7 +602,10 @@ class WatchlistViewModel @Inject constructor(
         }
     }
 
-    fun refreshLibrary() = loadLibraryFirstPage(force = true)
+    fun refreshLibrary() {
+        loadLibraryFirstPage(force = true)
+        viewModelScope.launch { homeServerRepository.refreshMissingLibraries() }
+    }
 
     private fun libraryCacheKey(state: HomeLibraryUiState): String = listOf(
         state.selectedSourceRef.orEmpty(),
@@ -444,16 +616,20 @@ class WatchlistViewModel @Inject constructor(
     private fun loadLibraryFirstPage(force: Boolean = false) {
         val snapshot = _libraryState.value
         val sourceRef = snapshot.selectedSourceRef ?: return
+        val requestId = ++libraryRequestId
+        libraryLoadJob?.cancel()
         val cacheKey = libraryCacheKey(snapshot)
         val cached = libraryCache[cacheKey]
         if (cached != null && !force) {
             _libraryState.value = snapshot.copy(
-                items = cached.first,
-                hasMore = cached.second,
+                items = cached.items,
+                hasMore = cached.hasMore,
+                totalCount = cached.totalCount,
                 isLoading = false,
                 isLoadingMore = false,
                 error = null
             )
+            return
         } else {
             _libraryState.value = snapshot.copy(
                 isLoading = true,
@@ -461,8 +637,6 @@ class WatchlistViewModel @Inject constructor(
                 error = null
             )
         }
-        val requestId = ++libraryRequestId
-        libraryLoadJob?.cancel()
         libraryLoadJob = viewModelScope.launch {
             runCatching {
                 mediaRepository.loadHomeServerLibraryPage(
@@ -475,19 +649,25 @@ class WatchlistViewModel @Inject constructor(
             }.onSuccess { page ->
                 if (requestId != libraryRequestId) return@onSuccess
                 val items = page.items.enrichWithPlaybackProgress()
-                libraryCache[cacheKey] = items to page.hasMore
+                if (requestId != libraryRequestId) return@onSuccess
+                libraryCache[cacheKey] = page.copy(items = items)
+                libraryOffsets[cacheKey] = page.nextOffset ?: page.items.size
                 while (libraryCache.size > LIBRARY_CACHE_ENTRY_LIMIT) {
-                    libraryCache.remove(libraryCache.keys.first())
+                    val oldest = libraryCache.keys.first()
+                    libraryCache.remove(oldest)
+                    libraryOffsets.remove(oldest)
                 }
                 _libraryState.value = _libraryState.value.copy(
                     items = items,
                     hasMore = page.hasMore,
+                    totalCount = page.totalCount,
                     isLoading = false,
                     isLoadingMore = false,
                     error = null
                 )
                 fetchLogos(items.take(LIBRARY_LOGO_INITIAL_PREFETCH))
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 if (requestId != libraryRequestId) return@onFailure
                 _libraryState.value = _libraryState.value.copy(
                     items = if (cached == null) emptyList() else _libraryState.value.items,
@@ -509,12 +689,13 @@ class WatchlistViewModel @Inject constructor(
         if (!snapshot.hasMore || snapshot.isLoading || snapshot.isLoadingMore) return
         val requestId = libraryRequestId
         val cacheKey = libraryCacheKey(snapshot)
+        val offset = libraryOffsets[cacheKey] ?: snapshot.items.size
         _libraryState.value = snapshot.copy(isLoadingMore = true)
         viewModelScope.launch {
             runCatching {
                 mediaRepository.loadHomeServerLibraryPage(
                     sourceRef = sourceRef,
-                    offset = snapshot.items.size,
+                    offset = offset,
                     limit = LIBRARY_PAGE_SIZE,
                     sort = snapshot.sort,
                     searchQuery = snapshot.searchQuery
@@ -528,18 +709,24 @@ class WatchlistViewModel @Inject constructor(
                 val fresh = page.items.filter { item ->
                     "${item.homeServerSourceRef}:${item.homeServerItemId}:${item.mediaType}:${item.id}" !in existing
                 }.enrichWithPlaybackProgress()
+                if (requestId != libraryRequestId) return@onSuccess
                 val merged = current.items + fresh
+                val nextOffset = page.nextOffset ?: (offset + page.items.size)
+                val more = page.hasMore && nextOffset > offset
+                libraryOffsets[cacheKey] = nextOffset
                 _libraryState.value = current.copy(
                     items = merged,
-                    hasMore = page.hasMore,
+                    hasMore = more,
+                    totalCount = page.totalCount ?: current.totalCount,
                     isLoadingMore = false,
                     error = null
                 )
-                libraryCache[cacheKey] = merged to page.hasMore
+                libraryCache[cacheKey] = page.copy(items = merged, hasMore = more, totalCount = page.totalCount ?: current.totalCount)
                 fetchLogos(fresh.take(LIBRARY_LOGO_INITIAL_PREFETCH))
             }.onFailure {
+                if (it is CancellationException) throw it
                 if (requestId == libraryRequestId) {
-                    _libraryState.value = _libraryState.value.copy(isLoadingMore = false)
+                    _libraryState.value = _libraryState.value.copy(isLoadingMore = false, error = it.message ?: context.getString(R.string.homeserver_connection_failed))
                 }
             }
         }
@@ -608,6 +795,16 @@ class WatchlistViewModel @Inject constructor(
         )
     }
 
+    private fun trackerLoadError(provider: TrackerLibraryProvider, error: Throwable): String = when {
+        error is TraktAuthUnavailable && error.reconnectRequired -> context.getString(R.string.trakt_reconnect_required)
+        error is TraktAuthUnavailable -> context.getString(R.string.trakt_library_unavailable)
+        error is MdbListAuthUnavailable && error.reconnectRequired -> context.getString(R.string.mdblist_reconnect_required)
+        error is MdbListAuthUnavailable -> context.getString(R.string.mdblist_library_unavailable)
+        provider == TrackerLibraryProvider.TRAKT -> context.getString(R.string.trakt_library_load_failed)
+        provider == TrackerLibraryProvider.MDBLIST -> context.getString(R.string.mdblist_library_load_failed)
+        else -> error.message ?: context.getString(R.string.watchlist_error_refresh)
+    }
+
     private fun loadActiveSourceItems(forceRefresh: Boolean = false) {
         val activeSource = _uiState.value.selectedSource
         val cacheKey = activeSource.id
@@ -664,13 +861,15 @@ class WatchlistViewModel @Inject constructor(
                 )
                 sourceLoadJob = viewModelScope.launch {
                     runCatching {
-                        mediaRepository.loadCustomCatalog(activeSource.config, maxItems = 120)
-                    }.onSuccess { category ->
-                        val items = (category?.items ?: emptyList()).enrichWithPlaybackProgress()
+                        mediaRepository.loadCustomCatalogPage(activeSource.config, offset = 0, limit = LIBRARY_PAGE_SIZE)
+                    }.onSuccess { page ->
+                        val items = page.items.enrichWithPlaybackProgress()
+                        sourcePageStates[cacheKey] = SourcePageState(hasMore = page.hasMore, nextOffset = page.nextOffset ?: page.items.size)
                         sourceItemsCache[cacheKey] = items
                         if (_uiState.value.selectedSourceId == activeSource.id) {
                             _uiState.value = _uiState.value.copy(
                                 isLoading = false,
+                                hasMore = page.hasMore,
                                 movies = items.filter { it.mediaType == MOVIE },
                                 series = items.filter { it.mediaType == TV },
                                 error = null
@@ -699,9 +898,29 @@ class WatchlistViewModel @Inject constructor(
                         val baseItems = when (activeSource.provider) {
                             TrackerLibraryProvider.TRAKT -> {
                                 if (activeSource.listKey == TRAKT_WATCHLIST_KEY) {
-                                    traktRepository.getWatchlist()
+                                    traktRepository.libraryWatchlist()
                                 } else {
-                                    traktRepository.getPersonalListItems(activeSource.listKey)
+                                    traktRepository.libraryPersonalListItems(activeSource.listKey)
+                                }
+                            }
+                            TrackerLibraryProvider.MDBLIST -> if (activeSource.listKey == MDBLIST_STATUS_KEY) {
+                                // Throws again while MDBList is unreachable; once it answers,
+                                // the real lists replace this entry.
+                                personalListsRepository.mdbListLibraryLists()
+                                trackerListsReload.value++
+                                emptyList()
+                            } else {
+                                activeSource.listKey.toLongOrNull()
+                                    ?.let { personalListsRepository.mdbListItems(it) }
+                                    .orEmpty()
+                            }
+                            TrackerLibraryProvider.WETRAKR -> {
+                                val prefix = com.arflix.tv.data.repository.wetrakr.WeTrakrLists.LIST_KEY_PREFIX
+                                if (activeSource.listKey.startsWith(prefix)) {
+                                    activeSource.listKey.removePrefix(prefix).toLongOrNull()
+                                        ?.let { personalListsRepository.weTrakrListItems(it) }.orEmpty()
+                                } else {
+                                    weTrakr.getLibraryItems(activeSource.listKey, forceRefresh)
                                 }
                             }
                             TrackerLibraryProvider.SIMKL -> simklSyncService.getLibraryItems(
@@ -709,7 +928,7 @@ class WatchlistViewModel @Inject constructor(
                                 forceRefresh = forceRefresh
                             )
                         }
-                        hydrateTrackerItems(baseItems)
+                        baseItems.mapIndexed { index, item -> item.copy(sourceOrder = index) }
                     }.onSuccess { items ->
                         val enriched = items.enrichWithPlaybackProgress()
                         sourceItemsCache[cacheKey] = enriched
@@ -720,13 +939,24 @@ class WatchlistViewModel @Inject constructor(
                                 series = enriched.filter { it.mediaType == TV },
                                 error = null
                             )
-                            fetchLogos(enriched)
+                            fetchLogos(enriched.take(LIBRARY_LOGO_INITIAL_PREFETCH))
+                        }
+                        enriched.chunked(LIBRARY_PAGE_SIZE).forEach { batch ->
+                            val hydrated = hydrateTrackerItems(batch).associateBy(::watchlistLogoKey)
+                            val updated = sourceItemsCache[cacheKey].orEmpty().map { original ->
+                                hydrated[watchlistLogoKey(original)]?.copy(sourceOrder = original.sourceOrder,
+                                    progress = original.progress, isWatched = original.isWatched,
+                                    showPlaybackProgress = original.showPlaybackProgress) ?: original
+                            }
+                            sourceItemsCache[cacheKey] = updated
+                            if (_uiState.value.selectedSourceId == activeSource.id) _uiState.value = _uiState.value.copy(
+                                movies = updated.filter { it.mediaType == MOVIE }, series = updated.filter { it.mediaType == TV })
                         }
                     }.onFailure { error ->
                         if (_uiState.value.selectedSourceId == activeSource.id) {
                             _uiState.value = _uiState.value.copy(
                                 isLoading = false,
-                                error = error.message ?: context.getString(R.string.watchlist_error_refresh)
+                                error = trackerLoadError(activeSource.provider, error)
                             )
                         }
                     }
@@ -780,7 +1010,7 @@ class WatchlistViewModel @Inject constructor(
 
     private suspend fun hydrateTrackerItems(items: List<MediaItem>): List<MediaItem> = coroutineScope {
         val limiter = Semaphore(6)
-        items.take(TRACKER_LIST_ITEM_LIMIT).mapIndexed { index, item ->
+        items.mapIndexed { index, item ->
             async {
                 limiter.withPermit {
                     runCatching {
@@ -797,11 +1027,12 @@ class WatchlistViewModel @Inject constructor(
     }
 
     fun loadMoreActiveSource() {
-        val activeSource = _uiState.value.selectedSource as? WatchlistSourceItem.HomeServer ?: return
+        val activeSource = _uiState.value.selectedSource
+        if (activeSource !is WatchlistSourceItem.HomeServer && activeSource !is WatchlistSourceItem.Catalog) return
         val cacheKey = activeSource.id
         val pageState = sourcePageStates[cacheKey] ?: return
         val currentItems = sourceItemsCache[cacheKey].orEmpty()
-        if (!pageState.hasMore || pageState.isLoadingMore || currentItems.isEmpty()) return
+        if (!pageState.hasMore || pageState.isLoadingMore) return
 
         sourcePageStates[cacheKey] = pageState.copy(isLoadingMore = true)
         if (_uiState.value.selectedSourceId == cacheKey) {
@@ -810,8 +1041,9 @@ class WatchlistViewModel @Inject constructor(
         sourceLoadMoreJob?.cancel()
         sourceLoadMoreJob = viewModelScope.launch {
             runCatching {
-                mediaRepository.loadHomeServerLibraryPage(
-                    sourceRef = activeSource.candidate.sourceRef,
+                if (activeSource is WatchlistSourceItem.Catalog) mediaRepository.loadCustomCatalogPage(activeSource.config, pageState.nextOffset, LIBRARY_PAGE_SIZE)
+                else mediaRepository.loadHomeServerLibraryPage(
+                    sourceRef = (activeSource as WatchlistSourceItem.HomeServer).candidate.sourceRef,
                     offset = pageState.nextOffset,
                     limit = LIBRARY_PAGE_SIZE,
                     sort = HomeServerLibrarySort.RECENTLY_ADDED
@@ -826,24 +1058,26 @@ class WatchlistViewModel @Inject constructor(
                 val mergedItems = currentItems + freshItems
                 sourceItemsCache[cacheKey] = mergedItems
                 sourcePageStates[cacheKey] = SourcePageState(
-                    hasMore = page.hasMore && page.items.isNotEmpty(),
-                    nextOffset = pageState.nextOffset + page.items.size
+                    hasMore = page.hasMore && (page.nextOffset ?: (pageState.nextOffset + page.items.size)) > pageState.nextOffset,
+                    nextOffset = page.nextOffset ?: (pageState.nextOffset + page.items.size)
                 )
                 if (_uiState.value.selectedSourceId == cacheKey) {
                     _uiState.value = _uiState.value.copy(
                         movies = mergedItems.filter { it.mediaType == MOVIE },
                         series = mergedItems.filter { it.mediaType == TV },
-                        hasMore = page.hasMore && page.items.isNotEmpty(),
+                        hasMore = page.hasMore && (page.nextOffset ?: (pageState.nextOffset + page.items.size)) > pageState.nextOffset,
                         isLoadingMore = false,
                         error = null
                     )
                     fetchLogos(freshItems.take(LIBRARY_LOGO_INITIAL_PREFETCH))
                 }
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 sourcePageStates[cacheKey] = pageState.copy(isLoadingMore = false)
                 if (_uiState.value.selectedSourceId == cacheKey) {
                     _uiState.value = _uiState.value.copy(
                         isLoadingMore = false,
+                        error = error.message ?: context.getString(R.string.homeserver_connection_failed),
                         toastMessage = error.message ?: context.getString(R.string.homeserver_connection_failed),
                         toastType = ToastType.ERROR
                     )
@@ -884,40 +1118,95 @@ class WatchlistViewModel @Inject constructor(
         }.getOrDefault(this)
     }
 
-    private fun fetchLogos(items: List<MediaItem>) {
-        viewModelScope.launch {
-            val pending = items
-                .distinctBy(::watchlistLogoKey)
-                .filter { item ->
-                    val key = watchlistLogoKey(item)
-                    key !in _logoUrls.value && logoRequestsInFlight.add(key)
-                }
-            if (pending.isEmpty()) return@launch
+    private fun fetchLogos(items: List<MediaItem>) = prefetchLogos(items.take(LIBRARY_LOGO_INITIAL_PREFETCH))
 
-            val limiter = Semaphore(5)
-            val resolved = try {
-                coroutineScope {
-                    pending.map { item ->
-                        async {
-                            limiter.withPermit {
-                                watchlistLogoKey(item) to runCatching {
-                                    mediaRepository.getLogoUrl(item)
-                                }.getOrNull()
-                            }
-                        }
-                    }.awaitAll()
+    fun prefetchLogos(items: List<MediaItem>) {
+        items.distinctBy(::watchlistLogoKey).forEach { item ->
+            val key = watchlistLogoKey(item)
+            if (key in _logoUrls.value || !logoRequestsInFlight.add(key)) return@forEach
+            viewModelScope.launch {
+                try {
+                    val url = logoPermits.withPermit { mediaRepository.getLogoUrl(item) }
+                    if (url != null) {
+                        _logoUrls.value = _logoUrls.value + (key to url)
+                        val density = context.resources.displayMetrics.density
+                        val width = (220 * density).toInt().coerceAtLeast(1)
+                        val height = (64 * density).toInt().coerceAtLeast(1)
+                        context.imageLoader.enqueue(ImageRequest.Builder(context).data(url)
+                            .size(width, height).precision(Precision.INEXACT).allowHardware(true)
+                            .memoryCacheKey("$url|${width}x$height").build())
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // Transient failures remain retryable on the next viewport visit.
+                } finally {
+                    logoRequestsInFlight.remove(key)
                 }
-            } finally {
-                pending.forEach { logoRequestsInFlight.remove(watchlistLogoKey(it)) }
-            }
-            val found = resolved.mapNotNull { (key, url) -> url?.let { key to it } }.toMap()
-            if (found.isNotEmpty()) {
-                _logoUrls.value = _logoUrls.value + found
             }
         }
     }
 
-    fun ensureLogo(item: MediaItem) = fetchLogos(listOf(item))
+    fun ensureLogo(item: MediaItem) = prefetchLogos(listOf(item))
+
+    private val libraryPreviews = linkedMapOf<String, LibraryPreview>()
+
+    internal suspend fun loadLibraryImdbRating(item: MediaItem): String? {
+        val profile = profileManager.getProfileIdSync()
+        val key = "$profile:${libraryPreviewKey(item)}"
+        val preview = libraryPreviews[key] ?: LibraryPreview(item)
+        val rating = try {
+            mediaRepository.getImdbRating(preview.item)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { null }
+        if (rating != null && profileManager.getProfileIdSync() == profile) {
+            libraryPreviews[key]?.let { libraryPreviews[key] = it.copy(item = it.item.copy(imdbRating = rating)) }
+        }
+        return rating
+    }
+
+    internal suspend fun loadLibraryPreview(item: MediaItem): LibraryPreview {
+        val profile = profileManager.getProfileIdSync()
+        val key = "$profile:${libraryPreviewKey(item)}"
+        libraryPreviews[key]?.let { return it.copy(item = mergeLibraryPreview(item, it.item)) }
+        val details = if (item.id > 0 && !item.isHomeServer) try {
+            when (item.mediaType) {
+                MOVIE -> mediaRepository.getMovieDetails(item.id)
+                TV -> mediaRepository.getTvDetails(item.id)
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { null } else null
+        val preview = mergeLibraryPreview(item, details)
+        val provider = if (item.id > 0 && !item.isHomeServer) try {
+            mediaRepository.getStreamingServices(item.mediaType, item.id,
+                preferredRegion = java.util.Locale.getDefault().country)?.services?.firstOrNull()?.logoUrl
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { null } else item.primaryNetworkLogo
+        val result = LibraryPreview(preview, provider)
+        if (profileManager.getProfileIdSync() == profile && (details != null || item.isHomeServer || item.id <= 0)) {
+            if (libraryPreviews.size >= 80) libraryPreviews.remove(libraryPreviews.keys.first())
+            libraryPreviews[key] = result
+        }
+        return result
+    }
+
+    private val previewPermits = Semaphore(2)
+
+    /** A visible collection requests one cover without changing the active list. */
+    suspend fun collectionCover(source: WatchlistSourceItem): String? = previewPermits.withPermit {
+        val explicit = (source as? WatchlistSourceItem.Catalog)?.config?.collectionCoverImageUrl
+        explicit?.takeIf { it.isNotBlank() }
+            ?: sourceItemsCache[source.id]?.firstOrNull()?.let { it.backdrop ?: it.image }
+            ?: try {
+                val first = when(source) {
+                    is WatchlistSourceItem.Catalog -> mediaRepository.loadCustomCatalog(source.config, maxItems = 1)?.items?.firstOrNull()
+                    is WatchlistSourceItem.TrackerList -> traktRepository.getPersonalListItems(source.listKey).firstOrNull()
+                    else -> null
+                }
+                first?.let { it.backdrop ?: it.image }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { null }
+    }
 
     private fun loadWatchlistInstant() {
         sourceLoadJob = viewModelScope.launch {
@@ -1198,8 +1487,10 @@ class WatchlistViewModel @Inject constructor(
     private suspend fun syncTraktWatchlistSuspend(): Boolean {
         if (traktSyncInFlight) return true
         traktSyncInFlight = true
+        val requestedProfileId = profileManager.getProfileIdSync()
         return try {
             val syncResult = remoteSyncManager.getWatchlist()
+            if (profileManager.getProfileIdSync() != requestedProfileId) return false
             if (syncResult == null || !syncResult.connected) {
                 false
             } else {
@@ -1208,7 +1499,7 @@ class WatchlistViewModel @Inject constructor(
                 if (traktItems.isNotEmpty()) {
                     watchlistRepository.clearWatchlistCache()
                     val orderedTraktItems = traktItems.watchlistDisplayOrder()
-                    watchlistRepository.syncFromTraktOrder(orderedTraktItems)
+                    watchlistRepository.syncFromTraktOrder(orderedTraktItems, requestedProfileId)
                     val mergedItems = watchlistRepository.getLocalWatchlistItems().watchlistDisplayOrder().enrichWithPlaybackProgress()
                     sourceItemsCache[WatchlistSourceItem.MyWatchlist.id] = mergedItems
                     if (_uiState.value.selectedSourceId == WatchlistSourceItem.MyWatchlist.id) {
@@ -1269,14 +1560,17 @@ class WatchlistViewModel @Inject constructor(
         private const val LIBRARY_PAGE_SIZE = 60
         private const val LIBRARY_LOGO_INITIAL_PREFETCH = 12
         private const val LIBRARY_CACHE_ENTRY_LIMIT = 12
-        private const val TRACKER_LIST_ITEM_LIMIT = 240
         private const val TRAKT_WATCHLIST_KEY = "__watchlist__"
+        /** The one MDBList entry shown while its lists cannot be read. */
+        private const val MDBLIST_STATUS_KEY = "__mdblist_status__"
+        // The status keys stay English so the Simkl API calls keep working;
+        // only the rendered list title is localized.
         private val SIMKL_LIBRARY_LISTS = listOf(
-            "watching" to "Watching",
-            "plantowatch" to "Plan to watch",
-            "completed" to "Completed",
-            "hold" to "On hold",
-            "dropped" to "Dropped"
+            Triple("watching", "Watching", R.string.watchlist_simkl_watching),
+            Triple("plantowatch", "Plan to watch", R.string.watchlist_simkl_plan_to_watch),
+            Triple("completed", "Completed", R.string.watchlist_simkl_completed),
+            Triple("hold", "On hold", R.string.watchlist_simkl_on_hold),
+            Triple("dropped", "Dropped", R.string.watchlist_simkl_dropped)
         )
         private val BROWSABLE_LIBRARY_TYPES = setOf(
             "",

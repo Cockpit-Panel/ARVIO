@@ -1,0 +1,226 @@
+[
+  {
+    "code": "af-ZA",
+    "label": "Afrikaans"
+  },
+  {
+    "code": "sq-AL",
+    "label": "Albanian (Shqip)"
+  },
+  {
+    "code": "ar-SA",
+    "label": "Arabic"
+  },
+  {
+    "code": "eu-ES",
+    "label": "Basque (Euskara)"
+  },
+  {
+    "code": "bn-BD",
+    "label": "Bengali"
+  },
+  {
+    "code": "bg-BG",
+    "label": "Bulgarian"
+  },
+  {
+    "code": "ca-ES",
+    "label": "Catalan"
+  },
+  {
+    "code": "zh-CN",
+    "label": "Chinese (Simplified)"
+  },
+  {
+    "code": "zh-TW",
+    "label": "Chinese (Traditional)"
+  },
+  {
+    "code": "hr-HR",
+    "label": "Croatian (Hrvatski)"
+  },
+  {
+    "code": "cs-CZ",
+    "label": "Czech (Cesky)"
+  },
+  {
+    "code": "da-DK",
+    "label": "Danish (Dansk)"
+  },
+  {
+    "code": "nl-NL",
+    "label": "Dutch (Nederlands)"
+  },
+  {
+    "code": "en-US",
+    "label": "English"
+  },
+  {
+    "code": "et-EE",
+    "label": "Estonian"
+  },
+  {
+    "code": "tl-PH",
+    "label": "Filipino/Tagalog"
+  },
+  {
+    "code": "fi-FI",
+    "label": "Finnish (Suomi)"
+  },
+  {
+    "code": "fr-FR",
+    "label": "French (Francais)"
+  },
+  {
+    "code": "gl-ES",
+    "label": "Galician (Galego)"
+  },
+  {
+    "code": "de-DE",
+    "label": "German (Deutsch)"
+  },
+  {
+    "code": "el-GR",
+    "label": "Greek"
+  },
+  {
+    "code": "gu-IN",
+    "label": "Gujarati"
+  },
+  {
+    "code": "he-IL",
+    "label": "Hebrew"
+  },
+  {
+    "code": "hi-IN",
+    "label": "Hindi"
+  },
+  {
+    "code": "hu-HU",
+    "label": "Hungarian (Magyar)"
+  },
+  {
+    "code": "id-ID",
+    "label": "Indonesian"
+  },
+  {
+    "code": "it-IT",
+    "label": "Italian (Italiano)"
+  },
+  {
+    "code": "ja-JP",
+    "label": "Japanese"
+  },
+  {
+    "code": "kn-IN",
+    "label": "Kannada"
+  },
+  {
+    "code": "ko-KR",
+    "label": "Korean"
+  },
+  {
+    "code": "lv-LV",
+    "label": "Latvian"
+  },
+  {
+    "code": "lt-LT",
+    "label": "Lithuanian"
+  },
+  {
+    "code": "ms-MY",
+    "label": "Malay"
+  },
+  {
+    "code": "ml-IN",
+    "label": "Malayalam"
+  },
+  {
+    "code": "mr-IN",
+    "label": "Marathi"
+  },
+  {
+    "code": "no-NO",
+    "label": "Norwegian (Norsk)"
+  },
+  {
+    "code": "fa-IR",
+    "label": "Persian (Farsi)"
+  },
+  {
+    "code": "pl-PL",
+    "label": "Polish (Polski)"
+  },
+  {
+    "code": "pt-PT",
+    "label": "Portuguese (Portugues)"
+  },
+  {
+    "code": "pt-BR",
+    "label": "Português (Brasil)"
+  },
+  {
+    "code": "pa-IN",
+    "label": "Punjabi"
+  },
+  {
+    "code": "ro-RO",
+    "label": "Romanian (Romana)"
+  },
+  {
+    "code": "ru-RU",
+    "label": "Russian"
+  },
+  {
+    "code": "sr-RS",
+    "label": "Serbian (Srpski)"
+  },
+  {
+    "code": "sk-SK",
+    "label": "Slovak (Slovensky)"
+  },
+  {
+    "code": "sl-SI",
+    "label": "Slovenian (Slovenscina)"
+  },
+  {
+    "code": "es-ES",
+    "label": "Spanish (Espanol)"
+  },
+  {
+    "code": "sw-KE",
+    "label": "Swahili"
+  },
+  {
+    "code": "sv-SE",
+    "label": "Swedish (Svenska)"
+  },
+  {
+    "code": "ta-IN",
+    "label": "Tamil"
+  },
+  {
+    "code": "te-IN",
+    "label": "Telugu"
+  },
+  {
+    "code": "th-TH",
+    "label": "Thai"
+  },
+  {
+    "code": "tr-TR",
+    "label": "Turkish (Turkce)"
+  },
+  {
+    "code": "uk-UA",
+    "label": "Ukrainian"
+  },
+  {
+    "code": "ur-PK",
+    "label": "Urdu"
+  },
+  {
+    "code": "vi-VN",
+    "label": "Vietnamese"
+  }
+]

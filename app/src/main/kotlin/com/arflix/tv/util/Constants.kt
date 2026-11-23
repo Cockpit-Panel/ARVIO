@@ -60,6 +60,8 @@ object Constants {
     val TRAKT_CLIENT_SECRET: String
         get() = usableSecret(BuildConfig.TRAKT_CLIENT_SECRET)
     val SIMKL_CLIENT_ID: String get() = usableSecret(BuildConfig.SIMKL_CLIENT_ID)
+    val SIMKL_V2_CLIENT_ID: String get() = usableSecret(BuildConfig.SIMKL_V2_CLIENT_ID)
+    val MDBLIST_CLIENT_ID: String get() = usableSecret(BuildConfig.MDBLIST_CLIENT_ID)
 
     // Image URLs - tuned for TV quality with smooth scrolling/perf.
     const val IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
@@ -79,6 +81,20 @@ object Constants {
     const val MIN_PROGRESS_THRESHOLD = 3
     const val MAX_PROGRESS_ENTRIES = 50
     const val MAX_CONTINUE_WATCHING = 50
+
+    /**
+     * How far ahead of a saved position a tracker has to be before that position
+     * is treated as stale.
+     *
+     * A saved position is exact and normally beats the tracker's percentage. But
+     * clients that are not ARVIO — Plex, Infuse, Trakt's own apps — move the
+     * tracker on without writing one, so a position left here by an earlier
+     * session can be far behind what every other client shows. Recency decides
+     * it, with a margin comfortably wider than the gap between a playback
+     * heartbeat and the local save it accompanies, so a device writing both
+     * never invalidates its own position.
+     */
+    const val TRACKER_OVERRIDES_LOCAL_POSITION_AFTER_MS = 2 * 60_000L
 
     // Preferences keys.
     const val PREFS_NAME = "arflix_prefs"

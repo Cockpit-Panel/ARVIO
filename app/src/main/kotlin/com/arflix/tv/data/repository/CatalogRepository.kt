@@ -1,7 +1,9 @@
 package com.arflix.tv.data.repository
 
 import android.content.Context
+import androidx.annotation.StringRes
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.edit
 import com.arflix.tv.data.api.TraktApi
@@ -35,11 +37,16 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
+import com.arflix.tv.BuildConfig
 import kotlinx.coroutines.withContext
 import com.arflix.tv.network.OkHttpProvider
+import okhttp3.CacheControl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -47,16 +54,35 @@ import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * Failure of a catalog operation, carrying the string resource instead of a
+ * finished message.
+ *
+ * The repository only has the application context, whose resources follow the
+ * system language rather than the language selected in the app, so the text is
+ * resolved at the @Composable display point (see SettingsScreen).
+ */
+class CatalogException(
+    @param:StringRes val messageRes: Int,
+    val formatArgs: List<Any> = emptyList()
+) : Exception()
+
 @Singleton
 class CatalogRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val profileManager: ProfileManager,
     private val traktApi: TraktApi,
     private val okHttpClient: OkHttpClient,
-    private val invalidationBus: CloudSyncInvalidationBus
+    private val invalidationBus: CloudSyncInvalidationBus,
+    private val simklListsRepository: com.arflix.tv.data.repository.simkl.SimklListsRepository? = null,
+    private val partnerDelivery: dagger.Lazy<PartnerDeliveryRepository>? = null
 ) {
-    private val bundledPreinstalledCatalogsById by lazy(LazyThreadSafetyMode.NONE) {
-        MediaRepository.buildPreinstalledDefaults().associateBy { it.id }
+    private val bundledPreinstalledCatalogsById by lazy {
+        // Imported collections change at runtime, so they must not be frozen into
+        // this snapshot (a stale copy would fight ensurePreinstalledDefaults).
+        MediaRepository.buildPreinstalledDefaults()
+            .filterNot { it.packId?.startsWith(CustomCollections.PACK_ID_PREFIX) == true }
+            .associateBy { it.id }
     }
 
     // Debounce guard: skip syncAddonCatalogs() when addon list hasn't changed.
@@ -65,7 +91,7 @@ class CatalogRepository @Inject constructor(
     // installed addon list is identical between calls.
     @Volatile private var lastSyncedAddonFingerprint: String? = null
 
-    private val bundledPreinstalledCatalogIds by lazy(LazyThreadSafetyMode.NONE) {
+    private val bundledPreinstalledCatalogIds by lazy {
         bundledPreinstalledCatalogsById.keys
     }
 
@@ -79,6 +105,59 @@ class CatalogRepository @Inject constructor(
     private val listType = TypeToken.getParameterized(List::class.java, CatalogConfig::class.java).type
     private val hiddenListType = TypeToken.getParameterized(List::class.java, String::class.java).type
 
+    private fun writeCatalogField(prefs: MutablePreferences, profileId: String, field: String, json: String, stampChange: Boolean = true) {
+        val key = catalogFieldKey(profileId, field)
+        if (prefs[key] == json) return
+        prefs[key] = json
+        if (field == "catalogsByProfile") pruneKidsListApprovals(prefs, profileId, json)
+        if (stampChange) CatalogCloudFields.stamp(prefs, profileId, field, json)
+    }
+
+    private fun catalogFieldKey(profileId: String, field: String) = when (field) {
+        "catalogsByProfile" -> catalogsKey(profileId)
+        "hiddenPreinstalledByProfile" -> hiddenPreinstalledKey(profileId)
+        "hiddenAddonByProfile" -> hiddenAddonKey(profileId)
+        "hiddenHomeServerByProfile" -> hiddenHomeServerKey(profileId)
+        else -> error("Unknown catalog field: $field")
+    }
+
+    /** Recheck clocks inside the same transaction as the restore, not before a network request. */
+    internal suspend fun applyCloudCatalogs(profileId: String, fields: Map<String, String>, timestamps: JSONObject): Boolean {
+        var preservedLocal = false
+        context.settingsDataStore.edit { prefs ->
+            val existingById = readCatalogsFromPrefs(profileId, prefs).associateBy { it.id }
+            for ((field, json) in fields) {
+                if (CatalogCloudFields.isNewerLocal(prefs, profileId, field, timestamps)) {
+                    preservedLocal = true
+                    continue
+                }
+                val normalized = if (field == "catalogsByProfile") {
+                    val incomingList = parseCatalogsJson(json).distinctBy { it.id }.map { item ->
+                        val prev = existingById[item.id]
+                        if (prev != null &&
+                            item.sourceType == CatalogSourceType.ADDON &&
+                            item.addonCatalogId == prev.addonCatalogId
+                        ) {
+                            item.copy(
+                                clientDelegate = item.clientDelegate ?: prev.clientDelegate,
+                                clientFilter = item.clientFilter ?: prev.clientFilter
+                            )
+                        } else {
+                            item
+                        }
+                    }
+                    gson.toJson(incomingList)
+                } else {
+                    gson.toJson(gson.fromJson<List<String>>(json, hiddenListType).orEmpty().distinct())
+                }
+                writeCatalogField(prefs, profileId, field, normalized, stampChange = false)
+                CatalogCloudFields.recordRemote(prefs, profileId, field, normalized, timestamps)
+            }
+        }
+        lastSyncedAddonFingerprint = null
+        return preservedLocal
+    }
+
     private fun decodeHiddenPreinstalled(profileId: String, prefs: Preferences): Set<String> {
         val raw = prefs[hiddenPreinstalledKey(profileId)]
         if (raw.isNullOrBlank()) return emptySet()
@@ -87,6 +166,7 @@ class CatalogRepository @Inject constructor(
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
                 .toSet()
+                .let(ArvioCollections::preserveDisabledDefaults)
         } catch (e: Exception) {
             AppLogger.e("CatalogRepository", "Error fetching data, returning empty set", e)
             emptySet()
@@ -121,48 +201,33 @@ class CatalogRepository @Inject constructor(
         }
     }
 
-    private suspend fun hidePreinstalledCatalog(profileId: String, catalogId: String) {
-        val trimmed = catalogId.trim()
-        if (trimmed.isBlank()) return
-        context.settingsDataStore.edit { prefs ->
-            val hidden = decodeHiddenPreinstalled(profileId, prefs).toMutableSet()
-            hidden.add(trimmed)
-            prefs[hiddenPreinstalledKey(profileId)] = gson.toJson(hidden.toList())
-        }
-        invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "hide preinstalled catalog")
-    }
-
-    private suspend fun hideAddonCatalog(profileId: String, catalogId: String) {
-        val trimmed = catalogId.trim()
-        if (trimmed.isBlank()) return
-        context.settingsDataStore.edit { prefs ->
-            val hidden = decodeHiddenAddon(profileId, prefs).toMutableSet()
-            hidden.add(trimmed)
-            prefs[hiddenAddonKey(profileId)] = gson.toJson(hidden.toList())
-        }
-        invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "hide addon catalog")
-    }
-
-    private suspend fun hideHomeServerCatalog(profileId: String, catalogId: String) {
-        val trimmed = catalogId.trim()
-        if (trimmed.isBlank()) return
-        context.settingsDataStore.edit { prefs ->
-            val hidden = decodeHiddenHomeServer(profileId, prefs).toMutableSet()
-            hidden.add(trimmed)
-            prefs[hiddenHomeServerKey(profileId)] = gson.toJson(hidden.toList())
-        }
-        invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "hide home server catalog")
-    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     fun observeCatalogs(): Flow<List<CatalogConfig>> {
+        val personal = observePersonalCatalogs()
+        if (!BuildConfig.PARTNER_MANAGEMENT_ENABLED || partnerDelivery == null) return personal
+        return combine(personal, partnerDelivery.get().deliveries, PartnerCatalogs::overlay).distinctUntilChanged()
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun observePersonalCatalogs(): Flow<List<CatalogConfig>> {
         return profileManager.activeProfileId
             .flatMapLatest { profileId ->
-                context.settingsDataStore.data.map { prefs ->
-                    readCatalogsFromPrefs(profileId, prefs)
-                }
+                context.settingsDataStore.data
+                    // Unrelated settings/sync writes must not reparse the entire catalog JSON.
+                    .distinctUntilChanged { previous, current ->
+                        catalogSettingsUnchanged(profileId, previous, current)
+                    }
+                    .map { prefs -> readCatalogsFromPrefs(profileId, prefs) }
             }
             .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+    }
+
+    internal fun catalogSettingsUnchanged(profileId: String, previous: Preferences, current: Preferences): Boolean {
+        val keys = listOf(catalogsKey(profileId), hiddenPreinstalledKey(profileId),
+            hiddenAddonKey(profileId), hiddenHomeServerKey(profileId), legacyDefaultKey, legacyGlobalKey)
+        return keys.all { previous[it] == current[it] }
     }
 
     private suspend fun activeProfileId(): String {
@@ -178,21 +243,159 @@ class CatalogRepository @Inject constructor(
             parseCatalogsJson(prefs[catalogsKey(profileId)]).distinctBy { it.id }
         )
         val resolved = sanitizeCollectionCatalogs(readCatalogsFromPrefs(profileId, prefs))
-        // One-time migration/sync for old keys and merged legacy custom entries.
+        // Migrate legacy keys only while the captured profile state is still current.
         if (resolved.isNotEmpty() && resolved != primary) {
-            saveCatalogs(resolved)
+            if (!saveCatalogs(resolved, prefs, profileId)) return getCatalogsForProfile(profileId)
         }
         return resolved
     }
 
     suspend fun getCatalogs(): List<CatalogConfig> {
-        return readCatalogsForActiveProfile()
+        return PartnerCatalogs.overlay(getPersonalCatalogs(), managedDelivery())
     }
+
+    suspend fun getPersonalCatalogs(): List<CatalogConfig> = readCatalogsForActiveProfile()
+
+    private fun managedDelivery(): PartnerIptvDelivery? =
+        if (BuildConfig.PARTNER_MANAGEMENT_ENABLED) partnerDelivery?.get()?.activeDelivery() else null
 
     suspend fun getCatalogsForProfile(profileId: String): List<CatalogConfig> {
         val safeProfileId = profileId.trim().ifBlank { "default" }
         val prefs = context.settingsDataStore.data.first()
         return sanitizeCollectionCatalogs(readCatalogsFromPrefs(safeProfileId, prefs))
+    }
+
+    private fun pruneKidsListApprovals(prefs: MutablePreferences, profileId: String, catalogsJson: String) {
+        val key = KidsTrustedTitles.preferenceKey(profileId)
+        val approved = prefs[key] ?: return
+        val remaining = KidsTrustedTitles.retainRows(approved, parseCatalogsJson(catalogsJson))
+        if (remaining != approved) prefs[key] = remaining
+    }
+
+    internal fun observeKidsListApprovals(profileId: String): Flow<Set<String>> {
+        val key = KidsTrustedTitles.preferenceKey(profileId)
+        return context.settingsDataStore.data.map { it[key].orEmpty() }.distinctUntilChanged().map(KidsTrustedTitles::keys)
+    }
+
+    internal suspend fun beginKidsListRefresh(catalog: CatalogConfig): KidsListRefresh? {
+        if (!KidsTrustedTitles.isTrustedSource(catalog)) return null
+        val profile = profileManager.getActiveProfile()?.takeIf { it.isKidsProfile } ?: return null
+        val entries = context.settingsDataStore.data.first()[KidsTrustedTitles.preferenceKey(profile.id)].orEmpty()
+        val approved = KidsTrustedTitles.forRow(entries, catalog)
+        return approved.takeIf { it.isNotEmpty() }?.let { KidsListRefresh(profile.id, it) }
+    }
+
+    internal suspend fun finishKidsListRefresh(
+        refresh: KidsListRefresh, catalog: CatalogConfig, refs: List<Pair<com.arflix.tv.data.model.MediaType, Int>>
+    ) {
+        if (profileManager.getActiveProfile()?.id != refresh.profileId) return
+        val key = KidsTrustedTitles.preferenceKey(refresh.profileId)
+        context.settingsDataStore.edit { prefs ->
+            val approved = prefs[key].orEmpty()
+            val remaining = KidsTrustedTitles.retainMembers(approved, catalog, refresh.previouslyApproved, refs)
+            if (approved != remaining) prefs[key] = remaining
+        }
+    }
+
+    internal suspend fun beginKidsListApproval(profileId: String, catalog: CatalogConfig, pin: String): KidsListApprovalSession {
+        val profile = profileManager.getActiveProfile()
+        if (profile?.id != profileId || !profile.isKidsProfile) throw CatalogException(R.string.kids_list_approval_changed)
+        val hash = profile.parentPin
+        if (hash.isNullOrBlank() || !com.arflix.tv.util.PinUtil.verifyPin(pin, hash)) {
+            throw CatalogException(R.string.kids_list_approval_pin_required)
+        }
+        val session = KidsListApprovalSession(profileId, catalog, hash)
+        checkKidsListApproval(session)
+        return session
+    }
+
+    internal suspend fun checkKidsListApproval(session: KidsListApprovalSession) {
+        val profile = profileManager.getActiveProfile()
+        if (profile?.id != session.profileId || !profile.isKidsProfile || profile.parentPin != session.parentPinHash ||
+            managedDelivery()?.permissions?.editCatalogs == false ||
+            !hasKidsApprovalRow(getCatalogsForProfile(session.profileId), session.catalog)) {
+            throw CatalogException(R.string.kids_list_approval_changed)
+        }
+    }
+
+    private fun hasKidsApprovalRow(catalogs: List<CatalogConfig>, expected: CatalogConfig): Boolean {
+        val row = KidsTrustedTitles.rowKey(expected)
+        return catalogs.any { KidsTrustedTitles.isTrustedSource(it) && KidsTrustedTitles.rowKey(it) == row }
+    }
+
+    internal suspend fun saveKidsListApproval(session: KidsListApprovalSession, type: com.arflix.tv.data.model.MediaType, id: Int) {
+        checkKidsListApproval(session)
+        context.settingsDataStore.edit { prefs ->
+            val catalogs = readCatalogsFromPrefs(session.profileId, prefs)
+            if (!hasKidsApprovalRow(catalogs, session.catalog)) throw CatalogException(R.string.kids_list_approval_changed)
+            val key = KidsTrustedTitles.preferenceKey(session.profileId)
+            prefs[key] = prefs[key].orEmpty() + KidsTrustedTitles.entry(session.catalog, type, id)
+        }
+    }
+
+    /** Title keys ("TV/-123") that a parent-approved addon catalog listed on [profileId]. */
+    internal fun observeKidsCatalogMembers(profileId: String): Flow<Set<String>> {
+        val key = KidsTrustedCatalogs.membersKey(profileId)
+        return context.settingsDataStore.data.map { it[key].orEmpty() }.distinctUntilChanged()
+            .map(KidsTrustedCatalogs::titleKeys)
+    }
+
+    internal suspend fun kidsCatalogApprovals(profileId: String): Set<String> =
+        context.settingsDataStore.data.first()[KidsTrustedCatalogs.approvalsKey(profileId)].orEmpty()
+
+    /** The active profile's catalog approvals when it is a kids profile; empty for any other. */
+    internal suspend fun activeKidsCatalogApprovals(): Set<String> {
+        val profile = profileManager.getActiveProfile()?.takeIf { it.isKidsProfile } ?: return emptySet()
+        return kidsCatalogApprovals(profile.id)
+    }
+
+    /**
+     * Records the titles a page of an addon catalog listed, when the active profile is a kids
+     * profile that approved that catalog (see [KidsTrustedCatalogs]). Anything else is ignored.
+     */
+    internal suspend fun recordKidsCatalogMembers(catalogKey: String, refs: List<Pair<com.arflix.tv.data.model.MediaType, Int>>) {
+        if (refs.isEmpty()) return
+        val profile = profileManager.getActiveProfile()?.takeIf { it.isKidsProfile } ?: return
+        if (catalogKey !in kidsCatalogApprovals(profile.id)) return
+        val fresh = refs.map { (type, id) -> KidsTrustedCatalogs.member(catalogKey, type, id) }
+        context.settingsDataStore.edit { prefs ->
+            // Approval may have been removed meanwhile; it is checked again inside the write.
+            if (catalogKey !in prefs[KidsTrustedCatalogs.approvalsKey(profile.id)].orEmpty()) return@edit
+            val key = KidsTrustedCatalogs.membersKey(profile.id)
+            val current = prefs[key].orEmpty()
+            if (current.containsAll(fresh)) return@edit
+            val merged = LinkedHashSet<String>(current.size + fresh.size).apply { addAll(current); addAll(fresh) }
+            prefs[key] = if (merged.size <= KidsTrustedCatalogs.MAX_MEMBERS) merged
+                else merged.toList().takeLast(KidsTrustedCatalogs.MAX_MEMBERS).toSet()
+        }
+    }
+
+    /**
+     * Approves [catalogKeys] for the active kids profile, or removes their approval (and every
+     * title they let through). Needs that profile's parent PIN either way.
+     */
+    internal suspend fun setKidsCatalogApproval(profileId: String, catalogKeys: List<String>, approve: Boolean, pin: String) {
+        val profile = profileManager.getActiveProfile()
+        if (profile?.id != profileId || !profile.isKidsProfile || catalogKeys.isEmpty()) {
+            throw CatalogException(R.string.kids_list_approval_changed)
+        }
+        val hash = profile.parentPin
+        if (hash.isNullOrBlank() || !com.arflix.tv.util.PinUtil.verifyPin(pin, hash)) {
+            throw CatalogException(R.string.kids_list_approval_pin_required)
+        }
+        if (managedDelivery()?.permissions?.editCatalogs == false) throw CatalogException(R.string.kids_list_approval_changed)
+        context.settingsDataStore.edit { prefs ->
+            val approvals = KidsTrustedCatalogs.approvalsKey(profileId)
+            val members = KidsTrustedCatalogs.membersKey(profileId)
+            if (approve) {
+                prefs[approvals] = prefs[approvals].orEmpty() + catalogKeys
+            } else {
+                prefs[approvals] = prefs[approvals].orEmpty() - catalogKeys.toSet()
+                prefs[members] = KidsTrustedCatalogs.withoutCatalogs(prefs[members].orEmpty(), catalogKeys)
+            }
+        }
+        // Approvals ride the profile's cloud settings, so the other devices follow.
+        invalidationBus.markDirty(CloudSyncScope.PROFILE_SETTINGS, profileId, "kids catalog approval")
     }
 
     private fun isBundledPreinstalledCatalogId(catalogId: String): Boolean {
@@ -238,11 +441,7 @@ class CatalogRepository @Inject constructor(
         val profileId = activeProfileId()
         val cleaned = ids.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         context.settingsDataStore.edit { prefs ->
-            if (cleaned.isEmpty()) {
-                prefs[hiddenPreinstalledKey(profileId)] = ""
-            } else {
-                prefs[hiddenPreinstalledKey(profileId)] = gson.toJson(cleaned)
-            }
+            writeCatalogField(prefs, profileId, "hiddenPreinstalledByProfile", gson.toJson(cleaned))
         }
         invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "set hidden preinstalled catalogs")
     }
@@ -251,11 +450,7 @@ class CatalogRepository @Inject constructor(
         val safeProfileId = profileId.trim().ifBlank { "default" }
         val cleaned = ids.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         context.settingsDataStore.edit { prefs ->
-            if (cleaned.isEmpty()) {
-                prefs[hiddenPreinstalledKey(safeProfileId)] = ""
-            } else {
-                prefs[hiddenPreinstalledKey(safeProfileId)] = gson.toJson(cleaned)
-            }
+            writeCatalogField(prefs, safeProfileId, "hiddenPreinstalledByProfile", gson.toJson(cleaned))
         }
         invalidationBus.markDirty(CloudSyncScope.CATALOGS, safeProfileId, "set hidden preinstalled catalogs")
     }
@@ -276,11 +471,7 @@ class CatalogRepository @Inject constructor(
         val profileId = activeProfileId()
         val cleaned = ids.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         context.settingsDataStore.edit { prefs ->
-            if (cleaned.isEmpty()) {
-                prefs[hiddenAddonKey(profileId)] = ""
-            } else {
-                prefs[hiddenAddonKey(profileId)] = gson.toJson(cleaned)
-            }
+            writeCatalogField(prefs, profileId, "hiddenAddonByProfile", gson.toJson(cleaned))
         }
         invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "set hidden addon catalogs")
     }
@@ -289,13 +480,32 @@ class CatalogRepository @Inject constructor(
         val safeProfileId = profileId.trim().ifBlank { "default" }
         val cleaned = ids.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         context.settingsDataStore.edit { prefs ->
-            if (cleaned.isEmpty()) {
-                prefs[hiddenAddonKey(safeProfileId)] = ""
-            } else {
-                prefs[hiddenAddonKey(safeProfileId)] = gson.toJson(cleaned)
-            }
+            writeCatalogField(prefs, safeProfileId, "hiddenAddonByProfile", gson.toJson(cleaned))
         }
         invalidationBus.markDirty(CloudSyncScope.CATALOGS, safeProfileId, "set hidden addon catalogs")
+    }
+
+    /**
+     * Un-deletes [addon]'s rows for the active profile. Row ids are stable per addon +
+     * catalog, so rows deleted under an earlier install would otherwise stay hidden after
+     * the user installs the addon again. Call before [syncAddonCatalogs].
+     */
+    suspend fun restoreHiddenAddonCatalogs(addon: Addon) {
+        val rowIds = addon.manifest?.catalogs.orEmpty()
+            .mapNotNull { buildAddonCatalogConfig(addon, it)?.id }
+            .toSet()
+        if (rowIds.isEmpty()) return
+        val profileId = activeProfileId()
+        var restored = false
+        context.settingsDataStore.edit { prefs ->
+            val hidden = decodeHiddenAddon(profileId, prefs)
+            if (hidden.none { it in rowIds }) return@edit
+            writeCatalogField(prefs, profileId, "hiddenAddonByProfile", gson.toJson((hidden - rowIds).toList()))
+            restored = true
+        }
+        if (!restored) return
+        lastSyncedAddonFingerprint = null
+        invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "restore reinstalled addon catalogs")
     }
 
     suspend fun getHiddenHomeServerCatalogIdsForProfile(profileId: String): List<String> {
@@ -308,33 +518,41 @@ class CatalogRepository @Inject constructor(
         val safeProfileId = profileId.trim().ifBlank { "default" }
         val cleaned = ids.map { it.trim() }.filter { it.isNotBlank() }.distinct()
         context.settingsDataStore.edit { prefs ->
-            if (cleaned.isEmpty()) {
-                prefs[hiddenHomeServerKey(safeProfileId)] = ""
-            } else {
-                prefs[hiddenHomeServerKey(safeProfileId)] = gson.toJson(cleaned)
-            }
+            writeCatalogField(prefs, safeProfileId, "hiddenHomeServerByProfile", gson.toJson(cleaned))
         }
         invalidationBus.markDirty(CloudSyncScope.CATALOGS, safeProfileId, "set hidden home server catalogs")
     }
 
-    private suspend fun saveCatalogs(catalogs: List<CatalogConfig>) {
-        val profileId = activeProfileId()
-        val sanitized = catalogs
+    private suspend fun saveCatalogs(catalogs: List<CatalogConfig>, expected: Preferences? = null, targetProfileId: String? = null): Boolean {
+        if (expected == null && managedDelivery()?.permissions?.editCatalogs == false) return false
+        val profileId = targetProfileId ?: activeProfileId()
+        val sanitized = catalogs.filterNot { PartnerCatalogs.isManaged(it.id) }
             .distinctBy { it.id }
             .mapNotNull { normalizeCatalogConfig(it) }
+        var saved = false
         context.settingsDataStore.edit { prefs ->
-            prefs[catalogsKey(profileId)] = gson.toJson(sanitized)
+            // A background refresh must not overwrite edits made since it read the list.
+            if (expected != null && CatalogCloudFields.fields.any {
+                val key = catalogFieldKey(profileId, it)
+                prefs[key] != expected[key]
+            }) return@edit
+            // Initial automatic setup is not a user edit and must not outrank cloud choices.
+            val stampChange = expected == null || CatalogCloudFields.hasBaseline(prefs, profileId, "catalogsByProfile")
+            writeCatalogField(prefs, profileId, "catalogsByProfile", gson.toJson(sanitized), stampChange)
+            saved = true
         }
-        invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "save catalogs")
+        if (saved) invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "save catalogs")
+        return saved
     }
 
     suspend fun replaceCatalogsForProfile(profileId: String, catalogs: List<CatalogConfig>) {
+        if (managedDelivery()?.permissions?.editCatalogs == false) return
         val safeProfileId = profileId.trim().ifBlank { "default" }
-        val sanitized = catalogs
+        val sanitized = catalogs.filterNot { PartnerCatalogs.isManaged(it.id) }
             .distinctBy { it.id }
             .mapNotNull { normalizeCatalogConfig(it) }
         context.settingsDataStore.edit { prefs ->
-            prefs[catalogsKey(safeProfileId)] = gson.toJson(sanitized)
+            writeCatalogField(prefs, safeProfileId, "catalogsByProfile", gson.toJson(sanitized))
         }
         invalidationBus.markDirty(CloudSyncScope.CATALOGS, safeProfileId, "replace catalogs")
     }
@@ -362,9 +580,9 @@ class CatalogRepository @Inject constructor(
         }
 
         val defaultIds = defaultPreinstalled.map { it.id }.toSet()
-        val existing = getCatalogs().mapNotNull { cfg ->
+        val existing = readCatalogsFromPrefs(profileId, prefs).mapNotNull { cfg ->
             if ((cfg.kind == CatalogKind.COLLECTION || cfg.kind == CatalogKind.COLLECTION_RAIL) &&
-                !defaultIds.contains(cfg.id)
+                !defaultIds.contains(cfg.id) && !CustomCollections.isCustom(cfg)
             ) {
                 return@mapNotNull null
             }
@@ -435,25 +653,25 @@ class CatalogRepository @Inject constructor(
         }
 
         if (existing != merged) {
-            saveCatalogs(merged)
+            if (!saveCatalogs(merged, prefs, profileId)) return getCatalogsForProfile(profileId)
         }
         return merged
     }
 
     suspend fun syncAddonCatalogs(addons: List<Addon>): Boolean {
+        val personalAddons = addons.filterNot { PartnerCatalogs.isManaged(it.id) }
         val profileId = activeProfileId()
         // Debounce: skip if addon manifest state hasn't changed since last sync.
         // Includes profile ID + fields that affect the sync outcome so that
         // switching profiles, toggling addon enable-state, or manifest catalog
         // changes always trigger a fresh sync.
-        val fingerprint = buildAddonFingerprint(profileId, addons)
+        val fingerprint = buildAddonFingerprint(profileId, personalAddons)
         if (fingerprint == lastSyncedAddonFingerprint) return false
         lastSyncedAddonFingerprint = fingerprint
 
-        val hiddenAddonIds = context.settingsDataStore.data
-            .first()
-            .let { prefs -> decodeHiddenAddon(profileId, prefs) }
-        val supportedCatalogs = addons
+        val prefs = context.settingsDataStore.data.first()
+        val hiddenAddonIds = decodeHiddenAddon(profileId, prefs)
+        val supportedCatalogs = personalAddons
             .asSequence()
             .filter { addon ->
                     addon.isInstalled &&
@@ -474,7 +692,7 @@ class CatalogRepository @Inject constructor(
             .distinctBy { it.id }
             .toList()
 
-        val current = getCatalogs().toMutableList()
+        val current = readCatalogsFromPrefs(profileId, prefs).toMutableList()
         val desiredById = supportedCatalogs.associateBy { it.id }
         var changed = false
 
@@ -497,7 +715,9 @@ class CatalogRepository @Inject constructor(
                 addonId = desired.addonId,
                 addonCatalogType = desired.addonCatalogType,
                 addonCatalogId = desired.addonCatalogId,
-                addonName = desired.addonName
+                addonName = desired.addonName,
+                clientDelegate = desired.clientDelegate,
+                clientFilter = desired.clientFilter
             )
             if (merged != existing) {
                 current[index] = merged
@@ -508,12 +728,16 @@ class CatalogRepository @Inject constructor(
         val existingIds = current.map { it.id }.toHashSet()
         val missing = supportedCatalogs.filterNot { existingIds.contains(it.id) }
         if (missing.isNotEmpty()) {
-            current.addAll(0, missing)
+            // New libraries follow existing catalogs; never displace the trending defaults.
+            current.addAll(missing)
             changed = true
         }
 
         if (changed) {
-            saveCatalogs(current)
+            if (!saveCatalogs(current, prefs, profileId)) {
+                lastSyncedAddonFingerprint = null
+                return false
+            }
         }
         return changed
     }
@@ -523,7 +747,7 @@ class CatalogRepository @Inject constructor(
      * affecting the sync outcome. Unlike the previous ID-only fingerprint, this includes:
      * - Active profile ID (so profile switches always trigger a fresh sync)
      * - Addon installed/enabled state, type, and URL
-     * - Manifest catalog contents (catalog type + ID per addon)
+     * - Manifest catalog contents (catalog type, ID, name, delegation, and filter per addon)
      *
      * This ensures that toggling an addon, switching profiles, or manifest catalog
      * changes never leave stale/missing catalogs.
@@ -544,6 +768,12 @@ class CatalogRepository @Inject constructor(
                     append(catalog.type)
                     append(':')
                     append(catalog.id)
+                    append(':')
+                    append(catalog.name)
+                    append(':')
+                    append(catalog.clientDelegate ?: "")
+                    append(':')
+                    append(catalog.clientFilter ?: "")
                     append(']')
                 }
                 append(',')
@@ -553,10 +783,10 @@ class CatalogRepository @Inject constructor(
 
     suspend fun syncHomeServerCatalogs(candidates: List<HomeServerCatalogCandidate>): Boolean {
         val profileId = activeProfileId()
-        val hiddenHomeServerIds = context.settingsDataStore.data
-            .first()
-            .let { prefs -> decodeHiddenHomeServer(profileId, prefs) }
+        val prefs = context.settingsDataStore.data.first()
+        val hiddenHomeServerIds = decodeHiddenHomeServer(profileId, prefs)
         val desiredCatalogs = candidates
+            .filterNot { PartnerCatalogs.isManaged(it.connectionId) }
             .filter { it.sourceRef.isNotBlank() && it.title.isNotBlank() }
             .map { candidate ->
                 val stableId = "home_server_${sha256Short(candidate.sourceRef)}"
@@ -576,7 +806,7 @@ class CatalogRepository @Inject constructor(
         val desiredById = desiredCatalogs.associate { (candidate, config) -> config.id to config }
         val candidateById = desiredCatalogs.associate { (candidate, config) -> config.id to candidate }
 
-        val current = getCatalogs().toMutableList()
+        val current = readCatalogsFromPrefs(profileId, prefs).toMutableList()
         var changed = false
 
         val beforeRemovalSize = current.size
@@ -612,7 +842,7 @@ class CatalogRepository @Inject constructor(
             changed = true
         }
 
-        if (changed) saveCatalogs(current)
+        if (changed) return saveCatalogs(current, prefs, profileId)
         return changed
     }
 
@@ -620,6 +850,8 @@ class CatalogRepository @Inject constructor(
         addon: Addon,
         catalog: AddonCatalog
     ): CatalogConfig? {
+        if (com.arflix.tv.data.model.SportsAddonCapabilities.isSportsLiveTvAddon(addon) &&
+            com.arflix.tv.data.model.SportsAddonCapabilities.isSportsCatalog(catalog)) return null
         val normalizedType = normalizeAddonCatalogType(catalog.type) ?: return null
         val catalogId = catalog.id.trim().takeIf { it.isNotBlank() } ?: return null
         val hasRequiredExtras = catalog.extra
@@ -645,18 +877,24 @@ class CatalogRepository @Inject constructor(
             addonId = addonId,
             addonCatalogType = normalizedType,
             addonCatalogId = catalogId,
-            addonName = addon.name
+            addonName = addon.name,
+            clientDelegate = catalog.clientDelegate,
+            clientFilter = catalog.clientFilter
         )
     }
 
+    // Addons may declare any catalog type (AIOMetadata's "anime"/"all"/custom display
+    // types, "Podcasts", debrid "other"). Unknown types keep their spelling: the addon
+    // routes /catalog/{type}/ by it, case included.
     private fun normalizeAddonCatalogType(rawType: String?): String? {
-        return when (rawType?.trim()?.lowercase()) {
+        val trimmed = rawType?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        return when (trimmed.lowercase()) {
             "movie" -> "movie"
             "series" -> "series"
             "tv" -> "tv"
             "show" -> "show"
             "shows" -> "shows"
-            else -> null
+            else -> trimmed
         }
     }
 
@@ -711,33 +949,33 @@ class CatalogRepository @Inject constructor(
     suspend fun fetchCatalogPackManifest(packUrl: String): Result<CatalogPackManifest> {
         val trimmed = packUrl.trim()
         if (!trimmed.startsWith("http://", ignoreCase = true) && !trimmed.startsWith("https://", ignoreCase = true)) {
-            return Result.failure(IllegalArgumentException("Invalid URL: must start with http:// or https://"))
+            return Result.failure(CatalogException(R.string.catalog_pack_invalid_url_scheme))
         }
 
-        val json = fetchUrl(trimmed)
-            ?: return Result.failure(IllegalArgumentException("Failed to fetch catalog pack from URL"))
+        val json = fetchUrl(trimmed, fresh = true)
+            ?: return Result.failure(CatalogException(R.string.catalog_pack_fetch_failed))
         val manifest = try {
             val type = object : com.google.gson.reflect.TypeToken<CatalogPackManifest>() {}.type
             gson.fromJson<CatalogPackManifest>(json, type)
         } catch (e: Exception) {
             null
-        } ?: return Result.failure(IllegalArgumentException("Failed to parse catalog pack manifest"))
+        } ?: return Result.failure(CatalogException(R.string.catalog_pack_parse_failed))
 
         if (manifest.id.isNullOrBlank() || manifest.name.isNullOrBlank()) {
-            return Result.failure(IllegalArgumentException("Invalid catalog pack manifest: missing ID or Name"))
+            return Result.failure(CatalogException(R.string.catalog_pack_missing_id_or_name))
         }
         val cats = manifest.catalogs
         if (cats.isNullOrEmpty()) {
-            return Result.failure(IllegalArgumentException("Invalid catalog pack manifest: catalogs list is empty or missing"))
+            return Result.failure(CatalogException(R.string.catalog_pack_no_catalogs))
         }
         val normalizedUrls = mutableSetOf<String>()
         for (item in cats) {
             if (item.name.isNullOrBlank() || item.url.isNullOrBlank()) {
-                return Result.failure(IllegalArgumentException("Invalid catalog pack manifest: catalog items must have a name and url"))
+                return Result.failure(CatalogException(R.string.catalog_pack_item_incomplete))
             }
             val normalized = CatalogUrlParser.normalize(item.url).lowercase()
             if (!normalizedUrls.add(normalized)) {
-                return Result.failure(IllegalArgumentException("Invalid catalog pack manifest: duplicate catalog URL '$normalized'"))
+                return Result.failure(CatalogException(R.string.catalog_pack_duplicate_url, listOf(normalized)))
             }
         }
         return Result.success(manifest)
@@ -752,12 +990,12 @@ class CatalogRepository @Inject constructor(
             manifestResult.getOrThrow()
         }
 
-        val current = getCatalogs().toMutableList()
+        val current = getPersonalCatalogs().toMutableList()
         val addedConfigs = mutableListOf<CatalogConfig>()
 
-        val manifestId = finalManifest.id ?: return Result.failure(IllegalArgumentException("Manifest missing ID"))
-        val manifestName = finalManifest.name ?: return Result.failure(IllegalArgumentException("Manifest missing Name"))
-        val manifestCatalogs = finalManifest.catalogs ?: return Result.failure(IllegalArgumentException("Manifest missing catalogs"))
+        val manifestId = finalManifest.id ?: return Result.failure(CatalogException(R.string.catalog_pack_manifest_missing_id))
+        val manifestName = finalManifest.name ?: return Result.failure(CatalogException(R.string.catalog_pack_manifest_missing_name))
+        val manifestCatalogs = finalManifest.catalogs ?: return Result.failure(CatalogException(R.string.catalog_pack_manifest_missing_catalogs))
 
         val normalizedPackUrl = CatalogUrlParser.normalize(packUrl).lowercase()
         val derivedPackId = "pack_${sha256Short(normalizedPackUrl + "|" + manifestId)}"
@@ -772,11 +1010,14 @@ class CatalogRepository @Inject constructor(
             val sourceType = validation.sourceType
 
             // Skip if this URL is already added
-            if (current.any { it.sourceUrl.equals(normalizedUrl, ignoreCase = true) }) {
+            if (current.any { it.sourceUrl.equals(normalizedUrl, ignoreCase = true) || (sourceType == CatalogSourceType.SIMKL && it.sourceRef == "simkl_list:${CatalogUrlParser.parseSimkl(normalizedUrl)?.id}") }) {
                 continue
             }
 
-            val resolved = resolveMetadata(normalizedUrl, sourceType)
+            val resolved = try { resolveMetadata(normalizedUrl, sourceType) } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                return Result.failure(e)
+            }
                 ?: fallbackMetadata(normalizedUrl, sourceType)
                 ?: continue
 
@@ -795,7 +1036,7 @@ class CatalogRepository @Inject constructor(
         }
 
         if (addedConfigs.isEmpty()) {
-            return Result.failure(IllegalArgumentException("No new or valid catalogs found in this pack to import"))
+            return Result.failure(CatalogException(R.string.catalog_pack_nothing_to_import))
         }
 
         current.addAll(0, addedConfigs)
@@ -803,32 +1044,80 @@ class CatalogRepository @Inject constructor(
         return Result.success(finalManifest)
     }
 
-    suspend fun removeCatalogPack(packId: String): Result<Unit> {
-        val current = getCatalogs().toMutableList()
-        val beforeSize = current.size
-        current.removeAll { it.packId == packId }
-        if (current.size == beforeSize) {
-            return Result.failure(IllegalArgumentException("No catalogs found for pack: $packId"))
+    /**
+     * Installs a collections document (Nuvio export format or ARVIO wrapper) from a
+     * URL or pasted JSON. Returns null when the input is not a collections document,
+     * so the caller can fall back to the regular catalog-pack flow.
+     */
+    suspend fun importCollections(input: String): Result<Pair<String, Int>>? {
+        val targetProfileId = activeProfileId()
+        val trimmed = input.trim()
+        val isRawJson = trimmed.startsWith("[") || trimmed.startsWith("{")
+        val url = if (isRawJson) null else CatalogUrlParser.normalize(trimmed)
+        val json = if (isRawJson) {
+            trimmed
+        } else {
+            fetchUrl(url ?: return null, fresh = true) ?: return if (url.endsWith(".json", ignoreCase = true)) {
+                Result.failure(CatalogException(R.string.catalog_pack_fetch_failed))
+            } else {
+                null
+            }
         }
-        saveCatalogs(current)
-        return Result.success(Unit)
+        if (!CustomCollections.looksLikeCollections(json)) {
+            return if (isRawJson) Result.failure(CatalogException(R.string.catalog_collections_invalid)) else null
+        }
+        val result = CustomCollections.parse(json, url)
+        if (result.isFailure) return Result.failure(CatalogException(R.string.catalog_collections_invalid))
+        val rails = result.getOrThrow()
+        val imported = CustomCollections.catalogs(rails)
+        val current = getCatalogsForProfile(targetProfileId)
+        replaceCatalogsForProfile(targetProfileId, CustomCollections.merge(current, imported))
+        return Result.success(rails.first().packName to rails.size)
+    }
+
+    private fun builtInCollectionIds(): Set<String> = MediaRepository.buildPreinstalledDefaults()
+        .filter { it.kind == CatalogKind.COLLECTION_RAIL || it.kind == CatalogKind.COLLECTION }.map { it.id }.toSet()
+
+    suspend fun isBuiltInCollectionsEnabled(): Boolean =
+        !getHiddenPreinstalledCatalogIdsForActiveProfile().containsAll(builtInCollectionIds())
+
+    /** Preserve the global choice when future updates add built-in collections. */
+    suspend fun setBuiltInCollectionsEnabled(enabled: Boolean) {
+        val ids = builtInCollectionIds()
+        val hidden = getHiddenPreinstalledCatalogIdsForActiveProfile().toSet()
+        setHiddenPreinstalledCatalogIdsForActiveProfile(
+            (if (enabled) hidden - ids - ArvioCollections.DISABLED_MARKER
+             else hidden + ids + ArvioCollections.DISABLED_MARKER).toList()
+        )
+        ensurePreinstalledDefaults(MediaRepository.buildPreinstalledDefaults())
+    }
+
+    suspend fun removeCatalogPack(packId: String): Result<Unit> {
+        return removeCatalogsMatching(
+            CatalogException(R.string.catalog_pack_none_for_pack, listOf(packId))
+        ) { it.packId == packId }
     }
 
     suspend fun addCustomCatalog(rawUrl: String): Result<CatalogConfig> {
+        val targetProfileId = profileManager.getProfileIdSync()
         val validation = validateCatalogUrl(rawUrl)
         if (!validation.isValid || validation.normalizedUrl == null || validation.sourceType == null) {
-            return Result.failure(IllegalArgumentException(validation.error ?: "Invalid URL"))
+            return Result.failure(CatalogException(validation.errorRes ?: R.string.catalog_url_invalid))
         }
 
         val normalizedUrl = validation.normalizedUrl
         val sourceType = validation.sourceType
-        val resolved = resolveMetadata(normalizedUrl, sourceType)
+        val resolved = try { resolveMetadata(normalizedUrl, sourceType) } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            return Result.failure(e)
+        }
             ?: fallbackMetadata(normalizedUrl, sourceType)
-            ?: return Result.failure(IllegalArgumentException(context.getString(R.string.catalog_failed_read_metadata)))
+            ?: return Result.failure(CatalogException(R.string.catalog_failed_read_metadata))
 
-        val current = getCatalogs().toMutableList()
-        if (current.any { it.sourceUrl.equals(normalizedUrl, ignoreCase = true) }) {
-            return Result.failure(IllegalArgumentException(context.getString(R.string.catalog_already_added)))
+        if (targetProfileId != profileManager.getProfileIdSync()) return Result.failure(IllegalStateException("Profile changed while adding the catalogue. Please try again."))
+        val current = getCatalogsForProfile(targetProfileId).toMutableList()
+        if (current.any { it.sourceUrl.equals(normalizedUrl, ignoreCase = true) || (sourceType == CatalogSourceType.SIMKL && it.sourceRef == "simkl_list:${CatalogUrlParser.parseSimkl(normalizedUrl)?.id}") }) {
+            return Result.failure(CatalogException(R.string.catalog_already_added))
         }
 
         val newCatalog = CatalogConfig(
@@ -840,32 +1129,169 @@ class CatalogRepository @Inject constructor(
             isPreinstalled = false
         )
         current.add(0, newCatalog)
-        saveCatalogs(current)
+        saveCatalogs(current, targetProfileId = targetProfileId)
         return Result.success(newCatalog)
     }
 
+    /**
+     * Adds a YouTube video link to the profile's YouTube row, creating the row on first use.
+     * Returns the row and the video's title. The title comes from YouTube's public oEmbed
+     * endpoint, falling back to the video id; a caller that already knows it (a YouTube search
+     * result) passes [knownTitle] and skips that request.
+     */
+    suspend fun addYouTubeVideo(
+        rawUrl: String,
+        parentPin: String? = null,
+        targetProfileId: String = profileManager.getProfileIdSync(),
+        knownTitle: String? = null
+    ): Result<Pair<CatalogConfig, String>> {
+        suspend fun approvalError(): CatalogException? {
+            val profile = profileManager.getActiveProfile()
+            if (targetProfileId != profileManager.getProfileIdSync() ||
+                (profile?.id ?: "default") != targetProfileId) {
+                return CatalogException(R.string.youtube_profile_changed)
+            }
+            return if (YouTubeCollection.canAddToProfile(profile, parentPin)) null
+            else CatalogException(R.string.youtube_parent_approval_required)
+        }
+        approvalError()?.let { return Result.failure(it) }
+        val videoId = YouTubeCollection.videoIdFromUrl(rawUrl)
+            ?: return Result.failure(CatalogException(R.string.catalog_url_invalid))
+        val oembed = if (!knownTitle.isNullOrBlank()) null else fetchUrl(
+            "https://www.youtube.com/oembed?format=json&url=" +
+                java.net.URLEncoder.encode(YouTubeCollection.watchUrl(videoId), "UTF-8")
+        )
+        val title = knownTitle?.trim()?.takeIf { it.isNotBlank() } ?: oembed?.let {
+            runCatching {
+                com.google.gson.JsonParser.parseString(it).asJsonObject.get("title")?.asString
+            }.getOrNull()
+        }?.trim()?.takeIf { it.isNotBlank() } ?: videoId
+
+        approvalError()?.let { return Result.failure(it) }
+        var updated: CatalogConfig? = null
+        var error: CatalogException? = null
+        // Check the limit against the latest list in the same transaction as the addition.
+        context.settingsDataStore.edit { prefs ->
+            if (targetProfileId != profileManager.getProfileIdSync()) {
+                error = CatalogException(R.string.youtube_profile_changed)
+                return@edit
+            }
+            val current = sanitizeCollectionCatalogs(readCatalogsFromPrefs(targetProfileId, prefs)).toMutableList()
+            val index = current.indexOfFirst { it.sourceType == CatalogSourceType.YOUTUBE }
+            val existing = current.getOrNull(index)
+            val videos = YouTubeCollection.decode(existing?.sourceRef)
+            if (videos.any { it.id == videoId }) {
+                error = CatalogException(R.string.catalog_already_added)
+                return@edit
+            }
+            if (videos.size >= YouTubeCollection.MAX_VIDEOS) {
+                error = CatalogException(R.string.youtube_collection_full, listOf(YouTubeCollection.MAX_VIDEOS))
+                return@edit
+            }
+            val ref = YouTubeCollection.encode(listOf(YouTubeCollection.Video(videoId, title)) + videos)
+            val row = existing?.copy(sourceRef = ref) ?: CatalogConfig(
+                id = "youtube_${System.currentTimeMillis()}", title = YouTubeCollection.DEFAULT_TITLE,
+                sourceType = CatalogSourceType.YOUTUBE, sourceRef = ref, isPreinstalled = false
+            )
+            if (existing != null) current[index] = row else current.add(0, row)
+            writeCatalogField(prefs, targetProfileId, "catalogsByProfile", gson.toJson(current))
+            updated = row
+        }
+        error?.let { return Result.failure(it) }
+        invalidationBus.markDirty(CloudSyncScope.CATALOGS, targetProfileId, "add YouTube video")
+        return Result.success(requireNotNull(updated) to title)
+    }
+
+    /** True when [videoId] is in the active profile's YouTube row (its "favorites"). */
+    suspend fun isYouTubeVideoSaved(videoId: String): Boolean =
+        getPersonalCatalogs().firstOrNull { it.sourceType == CatalogSourceType.YOUTUBE }
+            ?.let { row -> YouTubeCollection.decode(row.sourceRef).any { it.id == videoId } } == true
+
+    /** Takes [videoId] out of the active profile's YouTube row, wherever it sits. */
+    suspend fun removeSavedYouTubeVideo(videoId: String): Result<Unit> {
+        val row = getPersonalCatalogs().firstOrNull { it.sourceType == CatalogSourceType.YOUTUBE }
+            ?: return Result.success(Unit)
+        return removeYouTubeVideo(row.id, videoId)
+    }
+
+    /** Moves one video of the profile's YouTube row by [delta] places (negative = towards the top). */
+    suspend fun moveYouTubeVideo(catalogId: String, videoId: String, delta: Int): Result<Unit> {
+        val targetProfileId = profileManager.getProfileIdSync()
+        val current = getCatalogsForProfile(targetProfileId).toMutableList()
+        val index = current.indexOfFirst { it.id == catalogId && it.sourceType == CatalogSourceType.YOUTUBE }
+        if (index < 0) return Result.failure(CatalogException(R.string.catalog_not_found))
+        val videos = YouTubeCollection.decode(current[index].sourceRef).toMutableList()
+        val from = videos.indexOfFirst { it.id == videoId }
+        val to = from + delta
+        if (from < 0 || to !in videos.indices) return Result.success(Unit)
+        videos.add(to, videos.removeAt(from))
+        current[index] = current[index].copy(sourceRef = YouTubeCollection.encode(videos))
+        saveCatalogs(current, targetProfileId = targetProfileId)
+        return Result.success(Unit)
+    }
+
+    /** Removes one video from the profile's YouTube row; the row itself stays, even when empty. */
+    suspend fun removeYouTubeVideo(catalogId: String, videoId: String): Result<Unit> {
+        val targetProfileId = profileManager.getProfileIdSync()
+        val current = getCatalogsForProfile(targetProfileId).toMutableList()
+        val index = current.indexOfFirst { it.id == catalogId && it.sourceType == CatalogSourceType.YOUTUBE }
+        if (index < 0) return Result.failure(CatalogException(R.string.catalog_not_found))
+        val videos = YouTubeCollection.decode(current[index].sourceRef)
+        current[index] = current[index].copy(sourceRef = YouTubeCollection.encode(videos.filterNot { it.id == videoId }))
+        saveCatalogs(current, targetProfileId = targetProfileId)
+        return Result.success(Unit)
+    }
+
+    /**
+     * Appends TMDB catalogs to [profileId]'s list, after its own rows, skipping any whose page
+     * is already there. Used for a kids profile's starter rows; afterwards they are ordinary
+     * catalogs the profile can hide, move, rename or remove. [starters] are (id, title, url).
+     */
+    suspend fun appendTmdbCatalogs(profileId: String, starters: List<Triple<String, String, String>>) {
+        val current = getCatalogsForProfile(profileId)
+        val added = starters.mapNotNull { (id, title, url) ->
+            val parsed = CatalogUrlParser.parseTmdb(url) ?: return@mapNotNull null
+            if (current.any { it.id == id || it.sourceUrl.equals(url, ignoreCase = true) }) return@mapNotNull null
+            CatalogConfig(
+                id = id,
+                title = title,
+                sourceType = CatalogSourceType.TMDB,
+                sourceUrl = url,
+                sourceRef = tmdbSourceRef(parsed),
+                isPreinstalled = false
+            )
+        }
+        if (added.isNotEmpty()) saveCatalogs(current + added, targetProfileId = profileId)
+    }
+
     suspend fun updateCustomCatalog(catalogId: String, rawUrl: String): Result<CatalogConfig> {
-        val current = getCatalogs().toMutableList()
+        val targetProfileId = profileManager.getProfileIdSync()
+        val current = getCatalogsForProfile(targetProfileId).toMutableList()
         val index = current.indexOfFirst { it.id == catalogId }
-        if (index < 0) return Result.failure(IllegalArgumentException(context.getString(R.string.catalog_not_found)))
+        if (index < 0) return Result.failure(CatalogException(R.string.catalog_not_found))
         val existing = current[index]
         if (existing.isPreinstalled) {
-            return Result.failure(IllegalArgumentException(context.getString(R.string.catalog_preinstalled_no_edit)))
+            return Result.failure(CatalogException(R.string.catalog_preinstalled_no_edit))
         }
 
         val validation = validateCatalogUrl(rawUrl)
         if (!validation.isValid || validation.normalizedUrl == null || validation.sourceType == null) {
-            return Result.failure(IllegalArgumentException(validation.error ?: "Invalid URL"))
+            return Result.failure(CatalogException(validation.errorRes ?: R.string.catalog_url_invalid))
         }
 
         val normalizedUrl = validation.normalizedUrl
-        if (current.any { it.id != catalogId && it.sourceUrl.equals(normalizedUrl, ignoreCase = true) }) {
-            return Result.failure(IllegalArgumentException(context.getString(R.string.catalog_already_added)))
+        if (current.any { it.id != catalogId && (it.sourceUrl.equals(normalizedUrl, ignoreCase = true) ||
+                (validation.sourceType == CatalogSourceType.SIMKL && it.sourceRef == "simkl_list:${CatalogUrlParser.parseSimkl(normalizedUrl)?.id}")) }) {
+            return Result.failure(CatalogException(R.string.catalog_already_added))
         }
 
-        val resolved = resolveMetadata(normalizedUrl, validation.sourceType)
+        val resolved = try { resolveMetadata(normalizedUrl, validation.sourceType) } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            return Result.failure(e)
+        }
             ?: fallbackMetadata(normalizedUrl, validation.sourceType)
-            ?: return Result.failure(IllegalArgumentException(context.getString(R.string.catalog_failed_read_metadata)))
+            ?: return Result.failure(CatalogException(R.string.catalog_failed_read_metadata))
+        if (targetProfileId != profileManager.getProfileIdSync()) return Result.failure(IllegalStateException("Profile changed while updating the catalogue. Please try again."))
         val updated = existing.copy(
             title = resolved.title,
             sourceType = validation.sourceType,
@@ -873,34 +1299,47 @@ class CatalogRepository @Inject constructor(
             sourceRef = resolved.sourceRef
         )
         current[index] = updated
-        saveCatalogs(current)
+        saveCatalogs(current, targetProfileId = targetProfileId)
         return Result.success(updated)
     }
 
     suspend fun removeCustomCatalog(catalogId: String): Result<Unit> {
-        val current = getCatalogs().toMutableList()
-        val target = current.firstOrNull { it.id == catalogId }
-            ?: return Result.failure(IllegalArgumentException(context.getString(R.string.catalog_not_found)))
+        return removeCatalogsMatching(CatalogException(R.string.catalog_not_found)) { it.id == catalogId }
+    }
+
+    private suspend fun removeCatalogsMatching(error: CatalogException, matches: (CatalogConfig) -> Boolean): Result<Unit> {
         val profileId = activeProfileId()
-        if (isPreinstalledCatalog(target)) {
-            hidePreinstalledCatalog(profileId, catalogId)
-        } else if (target.sourceType == CatalogSourceType.ADDON) {
-            // Addon catalogs are re-derived from installed addons on every
-            // syncAddonCatalogs call, so the deletion won't stick unless we
-            // record the id here.
-            hideAddonCatalog(profileId, catalogId)
-        } else if (target.sourceType == CatalogSourceType.HOME_SERVER) {
-            hideHomeServerCatalog(profileId, catalogId)
+        var removed = false
+        context.settingsDataStore.edit { prefs ->
+            val current = readCatalogsFromPrefs(profileId, prefs)
+            val targets = current.filter(matches)
+            if (targets.isEmpty()) return@edit
+            val preinstalled = decodeHiddenPreinstalled(profileId, prefs).toMutableSet()
+            val addons = decodeHiddenAddon(profileId, prefs).toMutableSet()
+            val homeServers = decodeHiddenHomeServer(profileId, prefs).toMutableSet()
+            targets.forEach { target ->
+                when {
+                    isPreinstalledCatalog(target) -> preinstalled.add(target.id)
+                    target.sourceType == CatalogSourceType.ADDON -> addons.add(target.id)
+                    target.sourceType == CatalogSourceType.HOME_SERVER -> homeServers.add(target.id)
+                }
+            }
+            writeCatalogField(prefs, profileId, "hiddenPreinstalledByProfile", gson.toJson(preinstalled))
+            writeCatalogField(prefs, profileId, "hiddenAddonByProfile", gson.toJson(addons))
+            writeCatalogField(prefs, profileId, "hiddenHomeServerByProfile", gson.toJson(homeServers))
+            writeCatalogField(prefs, profileId, "catalogsByProfile", gson.toJson(current.filterNot(matches)))
+            removed = true
         }
-        current.removeAll { it.id == catalogId }
-        saveCatalogs(current)
+        if (!removed) return Result.failure(error)
+        lastSyncedAddonFingerprint = null
+        invalidationBus.markDirty(CloudSyncScope.CATALOGS, profileId, "remove catalogs")
         return Result.success(Unit)
     }
 
     suspend fun renameCatalog(catalogId: String, newTitle: String): Boolean {
         val trimmed = newTitle.trim()
         if (trimmed.isBlank()) return false
-        val current = getCatalogs().toMutableList()
+        val current = getPersonalCatalogs().toMutableList()
         val index = current.indexOfFirst { it.id == catalogId }
         if (index < 0) return false
         current[index] = current[index].copy(title = trimmed)
@@ -909,7 +1348,7 @@ class CatalogRepository @Inject constructor(
     }
 
     suspend fun moveCatalogUp(catalogId: String): Boolean {
-        val current = getCatalogs().toMutableList()
+        val current = getPersonalCatalogs().toMutableList()
         val visible = current.filter { isVisibleCatalogInSettings(it) }
         val visibleIndex = visible.indexOfFirst { it.id == catalogId }
         if (visibleIndex <= 0) return false
@@ -925,7 +1364,7 @@ class CatalogRepository @Inject constructor(
     }
 
     suspend fun moveCatalogDown(catalogId: String): Boolean {
-        val current = getCatalogs().toMutableList()
+        val current = getPersonalCatalogs().toMutableList()
         val visible = current.filter { isVisibleCatalogInSettings(it) }
         val visibleIndex = visible.indexOfFirst { it.id == catalogId }
         if (visibleIndex < 0 || visibleIndex >= visible.lastIndex) return false
@@ -936,6 +1375,32 @@ class CatalogRepository @Inject constructor(
         val moved = current.removeAt(currentIndex)
         val insertAt = if (currentIndex < nextIndex) nextIndex else nextIndex + 1
         current.add(insertAt.coerceAtMost(current.size), moved)
+        saveCatalogs(current)
+        return true
+    }
+
+    /**
+     * Moves a catalog [steps] places among the catalogs the settings list shows, in one write - for
+     * a row dragged on the phone. Catalogs the list hides keep their place relative to their
+     * neighbours, exactly as they do with [moveCatalogUp] and [moveCatalogDown] repeated.
+     */
+    suspend fun moveCatalogBy(catalogId: String, steps: Int): Boolean {
+        if (steps == 0) return false
+        val current = getCatalogs().toMutableList()
+        val visible = current.filter { isVisibleCatalogInSettings(it) }
+        val visibleIndex = visible.indexOfFirst { it.id == catalogId }
+        if (visibleIndex < 0) return false
+        val targetVisibleIndex = (visibleIndex + steps).coerceIn(0, visible.lastIndex)
+        if (targetVisibleIndex == visibleIndex) return false
+        val anchorId = visible[targetVisibleIndex].id
+        val currentIndex = current.indexOfFirst { it.id == catalogId }
+        if (currentIndex < 0) return false
+        val moved = current.removeAt(currentIndex)
+        val anchorIndex = current.indexOfFirst { it.id == anchorId }
+        if (anchorIndex < 0) return false
+        // Moving up lands in front of the catalog that held the target place, moving down behind it.
+        val insertAt = if (steps < 0) anchorIndex else anchorIndex + 1
+        current.add(insertAt.coerceIn(0, current.size), moved)
         saveCatalogs(current)
         return true
     }
@@ -957,12 +1422,12 @@ class CatalogRepository @Inject constructor(
     fun validateCatalogUrl(rawUrl: String): CatalogValidationResult {
         val normalized = CatalogUrlParser.normalize(rawUrl)
         if (normalized.isBlank()) {
-            return CatalogValidationResult(isValid = false, error = "URL is required")
+            return CatalogValidationResult(isValid = false, errorRes = R.string.catalog_url_required)
         }
         val uri = try { URI(normalized) } catch (e: Exception) { null }
-            ?: return CatalogValidationResult(isValid = false, error = "Invalid URL format")
+            ?: return CatalogValidationResult(isValid = false, errorRes = R.string.catalog_url_invalid_format)
         val host = uri.host?.lowercase()
-            ?: return CatalogValidationResult(isValid = false, error = "Invalid host")
+            ?: return CatalogValidationResult(isValid = false, errorRes = R.string.catalog_url_invalid_host)
 
         return when {
             host == "trakt.tv" || host.endsWith(".trakt.tv") -> {
@@ -971,7 +1436,7 @@ class CatalogRepository @Inject constructor(
                 if (parsed == null) {
                     CatalogValidationResult(
                         isValid = false,
-                        error = "Use a Trakt list URL: trakt.tv/users/{user}/lists/{list}"
+                        errorRes = R.string.catalog_url_trakt_hint
                     )
                 } else {
                     CatalogValidationResult(
@@ -981,6 +1446,11 @@ class CatalogRepository @Inject constructor(
                     )
                 }
             }
+            host == "simkl.com" || host == "www.simkl.com" -> {
+                val parsed = CatalogUrlParser.parseSimkl(normalized)
+                if (parsed == null) CatalogValidationResult(isValid = false, errorRes = R.string.catalog_url_simkl_hint)
+                else CatalogValidationResult(isValid = true, normalizedUrl = parsed.canonicalUrl, sourceType = CatalogSourceType.SIMKL)
+            }
             host == "mdblist.com" || host.endsWith(".mdblist.com") -> {
                 CatalogValidationResult(
                     isValid = true,
@@ -988,9 +1458,20 @@ class CatalogRepository @Inject constructor(
                     sourceType = CatalogSourceType.MDBLIST
                 )
             }
+            host == "themoviedb.org" || host.endsWith(".themoviedb.org") -> {
+                if (CatalogUrlParser.parseTmdb(normalized) == null) {
+                    CatalogValidationResult(isValid = false, errorRes = R.string.catalog_url_tmdb_hint)
+                } else {
+                    CatalogValidationResult(
+                        isValid = true,
+                        normalizedUrl = normalized,
+                        sourceType = CatalogSourceType.TMDB
+                    )
+                }
+            }
             else -> CatalogValidationResult(
                 isValid = false,
-                error = "Only Trakt and MDBList URLs are supported"
+                errorRes = R.string.catalog_url_unsupported
             )
         }
     }
@@ -998,15 +1479,24 @@ class CatalogRepository @Inject constructor(
     private suspend fun resolveMetadata(url: String, sourceType: CatalogSourceType): ResolvedCatalog? {
         return when (sourceType) {
             CatalogSourceType.TRAKT -> resolveTraktMetadata(url)
+            CatalogSourceType.SIMKL -> {
+                val parsed = CatalogUrlParser.parseSimkl(url) ?: return null
+                val list = simklListsRepository?.load(parsed.id)
+                    ?: throw com.arflix.tv.data.repository.simkl.SimklListsException("user_token_required")
+                ResolvedCatalog(list.name, "simkl_list:${list.id}")
+            }
             CatalogSourceType.MDBLIST -> resolveMdblistMetadata(url)
+            CatalogSourceType.TMDB -> resolveTmdbMetadata(url)
             CatalogSourceType.PREINSTALLED -> null
             CatalogSourceType.ADDON -> null
             CatalogSourceType.HOME_SERVER -> null
+            CatalogSourceType.YOUTUBE -> null
         }
     }
 
     private fun fallbackMetadata(url: String, sourceType: CatalogSourceType): ResolvedCatalog? {
         return when (sourceType) {
+            CatalogSourceType.SIMKL -> null
             CatalogSourceType.TRAKT -> {
                 when (val parsed = CatalogUrlParser.parseTrakt(url)) {
                     is ParsedCatalogUrl.TraktUserList -> {
@@ -1028,11 +1518,51 @@ class CatalogRepository @Inject constructor(
                 title = context.getString(R.string.catalog_mdblist_title),
                 sourceRef = "mdblist:$url"
             )
+            CatalogSourceType.TMDB -> CatalogUrlParser.parseTmdb(url)?.let { parsed ->
+                ResolvedCatalog(
+                    title = parsed.slug?.replace('-', ' ')?.toDisplayTitle()
+                        ?: context.getString(R.string.catalog_tmdb_title),
+                    sourceRef = tmdbSourceRef(parsed)
+                )
+            }
             CatalogSourceType.PREINSTALLED -> null
             CatalogSourceType.ADDON -> null
             CatalogSourceType.HOME_SERVER -> null
+            CatalogSourceType.YOUTUBE -> null
         }
     }
+
+    /** The TMDB page's own name, so the row isn't named after a URL slug. */
+    private suspend fun resolveTmdbMetadata(url: String): ResolvedCatalog? {
+        val parsed = CatalogUrlParser.parseTmdb(url) ?: return null
+        val apiKey = Constants.TMDB_API_KEY
+        val endpoint = when (parsed.kind) {
+            "list" -> "list/${parsed.id}"
+            "collection" -> "collection/${parsed.id}"
+            "company" -> "company/${parsed.id}"
+            "network" -> "network/${parsed.id}"
+            "person" -> "person/${parsed.id}"
+            "keyword" -> "keyword/${parsed.id}"
+            // Genre pages have no detail endpoint; the slug names them well enough.
+            else -> null
+        }
+        val name = if (endpoint == null || apiKey.isBlank()) {
+            null
+        } else {
+            val body = fetchUrl("https://api.themoviedb.org/3/$endpoint?api_key=$apiKey")
+            body?.let {
+                runCatching { org.json.JSONObject(it).optString("name").trim().takeIf { n -> n.isNotEmpty() } }
+                    .getOrNull()
+            }
+        }
+        val title = name
+            ?: parsed.slug?.replace('-', ' ')?.toDisplayTitle()
+            ?: context.getString(R.string.catalog_tmdb_title)
+        return ResolvedCatalog(title = title, sourceRef = tmdbSourceRef(parsed))
+    }
+
+    private fun tmdbSourceRef(parsed: ParsedCatalogUrl.Tmdb): String =
+        "tmdb:${parsed.kind}:${parsed.id}:${parsed.mediaType.orEmpty()}"
 
     private fun canonicalizeTraktUrl(url: String): String {
         val parsed = CatalogUrlParser.parseTrakt(url) ?: return CatalogUrlParser.normalize(url)
@@ -1125,12 +1655,17 @@ class CatalogRepository @Inject constructor(
         return CatalogRepoRegexes.TRAKT_URL_REGEX.find(html)?.value
     }
 
-    private suspend fun fetchUrl(url: String): String? {
+    /**
+     * [fresh] skips the HTTP cache for user-initiated imports: re-importing an edited pack must
+     * not get the copy cached by the previous import.
+     */
+    private suspend fun fetchUrl(url: String, fresh: Boolean = false): String? {
         return withContext(Dispatchers.IO) {
             try {
                 val request = Request.Builder()
                     .url(url)
                     .header("User-Agent", OkHttpProvider.userAgentOr("Mozilla/5.0 (Android TV; ARVIO)"))
+                    .apply { if (fresh) cacheControl(CacheControl.FORCE_NETWORK) }
                     .build()
                 okHttpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use null
@@ -1178,6 +1713,9 @@ class CatalogRepository @Inject constructor(
                 val collectionHeroVideoUrl = asTrimmedString(row["collectionHeroVideoUrl"])
                 val collectionTileShape = parseCollectionTileShapeCompat(asTrimmedString(row["collectionTileShape"]))
                 val collectionHideTitle = (row["collectionHideTitle"] as? Boolean) ?: false
+                val collectionRailKey = asTrimmedString(row["collectionRailKey"])
+                val packId = asTrimmedString(row["packId"])
+                val packName = asTrimmedString(row["packName"])
                 val collectionSources = try {
                     val jsonValue = gson.toJson(row["collectionSources"])
                     gson.fromJson<List<CollectionSourceConfig>>(
@@ -1234,7 +1772,10 @@ class CatalogRepository @Inject constructor(
                         collectionTileShape = collectionTileShape,
                         collectionHideTitle = collectionHideTitle,
                         collectionSources = collectionSources,
-                        requiredAddonUrls = requiredAddonUrls
+                        requiredAddonUrls = requiredAddonUrls,
+                        packId = packId,
+                        packName = packName,
+                        collectionRailKey = collectionRailKey
                     )
                 )
             }
@@ -1243,6 +1784,13 @@ class CatalogRepository @Inject constructor(
 
     private fun normalizeCatalogConfig(config: CatalogConfig): CatalogConfig? {
         if (config.id.isBlank() || config.title.isBlank()) return null
+        // Retire the old Home sports rows, including saved/cloud-restored defaults.
+        // Add-on catalogs keep their own source and must remain available.
+        if (config.id in setOf(SportsAddonCapabilities.SPORTS_CATEGORY_ROW_ID,
+                SportsAddonCapabilities.POPULAR_LIVE_TV_ROW_ID) &&
+            config.sourceType == CatalogSourceType.PREINSTALLED &&
+            config.sourceUrl.isNullOrBlank() && config.sourceRef.isNullOrBlank() &&
+            config.addonId.isNullOrBlank()) return null
         val normalizedUrl = config.sourceUrl?.trim().takeUnless { it.isNullOrBlank() }
         val normalizedRef = config.sourceRef?.trim().takeUnless { it.isNullOrBlank() }
         val bundledPreinstalled = isBundledPreinstalledCatalogId(config.id)
@@ -1349,18 +1897,26 @@ class CatalogRepository @Inject constructor(
             // URL/ref evidence always wins over stale enum values from older builds.
             sourceRef?.startsWith(HomeServerRepository.CATALOG_SOURCE_REF_PREFIX, ignoreCase = true) == true -> CatalogSourceType.HOME_SERVER
             sourceRef?.startsWith(ADDON_SOURCE_REF_PREFIX, ignoreCase = true) == true -> CatalogSourceType.ADDON
+            sourceRef?.startsWith(YouTubeCollection.SOURCE_REF_PREFIX) == true -> CatalogSourceType.YOUTUBE
+            sourceRef?.startsWith("simkl_list:", ignoreCase = true) == true -> CatalogSourceType.SIMKL
+            sourceUrl?.let { CatalogUrlParser.parseSimkl(it) } != null -> CatalogSourceType.SIMKL
             sourceRef?.startsWith("trakt_", ignoreCase = true) == true -> CatalogSourceType.TRAKT
             sourceRef?.startsWith("mdblist", ignoreCase = true) == true -> CatalogSourceType.MDBLIST
+            sourceRef?.startsWith("tmdb:", ignoreCase = true) == true -> CatalogSourceType.TMDB
             sourceUrl?.contains("trakt.tv", ignoreCase = true) == true -> CatalogSourceType.TRAKT
             sourceUrl?.contains("mdblist.com", ignoreCase = true) == true -> CatalogSourceType.MDBLIST
+            sourceUrl?.contains("themoviedb.org", ignoreCase = true) == true -> CatalogSourceType.TMDB
             normalized == CatalogSourceType.TRAKT.name -> CatalogSourceType.TRAKT
+            normalized == CatalogSourceType.SIMKL.name -> CatalogSourceType.SIMKL
             normalized == CatalogSourceType.MDBLIST.name -> CatalogSourceType.MDBLIST
+            normalized == CatalogSourceType.TMDB.name -> CatalogSourceType.TMDB
             normalized == CatalogSourceType.ADDON.name -> CatalogSourceType.ADDON
             normalized == CatalogSourceType.HOME_SERVER.name -> CatalogSourceType.HOME_SERVER
             normalized == CatalogSourceType.PREINSTALLED.name -> CatalogSourceType.PREINSTALLED
             normalized.contains("HOME_SERVER") || normalized.contains("HOME SERVER") -> CatalogSourceType.HOME_SERVER
             normalized.contains("ADDON") -> CatalogSourceType.ADDON
             normalized.contains("TRAKT") -> CatalogSourceType.TRAKT
+            normalized.contains("TMDB") -> CatalogSourceType.TMDB
             normalized.contains("MDB") || normalized.contains("MDL") -> CatalogSourceType.MDBLIST
             sourceUrl.isNullOrBlank() -> CatalogSourceType.PREINSTALLED
             else -> CatalogSourceType.TRAKT
@@ -1382,32 +1938,13 @@ class CatalogRepository @Inject constructor(
         // Strict profile-first lookup to avoid leaking or prioritizing
         // catalogs from other profiles.
         val primary = parseCatalogsJson(prefs[catalogsKey(profileId)])
-        if (primary.isNotEmpty()) {
+        if (prefs[catalogsKey(profileId)] != null) {
             val base = primary
                 .distinctBy { it.id }
                 .map { refreshBundledPreinstalledCatalog(it) }
                 .filterNot { it.isHidden() }
                 .toMutableList()
-            val existingKeys = base.map { "${it.id}|${it.sourceUrl.orEmpty()}" }.toMutableSet()
-
-            // Legacy recovery applies only to the default profile to avoid cross-profile leakage.
-            if (profileId == "default") {
-                val legacyCustom = (
-                    parseCatalogsJson(prefs[legacyDefaultKey]) +
-                    parseCatalogsJson(prefs[legacyGlobalKey])
-                )
-                    .filterNot { it.isPreinstalled }
-                    .filterNot { it.isHidden() }
-                    .distinctBy { "${it.id}|${it.sourceUrl.orEmpty()}" }
-
-                legacyCustom.forEach { cfg ->
-                    val key = "${cfg.id}|${cfg.sourceUrl.orEmpty()}"
-                    if (!existingKeys.contains(key)) {
-                        base.add(cfg)
-                        existingKeys.add(key)
-                    }
-                }
-            }
+            // Once a profile has a saved list, even [], legacy data is not authoritative.
             return base
         }
 

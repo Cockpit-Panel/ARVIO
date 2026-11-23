@@ -34,6 +34,10 @@ object SportsAddonCapabilities {
 
     private val explicitVodTypes = setOf("movie", "film", "series", "show", "anime")
 
+    // Internal sources that contain "iptv" in their ID but serve on-demand media.
+    // Keep this exact so third-party IPTV/live add-ons remain classified as live.
+    private val explicitVodStreamAddonIds = IptvVodSourceIds.ALL
+
     fun isSportsHomeStatus(status: String?): Boolean {
         val value = status ?: return false
         return value.startsWith(SPORTS_STATUS_PREFIX) ||
@@ -146,6 +150,7 @@ object SportsAddonCapabilities {
 
     fun isLiveStreamAddonId(addonId: String?): Boolean {
         val id = addonId?.trim()?.lowercase(Locale.US) ?: return false
+        if (id in explicitVodStreamAddonIds) return false
         if (id.contains("cinemeta") || id.contains("tmdb") || id.contains("torrentio")) return false
         return id.contains("livetv") || id.contains("live_tv") ||
             id.contains("live-tv") || id.contains("live_stream") ||
@@ -156,6 +161,7 @@ object SportsAddonCapabilities {
 
     fun isLiveStreamAddon(addon: Addon?): Boolean {
         if (addon == null) return false
+        if (IptvVodSourceIds.isIptvVodAddonId(addon.id)) return false
         val manifest = addon.manifest
         return if (manifest != null) {
             isLiveStreamManifest(manifest)
@@ -183,13 +189,14 @@ object SportsAddonCapabilities {
         streamAddonId: String? = null,
         title: String? = null,
         isLiveStream: Boolean = false,
-        addons: List<Addon> = emptyList()
+        addons: List<Addon> = emptyList(),
+        isAddonNative: Boolean = false
     ): Boolean {
         if (isLiveStream) return true
         if (status != null && (isSportsHomeStatus(status) || status.startsWith("iptv:") || status.startsWith("live:") || status.startsWith("channel:"))) {
             return true
         }
-        if (id != null && id <= 0) {
+        if (id != null && id <= 0 && !isAddonNative) {
             return true
         }
         if (!streamAddonId.isNullOrBlank()) {

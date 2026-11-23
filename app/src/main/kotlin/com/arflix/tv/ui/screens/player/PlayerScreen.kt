@@ -2,15 +2,35 @@
 
 package com.arflix.tv.ui.screens.player
 
+import com.arflix.tv.ui.screens.player.mobile.ArvioMobilePlayer
+import com.arflix.tv.ui.screens.player.mobile.MobileIconButton
+import androidx.compose.ui.platform.testTag
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.ui.platform.LocalLayoutDirection
+
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import com.arflix.tv.util.findActivity
+import android.graphics.Bitmap
+import android.graphics.Rect
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.view.PixelCopy
+import android.view.SurfaceView
+import android.view.TextureView
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import com.arflix.tv.BuildConfig
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -79,6 +99,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -101,6 +122,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
@@ -122,10 +144,7 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
-import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.CacheDataSource
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
-import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -140,6 +159,7 @@ import com.arflix.tv.network.OkHttpProvider
 import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.data.model.EpisodeIdentity
 import com.arflix.tv.data.model.StreamSource
+import com.arflix.tv.ui.screens.details.isAwaitingDebridDownload
 import com.arflix.tv.data.model.Subtitle
 import com.arflix.tv.ui.components.KeepScreenOn
 import com.arflix.tv.ui.components.LoadingIndicator
@@ -147,15 +167,29 @@ import com.arflix.tv.ui.components.Toast
 import com.arflix.tv.ui.components.ToastType
 import com.arflix.tv.ui.components.NextEpisodeOverlay
 import com.arflix.tv.ui.components.StreamSelector
+import com.arflix.tv.data.repository.addonNoticeRow
+import com.arflix.tv.data.repository.isAddonNoticeRow
 import com.arflix.tv.ui.components.WaveLoadingDots
 import com.arflix.tv.ui.components.PlaybackQualityBadgeRow
 import com.arflix.tv.ui.components.buildPlaybackBadges
 import androidx.compose.ui.text.style.TextOverflow
 import com.arflix.tv.util.LocalDeviceType
-import com.arflix.tv.util.settingsDataStore
+import com.arflix.tv.data.repository.effectiveSettingsDataStore as settingsDataStore
 import com.arflix.tv.util.weightedSubtitleScore
+import com.arflix.tv.ui.screens.player.tv.TvSkipIntroButton as SkipIntroButton
+import com.arflix.tv.ui.screens.player.engine.exoplayer.FullViewportSubtitlePlayerView
+import com.arflix.tv.ui.screens.player.engine.exoplayer.requiresVideoFrameSubtitleViewport
+import com.arflix.tv.ui.screens.player.engine.exoplayer.AiSubtitleRenderersFactory
+import com.arflix.tv.ui.screens.player.engine.PlayerEngine
+import com.arflix.tv.ui.screens.player.engine.PlayerEngineFactory
+import com.arflix.tv.ui.screens.player.engine.PlayerEngineType
+import com.arflix.tv.ui.screens.player.subtitles.SubtitleAutoSync
+import com.arflix.tv.ui.screens.player.subtitles.RETIMED_SUBTITLE_ID_SUFFIX
+import com.arflix.tv.ui.screens.player.common.NextEpisodePromptGate
+import com.arflix.tv.ui.screens.player.common.PlaybackEpisodeKey
 import com.arflix.tv.ui.skin.LocalAccentColorOverride
 import com.arflix.tv.ui.theme.ArflixTypography
+import com.arflix.tv.ui.theme.BackgroundElevated
 import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.PurpleDark
 import com.arflix.tv.ui.theme.PurpleLight
@@ -163,9 +197,12 @@ import com.arflix.tv.ui.theme.PurplePrimary
 import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Job
 import androidx.compose.runtime.rememberCoroutineScope
 import okhttp3.Cookie
@@ -182,6 +219,11 @@ import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.ui.draw.shadow
+import kotlin.math.abs
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.draw.clip
@@ -213,26 +255,70 @@ import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.core.content.ContextCompat
+import com.arflix.tv.ui.screens.player.preview.SeekPreviewFrame
+import com.arflix.tv.ui.screens.player.preview.SeekPreviewFilmstrip
+import com.arflix.tv.ui.screens.player.preview.SeekPreviewPlaybackGuard
+import com.arflix.tv.ui.screens.player.preview.seekPreviewWindow
+import com.arflix.tv.ui.screens.player.preview.captureRenderedSeekPreview
+import com.arflix.tv.ui.screens.player.preview.RENDERED_PREVIEW_COPY_TIMEOUT_MS
+import com.arflix.tv.ui.screens.player.preview.renderedPreviewCopyIsCurrent
+import com.arflix.tv.ui.screens.player.preview.supportsNativeKeyframes
+import com.arflix.tv.ui.screens.player.preview.quantizeSeekPreviewPosition
+import com.arflix.tv.ui.screens.player.preview.seekPreviewOverlay
+import com.arflix.tv.ui.screens.player.preview.SeekPreviewFrameProvider
+import com.arflix.tv.ui.screens.player.preview.SeekPreviewSource
+import com.arflix.tv.ui.screens.player.preview.allowSecondarySeekPreviewExtraction
+import com.arflix.tv.ui.screens.player.preview.seekPreviewDecodeFitsMemory
+import com.arflix.tv.ui.screens.player.preview.SeekInteraction
+import com.arflix.tv.ui.screens.player.preview.SeekSurface
+import com.arflix.tv.ui.screens.player.preview.SeekPhase
+import com.arflix.tv.ui.screens.player.preview.SeekPreviewCapability
+import com.arflix.tv.ui.screens.player.preview.loadSeekPreviewFrame
+import com.arflix.tv.ui.screens.player.preview.nativePreviewCacheIdentity
+import com.arflix.tv.ui.screens.player.preview.acceleratedSeekPreviewStepMs
+
+enum class AspectRatioMode(val label: String, val resizeMode: Int) {
+    AUTO("Auto", AspectRatioFrameLayout.RESIZE_MODE_FIT),
+    FIT("Fit to Screen", AspectRatioFrameLayout.RESIZE_MODE_FIT),
+    STRETCH("Stretch", AspectRatioFrameLayout.RESIZE_MODE_FILL),
+    CROP("Crop", AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+
+    companion object {
+        fun fromLabel(label: String?): AspectRatioMode {
+            if (label.isNullOrBlank()) return AUTO
+            return when (label.trim().lowercase()) {
+                "auto" -> AUTO
+                "fit", "fit to screen" -> FIT
+                "fill", "stretch" -> STRETCH
+                "zoom", "crop" -> CROP
+                else -> entries.firstOrNull { it.label.equals(label, ignoreCase = true) || it.name.equals(label, ignoreCase = true) } ?: AUTO
+            }
+        }
+    }
+}
 
 private const val PIP_ACTION_REWIND = "com.arflix.tv.pip.REWIND"
 private const val PIP_ACTION_PLAY_PAUSE = "com.arflix.tv.pip.PLAY_PAUSE"
 private const val PIP_ACTION_FORWARD = "com.arflix.tv.pip.FORWARD"
+private const val QUICK_SEEK_DISMISS_DELAY_MS = 2_200L
+private const val SEEK_PREVIEW_DEBOUNCE_MS = 60L
+private const val MAX_SUBTITLE_OFFSET_MS = 120_000L
+private const val SUBTITLE_OFFSET_STEP_MS = 100L
 
-private fun isSafePlaybackHeader(name: String, value: String): Boolean {
-    return name.isNotBlank() &&
-        value.isNotBlank() &&
-        name.all { ch ->
-            ch.code in 33..126 &&
-                ch !in setOf('(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}')
-        } &&
-        value.all { ch -> ch == '\t' || ch.code in 32..126 }
-}
-
-private fun Map<String, String>.safePlaybackHeaders(): Map<String, String> {
-    if (isEmpty()) return emptyMap()
-    return filter { (name, value) -> isSafePlaybackHeader(name.trim(), value.trim()) }
-        .mapKeys { (name, _) -> name.trim() }
-        .mapValues { (_, value) -> value.trim() }
+/**
+ * Resolves a [PlayerMessage] against the app language. Nested messages (e.g. the reference-source
+ * label inside a match status) are resolved first so they are localized too.
+ */
+@Composable
+internal fun PlayerMessage.localizedText(): String = when (this) {
+    is PlayerMessage.Raw -> text
+    is PlayerMessage.Res -> {
+        val args = mutableListOf<Any>()
+        formatArgs.forEach { arg ->
+            args += if (arg is PlayerMessage) arg.localizedText() else arg
+        }
+        stringResource(resourceId, *args.toTypedArray())
+    }
 }
 
 /**
@@ -256,15 +342,66 @@ fun PlayerScreen(
     preferredBingeGroup: String? = null,
     startPositionMs: Long? = null,
     isLiveStream: Boolean = false,
+    iptvSourceId: String? = null,
     viewModel: PlayerViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
     onPlayNext: (EpisodeIdentity, String?, String?, String?) -> Unit = { _, _, _, _ -> }
 ) {
+    PlayerScreenContent(
+        args = PlayerScreenArgs(
+            mediaType, mediaId, seasonNumber, episodeNumber, tmdbSeasonNumber, tmdbEpisodeNumber,
+            kitsuId, kitsuEpisodeNumber, imdbId, streamUrl, preferredAddonId, preferredSourceName,
+            preferredBingeGroup, startPositionMs, isLiveStream, iptvSourceId, onBack, onPlayNext
+        ),
+        viewModel = viewModel
+    )
+}
+
+private fun isDashPlaybackUrl(urlLower: String): Boolean =
+    urlLower.contains(".mpd") || urlLower.contains("/dash") || urlLower.contains("format=dash")
+
+/**
+ * [PlayerScreen]'s arguments as one object. The body reads them as `args.x` where it needs
+ * them instead of holding 17 parameters in registers for the whole (very large) function:
+ * above 256 registers R8 has to shuffle values into low registers and it miscompiles this
+ * method (release-only VerifyError / wrong values, e.g. a LaunchedEffect key). Keep the
+ * function's register count down: put new logic in separate functions, not in its body.
+ */
+@androidx.compose.runtime.Immutable
+private data class PlayerScreenArgs(
+    val mediaType: MediaType,
+    val mediaId: Int,
+    val seasonNumber: Int?,
+    val episodeNumber: Int?,
+    val tmdbSeasonNumber: Int?,
+    val tmdbEpisodeNumber: Int?,
+    val kitsuId: Int?,
+    val kitsuEpisodeNumber: Int?,
+    val imdbId: String?,
+    val streamUrl: String?,
+    val preferredAddonId: String?,
+    val preferredSourceName: String?,
+    val preferredBingeGroup: String?,
+    val startPositionMs: Long?,
+    val isLiveStream: Boolean,
+    val iptvSourceId: String?,
+    val onBack: () -> Unit,
+    val onPlayNext: (EpisodeIdentity, String?, String?, String?) -> Unit
+)
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun PlayerScreenContent(args: PlayerScreenArgs, viewModel: PlayerViewModel) {
     val playerAccent = LocalAccentColorOverride.current ?: Color.White
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() }
+    DisposableEffect(Unit) {
+        val previewBlock = com.arflix.tv.ui.components.TrailerPlaybackPool.fullPlayback()
+        onDispose { previewBlock.close() }
+    }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val latestUiState by rememberUpdatedState(uiState)
+    val startupTrace = remember { com.arflix.tv.ui.screens.player.engine.exoplayer.PlaybackStartupTrace() }
     val clockFormat = rememberPlayerClockFormat()
     val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
@@ -293,12 +430,13 @@ fun PlayerScreen(
         deviceType == com.arflix.tv.util.DeviceType.TV &&
             (isLowRamPlaybackDevice || playbackMemoryClassMb <= 384)
     }
-    val playbackBufferProfile = remember(isLowRamPlaybackDevice, playbackMemoryClassMb, deviceType) {
+    val playbackMemoryBudget = remember(context) { com.arflix.tv.util.playbackMemoryBudget(context) }
+    val playbackBufferProfile = remember(isLowRamPlaybackDevice, playbackMemoryClassMb, deviceType, playbackMemoryBudget) {
         buildPlaybackBufferProfile(
             memoryClassMb = playbackMemoryClassMb,
             isLowRamDevice = isLowRamPlaybackDevice,
             isTvDevice = deviceType == com.arflix.tv.util.DeviceType.TV
-        )
+        ).let { it.copy(targetBufferBytes = minOf(it.targetBufferBytes, playbackMemoryBudget.maxPlaybackBytes)) }
     }
     // No device-name decoder guessing — matches NuvioTV, which is hardware-first for video and
     // never branches on Build.MODEL/HARDWARE. The old (amlogic/sei/"Box R") heuristic force-fed
@@ -307,49 +445,35 @@ fun PlayerScreen(
     // device (buildVideoRenderers forces MODE_ON), with enableDecoderFallback +
     // forceDisableMediaCodecAsynchronousQueueing handling real hardware failures/hangs reactively.
     val preferExtensionDecoder = false
-    val allowVideoExceedCodecCapabilities = remember(deviceType, preferExtensionDecoder) {
-        !preferExtensionDecoder && !deviceType.isTouchDevice()
+    // Permissive on EVERY device. Phones used to be strict (to stop black video on 4K remux/DV),
+    // but strict mode disqualifies a hardware decoder whenever it under-reports its level: a Redmi
+    // Note 13 Pro (Sept 2026) reports NoSupport for ordinary 4K HEVC Main10 (hvc1.2.4.L150) that its
+    // MediaTek decoder plays fine, and strict mode gave audio + a 0x0 video and a source skip on
+    // every such file. There is nothing else to hand the track to — the sideload FFmpeg extension's
+    // video renderer is an unimplemented stub (supportsFormat always "unsupported") — so strict only
+    // ever meant "no video". DV is handled by DvCompat, a truly failing decoder by the black-video
+    // recovery ladder.
+    val allowVideoExceedCodecCapabilities = remember(preferExtensionDecoder) {
+        !preferExtensionDecoder
     }
     val allowAudioExceedCodecCapabilities = remember(preferExtensionDecoder) {
         !preferExtensionDecoder
     }
-    val allowRendererExceedCodecCapabilities = remember(deviceType, preferExtensionDecoder) {
-        !preferExtensionDecoder && !deviceType.isTouchDevice()
+    val allowRendererExceedCodecCapabilities = remember(preferExtensionDecoder) {
+        !preferExtensionDecoder
+    }
+
+    // Remember the exact orientation state from before entering the player
+    val previousOrientation = remember(activity) {
+        activity?.requestedOrientation ?: ActivityInfo.SCREEN_ORIENTATION_FULL_USER
     }
 
     // Keep playback in landscape while the player is visible, regardless of the
     // device's auto-rotate lock. Restore the app's prior orientation afterward.
     DisposableEffect(activity) {
-        val previousOrientation = activity?.requestedOrientation
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         onDispose {
-            if (previousOrientation != null) {
-                activity.requestedOrientation = previousOrientation
-            }
-        }
-    }
-
-    // On mobile, enable immersive fullscreen for the player and restore system bars on exit.
-    // TV is always in fullscreen so no change is needed there.
-    DisposableEffect(Unit) {
-        val window = activity?.window
-        if (window != null && deviceType != com.arflix.tv.util.DeviceType.TV) {
-            val controller = androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
-            controller.systemBarsBehavior =
-                androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
-        }
-        onDispose {
-            if (window != null && deviceType != com.arflix.tv.util.DeviceType.TV) {
-                @Suppress("DEPRECATION")
-                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN)
-                val controller = androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
-                controller.systemBarsBehavior =
-                    androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
-                controller.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
-                controller.isAppearanceLightStatusBars = false
-                controller.isAppearanceLightNavigationBars = false
-            }
+            activity?.requestedOrientation = previousOrientation
         }
     }
 
@@ -376,17 +500,44 @@ fun PlayerScreen(
     var duration by remember { mutableLongStateOf(0L) }
     var progress by remember { mutableFloatStateOf(0f) }
     var currentPlaybackState by remember { mutableIntStateOf(Player.STATE_IDLE) }
+    var currentPlaybackSpeed by remember { mutableFloatStateOf(1.0f) }
     var nextEpisodeTransitionInProgress by remember { mutableStateOf(false) }
+    var placeholderCheckedSource by remember { mutableStateOf<String?>(null) }
+    var placeholderHandledSource by remember { mutableStateOf<String?>(null) }
+    // The source and placeholder status last written to the failover log, so each change logs once.
+    var placeholderLoggedCheck by remember { mutableStateOf<String?>(null) }
+    // The placeholder source still waiting for the source search to find something to switch to.
+    var placeholderAwaitingSources by remember { mutableStateOf<String?>(null) }
+    // Provider labels can differ for the same request; different access headers remain eligible.
+    var placeholderRequests by remember { mutableStateOf(emptySet<PlaybackRequestIdentity>()) }
+    var loadedSource by remember { mutableStateOf<String?>(null) }
+    var currentSourceIsLive by remember { mutableStateOf(args.isLiveStream) }
+    var confirmedSource by remember { mutableStateOf<String?>(null) }
+    fun selectedSourceKey(): String? =
+        latestUiState.selectedStreamUrl?.let { "${latestUiState.streamSelectionNonce}|$it" }
+    fun matchedIptvVodPlayback(): Boolean = isMatchedIptvVodPlayback(
+        args.mediaType, args.mediaId, args.tmdbSeasonNumber ?: args.seasonNumber,
+        args.tmdbEpisodeNumber ?: args.episodeNumber, latestUiState.selectedStream?.addonId, args.isLiveStream
+    )
+    fun playbackVideoStatus(): PlaybackVideoStatus = classifyPlaybackVideo(
+        durationMs = playbackTrackingDurationMs(duration, currentSourceIsLive, matchedIptvVodPlayback()),
+        expectedDurationMs = latestUiState.expectedDurationMs,
+        playbackUrl = latestUiState.selectedStreamUrl,
+        metadataPending = latestUiState.isLoadingPlaybackMetadata,
+        isLive = args.isLiveStream || (currentSourceIsLive && !matchedIptvVodPlayback()),
+        allowUnknownDurationVod = matchedIptvVodPlayback() && hasPlaybackStarted
+    )
+    fun playingCheckedRealSource(): Boolean = canPersistPlaybackSource(
+        selectedSourceKey(), loadedSource, placeholderCheckedSource, playbackVideoStatus()
+    )
 
-    // Skip overlay state - shows +10/-10 without showing full controls
-    var skipAmount by remember { mutableIntStateOf(0) }
-    var showSkipOverlay by remember { mutableStateOf(false) }
-    var lastSkipTime by remember { mutableLongStateOf(0L) }
-    var skipStartPosition by remember { mutableLongStateOf(0L) }  // Position when skipping started
-    var skipPreviewPosition by remember { mutableLongStateOf(0L) }
-    var isControlScrubbing by remember { mutableStateOf(false) }
-    var scrubPreviewPosition by remember { mutableLongStateOf(0L) }
-    var controlsSeekJob by remember { mutableStateOf<Job?>(null) }
+    // Direct D-pad seek state, separate from the full controls overlay.
+    var seekInteraction by remember { mutableStateOf(SeekInteraction()) }
+    val showSkipOverlay = seekInteraction.quickVisible
+    val lastSkipTime = seekInteraction.lastInputMs
+    val skipPreviewPosition = seekInteraction.targetMs
+    val isControlScrubbing = seekInteraction.browsing && seekInteraction.surface != SeekSurface.Quick
+    val scrubPreviewPosition = seekInteraction.targetMs
 
     // Volume state
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: android.media.AudioManager::class.java.getDeclaredConstructor().newInstance() }
@@ -416,10 +567,14 @@ fun PlayerScreen(
     var focusedButton by remember { mutableIntStateOf(0) }
     var showSubtitleMenu by remember { mutableStateOf(false) }
     var showSourceMenu by remember { mutableStateOf(false) }
+
+    var seekPreviewFrame by remember { mutableStateOf<SeekPreviewFrame?>(null) }
+    var previewVideoFormat by remember { mutableStateOf<androidx.media3.common.Format?>(null) }
+    var trackbarFocused by remember { mutableStateOf(false) }
+    var unavailablePreviewTarget by remember { mutableStateOf<Pair<Long, Long>?>(null) }
     // Post-episode "Up Next" prompt (issue #86). Shown on STATE_ENDED for TV shows:
     // a 10-second countdown lets the user stop watching or immediately Continue. On timeout we
-    // advance to the next episode. Gated on the existing autoPlayNext profile setting —
-    // when disabled we simply stay on the ended frame rather than advancing silently.
+    // advance to the next episode. Otherwise completion returns to the previous screen.
     var showNextEpisodePrompt by remember { mutableStateOf(false) }
     var pendingNextIdentity by remember { mutableStateOf<EpisodeIdentity?>(null) }
     var pendingNextAddonId by remember { mutableStateOf<String?>(null) }
@@ -431,42 +586,59 @@ fun PlayerScreen(
         mutableStateOf<NextEpisodeAirDateResolution>(NextEpisodeAirDateResolution.Pending)
     }
     var previousEpisodeIdentity by remember { mutableStateOf<EpisodeIdentity?>(null) }
-    LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber, tmdbSeasonNumber, tmdbEpisodeNumber, kitsuId, kitsuEpisodeNumber) {
+    LaunchedEffect(args.mediaType, args.mediaId, args.seasonNumber, args.episodeNumber, args.tmdbSeasonNumber, args.tmdbEpisodeNumber, args.kitsuId, args.kitsuEpisodeNumber) {
         nextEpisodeIdentity = null
         nextEpisodeAirDateSource = if (
-            mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null
+            args.mediaType == MediaType.TV && args.seasonNumber != null && args.episodeNumber != null
         ) {
             PlaybackEpisodeKey(
-                mediaId = mediaId,
-                seasonNumber = seasonNumber,
-                episodeNumber = episodeNumber,
-                tmdbSeasonNumber = tmdbSeasonNumber ?: seasonNumber,
-                tmdbEpisodeNumber = tmdbEpisodeNumber ?: episodeNumber,
-                kitsuId = kitsuId,
-                kitsuEpisodeNumber = kitsuEpisodeNumber,
+                mediaId = args.mediaId,
+                seasonNumber = args.seasonNumber,
+                episodeNumber = args.episodeNumber,
+                tmdbSeasonNumber = args.tmdbSeasonNumber ?: args.seasonNumber,
+                tmdbEpisodeNumber = args.tmdbEpisodeNumber ?: args.episodeNumber,
+                kitsuId = args.kitsuId,
+                kitsuEpisodeNumber = args.kitsuEpisodeNumber,
             )
         } else {
             null
         }
         nextEpisodeAirDateResolution = NextEpisodeAirDateResolution.Pending
-        if (mediaType == MediaType.TV && seasonNumber != null && episodeNumber != null) {
+        if (args.mediaType == MediaType.TV && args.seasonNumber != null && args.episodeNumber != null) {
             val current = EpisodeIdentity(
-                displaySeason = seasonNumber,
-                displayEpisode = episodeNumber,
-                tmdbSeason = tmdbSeasonNumber ?: seasonNumber,
-                tmdbEpisode = tmdbEpisodeNumber ?: episodeNumber,
-                kitsuId = kitsuId,
-                kitsuEpisode = kitsuEpisodeNumber
+                displaySeason = args.seasonNumber,
+                displayEpisode = args.episodeNumber,
+                tmdbSeason = args.tmdbSeasonNumber ?: args.seasonNumber,
+                tmdbEpisode = args.tmdbEpisodeNumber ?: args.episodeNumber,
+                kitsuId = args.kitsuId,
+                kitsuEpisode = args.kitsuEpisodeNumber
             )
-            val next = viewModel.adjacentEpisodeIdentity(mediaId, current, forward = true)
+            val next = try {
+                withTimeoutOrNull(10_000L) {
+                    viewModel.adjacentEpisodeIdentity(args.mediaId, current, forward = true)
+                }
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                null
+            }
             nextEpisodeIdentity = next
-            previousEpisodeIdentity = viewModel.adjacentEpisodeIdentity(mediaId, current, forward = false)
             nextEpisodeAirDateResolution = if (next == null) {
                 NextEpisodeAirDateResolution.Blocked(
                     NextEpisodeAirDateBlockReason.MissingEpisode,
                 )
             } else {
-                viewModel.resolveNextEpisodeAirDate(mediaId, next)
+                viewModel.resolveNextEpisodeAirDate(args.mediaId, next)
+            }
+            // Previous-episode metadata must not delay the end-of-episode decision.
+            previousEpisodeIdentity = try {
+                withTimeoutOrNull(10_000L) {
+                    viewModel.adjacentEpisodeIdentity(args.mediaId, current, forward = false)
+                }
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                null
             }
         } else {
             nextEpisodeAirDateResolution = NextEpisodeAirDateResolution.Blocked(
@@ -480,10 +652,11 @@ fun PlayerScreen(
     val playNextEpisode: (EpisodeIdentity, String?, String?, String?) -> Unit =
         { nextIdentity, nextAddonId, nextSourceName, nextBingeGroup ->
             if (!nextEpisodeTransitionInProgress) {
+                val shouldSaveProgress = playingCheckedRealSource()
                 nextEpisodeTransitionInProgress = true
 
                 val positionSnapshot = currentPosition
-                val durationSnapshot = duration
+                val durationSnapshot = playbackTrackingDurationMs(duration, currentSourceIsLive, matchedIptvVodPlayback())
                 val playbackStateSnapshot = currentPlaybackState
                 val progressPercentSnapshot = if (durationSnapshot > 0L) {
                     ((positionSnapshot.toDouble() / durationSnapshot.toDouble()) * 100.0)
@@ -494,17 +667,25 @@ fun PlayerScreen(
                 }
 
                 coroutineScope.launch {
-                    runCatching {
-                        viewModel.saveProgressAndWait(
-                            position = positionSnapshot,
-                            duration = durationSnapshot,
-                            progressPercent = progressPercentSnapshot,
-                            isPlaying = false,
-                            playbackState = playbackStateSnapshot
-                        )
+                    try {
+                        if (shouldSaveProgress) {
+                            withTimeoutOrNull(2_000L) {
+                                viewModel.saveProgressAndWait(
+                                    position = positionSnapshot,
+                                    duration = durationSnapshot,
+                                    progressPercent = progressPercentSnapshot,
+                                    isPlaying = false,
+                                    playbackState = playbackStateSnapshot
+                                )
+                            }
+                        }
+                    } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                        throw cancellation
+                    } catch (_: Exception) {
+                        // A failed tracking write must not block the next episode.
                     }
 
-                    onPlayNext(
+                    args.onPlayNext(
                         nextIdentity,
                         nextAddonId,
                         nextSourceName,
@@ -524,11 +705,8 @@ fun PlayerScreen(
             pendingNextBingeGroup
         )
     }
-    val cancelNextEpisodePrompt: () -> Unit = {
-        showNextEpisodePrompt = false
-        onBack()
-    }
-    var playerResizeMode by remember { mutableIntStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+    var currentAspectRatioMode by remember { mutableStateOf(AspectRatioMode.AUTO) }
+    val playerResizeMode = currentAspectRatioMode.resizeMode
     var subtitleMenuIndex by remember { mutableIntStateOf(0) }
     var subtitleMenuTab by remember { mutableIntStateOf(0) } // 0 = Subtitles, 1 = Audio
     var subtitleLangIndex by remember { mutableIntStateOf(0) }
@@ -538,13 +716,16 @@ fun PlayerScreen(
     var showSubtitleSettings by remember { mutableStateOf(false) }
     var subtitleSettingsRow by remember { mutableIntStateOf(0) }  // 0=Delay, 1=Size, 2=Vertical
     var subtitleSyncOffsetMs by remember { mutableLongStateOf(0L) }
-    var subtitleSizePct by remember { mutableIntStateOf(100) }
-    var subtitleVerticalPct by remember {
-        mutableIntStateOf(when (uiState.subtitleOffset) {
-            "Bottom" -> 2; "Low" -> 8; "Medium" -> 15; "High" -> 25; else -> 8
-        })
+    var subtitleSizePct by remember { mutableIntStateOf(uiState.subtitleSizePct) }
+    var subtitleVerticalPct by remember { mutableIntStateOf(uiState.subtitleVerticalPct) }
+    LaunchedEffect(uiState.subtitleSizePct) {
+        subtitleSizePct = uiState.subtitleSizePct
+    }
+    LaunchedEffect(uiState.subtitleVerticalPct) {
+        subtitleVerticalPct = uiState.subtitleVerticalPct
     }
     var useVideoFrameSubtitleViewport by remember { mutableStateOf(false) }
+    var hasActiveSubtitleCues by remember { mutableStateOf(false) }
     val subtitleGroups = remember(uiState.subtitles, uiState.preferredSubtitleLang, uiState.secondarySubtitleLang, uiState.selectedStream, uiState.isAiAvailable, uiState.aiTargetLanguageName) {
         val streamSource = uiState.selectedStream?.source ?: ""
         val primaryName = getFullLanguageName(uiState.preferredSubtitleLang)
@@ -612,7 +793,9 @@ fun PlayerScreen(
     // Post-selection status for the loading overlay ("Loading subtitles…" during the preload
     // gate, "Loading video stream…" while preparing). Overrides uiState.streamLoadPhase, which
     // only covers source discovery and goes blank once a source is picked.
-    var startupPhase by remember { mutableStateOf<String?>(null) }
+    // Holds a string resource id, not rendered text: the phase is compared below to decide
+    // whether to append the pending addon names, and a localized literal would break that check.
+    var startupPhase by remember { mutableStateOf<Int?>(null) }
     // Failover notice, displayed ON TOP of startupPhase for a fixed minimum time: a fast source
     // switch (resolve can take <100ms) would otherwise overwrite it as an unreadable blink.
     // Overlaying instead of delaying keeps the actual failover at full speed.
@@ -632,7 +815,7 @@ fun PlayerScreen(
     var startupSameSourceRefreshAttempted by remember { mutableStateOf(false) }
     var startupUrlLock by remember { mutableStateOf<String?>(null) }
     var pendingStartupFailover by remember { mutableStateOf(false) }
-    var pendingStartupFailoverMessage by remember { mutableStateOf<String?>(null) }
+    var pendingStartupFailoverMessage by remember { mutableStateOf<PlayerMessage?>(null) }
     var pendingStartupFailureRecorded by remember { mutableStateOf(false) }
     var dvStartupFallbackStage by remember { mutableIntStateOf(0) } // 0=none, 1=HEVC forced, 2=AVC forced
     var midPlaybackRecoveryAttempts by remember { mutableIntStateOf(0) }
@@ -645,11 +828,40 @@ fun PlayerScreen(
     var autoAdvanceAttempts by remember { mutableIntStateOf(0) }
     var triedStreamIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var isAutoAdvancing by remember { mutableStateOf(false) }
-    var lastProgressReportSecond by remember { mutableLongStateOf(-1L) }
+    var lastProgressReportSecond by remember(selectedSourceKey()) { mutableLongStateOf(-1L) }
+    var lastProgressReportPlaying by remember(selectedSourceKey()) { mutableStateOf<Boolean?>(null) }
     // Guard against accessing a released ExoPlayer from long-running coroutines (can crash on some devices).
     // AtomicBoolean gives cross-thread visibility; Compose state drives recomposition.
     val playerReleasedAtomic = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
+    val lastRenderedVideoFrameUs = remember {
+        java.util.concurrent.atomic.AtomicLong(androidx.media3.common.C.TIME_UNSET)
+    }
+    val playbackFrameRate = remember { com.arflix.tv.util.PlaybackFrameRate() }
+    val observedFrameRates = remember(context) { com.arflix.tv.util.PlaybackFrameRates.get(context) }
+    val observedContentId = remember(args.mediaType, args.mediaId, args.imdbId, args.seasonNumber,
+        args.episodeNumber, args.kitsuId, args.kitsuEpisodeNumber) {
+        "${args.mediaType}|${args.mediaId}|${args.imdbId}|${args.seasonNumber}|${args.episodeNumber}|${args.kitsuId}|${args.kitsuEpisodeNumber}"
+    }
+    val observedRateKey = remember(uiState.selectedStream, uiState.selectedStreamUrl, args.isLiveStream, observedContentId) {
+        val stream = uiState.selectedStream
+        val url = uiState.selectedStreamUrl
+        if (!com.arflix.tv.ui.screens.player.engine.exoplayer.useVodPlaybackPolicy(stream, args.isLiveStream, url)) null
+        else com.arflix.tv.util.observedFrameRateKey(
+            url!!, stream?.behaviorHints?.proxyHeaders?.request.orEmpty().safePlaybackHeaders(),
+            stream?.behaviorHints?.filename, stream?.sizeBytes ?: stream?.behaviorHints?.videoSize,
+            observedContentId,
+            stream?.addonId.orEmpty()
+        )
+    }
+    LaunchedEffect(observedRateKey, confirmedSource, loadedSource) {
+        val key = observedRateKey ?: return@LaunchedEffect
+        if (confirmedSource == null || confirmedSource != selectedSourceKey() || confirmedSource != loadedSource) return@LaunchedEffect
+        playbackFrameRate.rate.collect { fps -> if (fps > 0f) observedFrameRates.record(key, fps) }
+    }
+    var frameRateSurface by remember { mutableStateOf<android.view.Surface?>(null) }
     var playerReleased by remember { mutableStateOf(false) }
+    /** The player left on its own after an idle period; its exit must not save progress. */
+    var leftForIdle by remember { mutableStateOf(false) }
 
     // Picture-in-Picture state
     var isInPipMode by remember { mutableStateOf(false) }
@@ -750,7 +962,16 @@ fun PlayerScreen(
     }
 
     // Load media
-    LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber, tmdbSeasonNumber, tmdbEpisodeNumber, kitsuId, kitsuEpisodeNumber, imdbId, preferredAddonId, preferredSourceName, preferredBingeGroup, startPositionMs, isLiveStream) {
+    LaunchedEffect(args.mediaType, args.mediaId, args.seasonNumber, args.episodeNumber, args.tmdbSeasonNumber, args.tmdbEpisodeNumber, args.kitsuId, args.kitsuEpisodeNumber, args.imdbId, args.preferredAddonId, args.preferredSourceName, args.preferredBingeGroup, args.startPositionMs, args.isLiveStream) {
+        // Last line of the kids filter: whatever led here, an over-age or unrated title
+        // does not play on a kids profile.
+        if (!viewModel.isAllowedForKids(args.mediaType, args.mediaId)) {
+            android.widget.Toast.makeText(
+                context, R.string.kids_title_blocked, android.widget.Toast.LENGTH_LONG
+            ).show()
+            args.onBack()
+            return@LaunchedEffect
+        }
         playbackIssueReported = false
         startupRecoverAttempted = false
         startupHardFailureReported = false
@@ -768,24 +989,29 @@ fun PlayerScreen(
         longRebufferCount = 0
         autoAdvanceAttempts = 0
         triedStreamIndexes = emptySet()
+        placeholderRequests = emptySet()
+        placeholderAwaitingSources = null
+        placeholderHandledSource = null
+        placeholderLoggedCheck = null
         isAutoAdvancing = false
         userSelectedSourceManually = false
         readyPlayingSinceMs = null
         viewModel.loadMedia(
-            mediaType = mediaType,
-            mediaId = mediaId,
-            seasonNumber = tmdbSeasonNumber,
-            episodeNumber = tmdbEpisodeNumber,
-            displaySeasonNumber = seasonNumber,
-            displayEpisodeNumber = episodeNumber,
-            animeQueryOverride = kitsuId?.let { id -> kitsuEpisodeNumber?.let { episode -> "kitsu:$id:$episode" } },
-            providedImdbId = imdbId,
-            providedStreamUrl = streamUrl,
-            preferredAddonId = preferredAddonId,
-            preferredSourceName = preferredSourceName,
-            preferredBingeGroup = preferredBingeGroup,
-            startPositionMs = startPositionMs,
-            isLiveStreamPlayback = isLiveStream
+            mediaType = args.mediaType,
+            mediaId = args.mediaId,
+            seasonNumber = args.tmdbSeasonNumber,
+            episodeNumber = args.tmdbEpisodeNumber,
+            displaySeasonNumber = args.seasonNumber,
+            displayEpisodeNumber = args.episodeNumber,
+            animeQueryOverride = args.kitsuId?.let { id -> args.kitsuEpisodeNumber?.let { episode -> "kitsu:$id:$episode" } },
+            providedImdbId = args.imdbId,
+            providedStreamUrl = args.streamUrl,
+            preferredAddonId = args.preferredAddonId,
+            preferredSourceName = args.preferredSourceName,
+            preferredBingeGroup = args.preferredBingeGroup,
+            startPositionMs = args.startPositionMs,
+            isLiveStreamPlayback = args.isLiveStream,
+            providedIptvSourceId = args.iptvSourceId
         )
     }
 
@@ -794,10 +1020,14 @@ fun PlayerScreen(
     fun tryAdvanceToNextStream(
         skipAddonId: String? = null,
         recordCurrentFailure: Boolean = true,
-        reason: String = "Source didn't start"
+        reason: String = context.getString(R.string.player_fail_source_didnt_start)
     ): Boolean {
         val streams = uiState.streams
         return if (streams.size <= 1) {
+            sourceFailoverLog(
+                "no next source after ${uiState.selectedStream.failoverSummary()} reason=$reason " +
+                    "sources=${streams.size} searching=${uiState.sourceSearchActive}"
+            )
             viewModel.onFailoverAttempt(success = false)
             false
         } else {
@@ -806,15 +1036,30 @@ fun PlayerScreen(
                 .firstOrNull { idx ->
                     val candidate = streams[idx]
                     candidate.url?.isNotBlank() == true &&
+                        viewModel.isEligibleForAutomaticPlayback(candidate) &&
                         idx !in triedStreamIndexes &&
+                        canTryFailoverSource(candidate, uiState.selectedStream, uiState.selectedStreamUrl, placeholderRequests) &&
                         (skipAddonId.isNullOrBlank() || candidate.addonId != skipAddonId) &&
                         !viewModel.isPlaybackHostTemporarilyBad(candidate)
                 } ?: -1
 
             if (nextIndex < 0) {
+                sourceFailoverLog(
+                    "no next source after ${uiState.selectedStream.failoverSummary()} reason=$reason " +
+                        "sources=${streams.size} tried=${triedStreamIndexes.size} " +
+                        "blankUrl=${streams.count { it.url.isNullOrBlank() }} " +
+                        "awaitingDownload=${streams.count(::isAwaitingDebridDownload)} " +
+                        "notAutoplayable=${streams.count { !viewModel.isEligibleForAutomaticPlayback(it) }} " +
+                        "badHost=${streams.count { viewModel.isPlaybackHostTemporarilyBad(it) }} " +
+                        "skipAddon=${skipAddonId ?: "-"}"
+                )
                 viewModel.onFailoverAttempt(success = false)
                 false
             } else {
+                sourceFailoverLog(
+                    "switching source reason=$reason from=${uiState.selectedStream.failoverSummary()} " +
+                        "to=${streams[nextIndex].failoverSummary()} index=$currentStreamIndex->$nextIndex/${streams.size}"
+                )
                 viewModel.onFailoverAttempt(success = true)
                 autoAdvanceAttempts += 1
                 playbackStartupDiag(
@@ -828,12 +1073,11 @@ fun PlayerScreen(
                 currentStreamIndex = nextIndex
                 triedStreamIndexes = triedStreamIndexes + nextIndex
                 val next = streams[nextIndex]
-                switchNotice = buildString {
-                    append(reason)
-                    append(" — switching")
-                    val desc = listOf(next.quality, next.size).filter { it.isNotBlank() }.joinToString(" · ")
-                    if (desc.isNotBlank()) append(" to $desc")
-                    append("…")
+                val desc = listOf(next.quality, next.size).filter { it.isNotBlank() }.joinToString(" · ")
+                switchNotice = if (desc.isNotBlank()) {
+                    context.getString(R.string.player_switch_notice_to, reason, desc)
+                } else {
+                    context.getString(R.string.player_switch_notice, reason)
                 }
                 switchNoticeUntilMs = System.currentTimeMillis() + 3_500L
                 userSelectedSourceManually = false
@@ -856,6 +1100,31 @@ fun PlayerScreen(
         }
     }
 
+    // A placeholder found while the source search was still running: try the next source each
+    // time more sources arrive, and stop once the search is over or another source is playing.
+    LaunchedEffect(placeholderAwaitingSources, uiState.streams, uiState.sourceSearchActive,
+        uiState.streamSelectionNonce, userSelectedSourceManually) {
+        val waitingSource = placeholderAwaitingSources ?: return@LaunchedEffect
+        // Let the index sync below place the playing source in the new list first; otherwise the
+        // search starts from the old one-entry list's index and skips the new list's first source.
+        kotlinx.coroutines.yield()
+        if (waitingSource != selectedSourceKey() || userSelectedSourceManually) {
+            placeholderAwaitingSources = null
+            return@LaunchedEffect
+        }
+        if (tryAdvanceToNextStream(
+                recordCurrentFailure = false,
+                reason = context.getString(R.string.player_fail_source_not_ready)
+            )
+        ) {
+            placeholderAwaitingSources = null
+            streamSelectedTime = System.currentTimeMillis()
+            startupRecoverAttempted = false
+        } else if (!uiState.sourceSearchActive) {
+            placeholderAwaitingSources = null
+        }
+    }
+
     LaunchedEffect(
         pendingStartupFailover,
         uiState.streams,
@@ -872,12 +1141,13 @@ fun PlayerScreen(
 
         val sourceSearchStillActive = uiState.sourceSearchActive ||
             uiState.streamProgress != null ||
-            !uiState.streamLoadPhase.isNullOrBlank()
+            uiState.streamLoadPhase != null
         if (!sourceSearchStillActive && !playbackIssueReported) {
             playbackIssueReported = true
             pendingStartupFailover = false
             viewModel.reportPlaybackError(
-                pendingStartupFailoverMessage ?: "Source failed during startup. Try another source."
+                pendingStartupFailoverMessage
+                    ?: PlayerMessage.Res(R.string.player_fail_startup_generic)
             )
         }
     }
@@ -898,7 +1168,8 @@ fun PlayerScreen(
         viewModel.onPlaybackStarted(
             startupMs = startupMs,
             startupRetries = startupSameSourceRetryCount + if (startupSameSourceRefreshAttempted) 1 else 0,
-            autoFailovers = autoAdvanceAttempts
+            autoFailovers = autoAdvanceAttempts,
+            networkTiming = startupTrace.finish().summary()
         )
     }
 
@@ -910,17 +1181,44 @@ fun PlayerScreen(
         )
     }
     val playbackCookieJar = remember { PlaybackCookieJar() }
-    val playbackHttpClient = remember(playbackCookieJar) {
+    val vodPolicyEnabled = com.arflix.tv.ui.screens.player.engine.exoplayer.useVodPlaybackPolicy(
+        uiState.selectedStream, args.isLiveStream, uiState.selectedStreamUrl
+    )
+    val progressiveRetry = remember(vodPolicyEnabled, uiState.selectedStreamUrl, uiState.streamSelectionNonce) {
+        if (vodPolicyEnabled) com.arflix.tv.ui.screens.player.engine.exoplayer.VodLoadErrorHandlingPolicy(true) else null
+    }
+    val adaptiveRetry = remember(vodPolicyEnabled, uiState.selectedStreamUrl, uiState.streamSelectionNonce) {
+        if (vodPolicyEnabled) com.arflix.tv.ui.screens.player.engine.exoplayer.VodLoadErrorHandlingPolicy(false) else null
+    }
+    val playbackHttpClient = remember(playbackCookieJar, vodPolicyEnabled) {
         OkHttpProvider.playbackClient.newBuilder()
             .cookieJar(playbackCookieJar)
+            .eventListenerFactory(startupTrace.listenerFactory)
+            .apply {
+                if (vodPolicyEnabled) readTimeout(
+                    com.arflix.tv.ui.screens.player.engine.exoplayer.VOD_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS
+                )
+            }
             .build()
+    }
+    val iptvVodGate = rememberIptvVodGate()
+    val mediaCache = remember(context) { com.arflix.tv.player.cache.PlaybackCache.get(context) }
+    val seekPreviewProvider = remember(playbackHttpClient, playbackMemoryClassMb, mediaCache) {
+        SeekPreviewFrameProvider(
+            context = context,
+            playbackClient = playbackHttpClient,
+            memoryClassMb = playbackMemoryClassMb,
+            playbackCache = mediaCache,
+        )
+    }
+    DisposableEffect(seekPreviewProvider) {
+        onDispose { seekPreviewProvider.close() }
     }
     val httpDataSourceFactory = remember(playbackHttpClient) {
         OkHttpDataSource.Factory(playbackHttpClient)
             .setUserAgent(OkHttpProvider.userAgent)
             .setDefaultRequestProperties(baseRequestHeaders)
     }
-    val mediaCache = remember(context) { PlaybackCacheSingleton.getInstance(context) }
     // Wrap the OkHttp factory so file:// URIs also work — matched subtitles are served from a
     // local cache file (already downloaded by the scan) instead of re-fetching addon servers.
     // http/https still routes through the same OkHttp client as before.
@@ -944,6 +1242,7 @@ fun PlayerScreen(
     // source): a URL first gets safe-audio (constrain channels + no tunneling), then audio-disabled
     // (video keeps playing). Each fires once per URL; cleared on new-source load.
     val safeAudioForcedUrls = remember { mutableSetOf<String>() }
+    val surroundFallbackUrls = remember { mutableSetOf<String>() }
     val audioDisabledForcedUrls = remember { mutableSetOf<String>() }
     fun dvStripEnabledNow(): Boolean =
         latestUiState.dolbyVisionCompatEnabled ||
@@ -961,36 +1260,54 @@ fun PlayerScreen(
         }
     }
 
+    // Sync by hearing (audiosync.ArvioAudioSync): every extractor also copies the playing stream's
+    // audio to the audio sync — idle unless it is listening. DV stripping, when on, stays underneath.
+    val audioTapExtractorsFactory = remember(dvStripExtractorsFactory) {
+        com.arflix.tv.ui.screens.player.audiosync.AudioSyncTaps.wrapExtractors(
+            dvStripExtractorsFactory ?: androidx.media3.extractor.DefaultExtractorsFactory()
+        ) { latestUiState.selectedStreamUrl }
+    }
+
     // Non-cached factory for heavy/debrid progressive streams to avoid disk I/O bottleneck.
     // The DV variant only differs by the rewriting ExtractorsFactory (MKV-only inside).
-    val directProgressiveFactory = remember(httpDataSourceFactory) {
-        ProgressiveMediaSource.Factory(httpDataSourceFactory)
+    val directProgressiveFactory = remember(httpDataSourceFactory, progressiveRetry) {
+        ProgressiveMediaSource.Factory(httpDataSourceFactory, audioTapExtractorsFactory)
+            .also { factory -> progressiveRetry?.let { factory.setLoadErrorHandlingPolicy(it) } }
     }
-    val directProgressiveDvFactory = remember(httpDataSourceFactory, dvStripExtractorsFactory) {
-        dvStripExtractorsFactory?.let { ProgressiveMediaSource.Factory(httpDataSourceFactory, it) }
+    val directProgressiveDvFactory = remember(httpDataSourceFactory, dvStripExtractorsFactory, progressiveRetry) {
+        dvStripExtractorsFactory?.let {
+            ProgressiveMediaSource.Factory(httpDataSourceFactory, audioTapExtractorsFactory)
+                .also { factory -> progressiveRetry?.let { factory.setLoadErrorHandlingPolicy(it) } }
+        }
+    }
+
+    val iptvVodMediaSources = remember(playbackHttpClient, audioTapExtractorsFactory) {
+        IptvVodMediaSources(context, playbackHttpClient, OkHttpProvider.userAgent, audioTapExtractorsFactory)
     }
 
     // Protocol-specific media source factories for faster startup
-    val hlsFactory = remember(httpDataSourceFactory) {
+    val hlsFactory = remember(httpDataSourceFactory, adaptiveRetry) {
         HlsMediaSource.Factory(httpDataSourceFactory)
             .setAllowChunklessPreparation(true)
+            .also { factory -> adaptiveRetry?.let { factory.setLoadErrorHandlingPolicy(it) } }
     }
-    val dashFactory = remember(httpDataSourceFactory) {
+    val dashFactory = remember(httpDataSourceFactory, adaptiveRetry) {
         DashMediaSource.Factory(httpDataSourceFactory)
+            .also { factory -> adaptiveRetry?.let { factory.setLoadErrorHandlingPolicy(it) } }
     }
-    val mediaSourceFactory = remember(httpDataSourceFactory) {
-        (dvStripExtractorsFactory?.let { DefaultMediaSourceFactory(context, it) }
-            ?: DefaultMediaSourceFactory(context))
+    val mediaSourceFactory = remember(httpDataSourceFactory, adaptiveRetry) {
+        DefaultMediaSourceFactory(context, audioTapExtractorsFactory)
             .setDataSourceFactory(cacheDataSourceFactory)
+            .also { factory -> adaptiveRetry?.let { factory.setLoadErrorHandlingPolicy(it) } }
     }
     // "Preload Subtitles" mode: sidecar subtitle configs only merge through a
     // DefaultMediaSourceFactory, but the cached one above would route heavy/debrid video through
     // the disk cache (I/O bottleneck). This variant keeps file:// support for the local subtitle
     // copies while streaming video uncached, like directProgressiveFactory.
-    val preloadMediaSourceFactory = remember(fileCapableDataSourceFactory) {
-        (dvStripExtractorsFactory?.let { DefaultMediaSourceFactory(context, it) }
-            ?: DefaultMediaSourceFactory(context))
+    val preloadMediaSourceFactory = remember(fileCapableDataSourceFactory, adaptiveRetry) {
+        DefaultMediaSourceFactory(context, audioTapExtractorsFactory)
             .setDataSourceFactory(fileCapableDataSourceFactory)
+            .also { factory -> adaptiveRetry?.let { factory.setLoadErrorHandlingPolicy(it) } }
     }
 
     // ExoPlayer - tuned for both small and very large files. The byte cap scales
@@ -1007,7 +1324,7 @@ fun PlayerScreen(
     // Wire AudioCaptureProcessor → GeminiLiveTranslationService when live audio is active.
     LaunchedEffect(uiState.isLiveAudioTranslating) {
         aiRenderersFactory.audioCaptureProcessor?.onChunk = if (uiState.isLiveAudioTranslating) {
-            { bytes, captureMs -> viewModel.geminiLiveService.sendAudioChunk(bytes, captureMs) }
+            { bytes: ByteArray, captureMs: Long -> viewModel.geminiLiveService.sendAudioChunk(bytes, captureMs) }
         } else {
             null
         }
@@ -1021,17 +1338,36 @@ fun PlayerScreen(
         viewModel.bufferedCueTextsProvider = { max ->
             aiRenderersFactory.extractBufferedCueTexts(max)
         }
+        viewModel.bufferedReferenceCuesProvider = { max ->
+            aiRenderersFactory.extractBufferedReferenceCues(max)
+        }
+    }
+    // The auto-match correction reaches the renderer only while its own track is the selected one.
+    LaunchedEffect(uiState.autoSync, uiState.autoSyncSubtitleKey, uiState.selectedSubtitle) {
+        val selectedKey = uiState.selectedSubtitle?.let { "${it.provider}|${it.id}" }
+        aiRenderersFactory.autoSync.set(
+            uiState.autoSync?.takeIf { uiState.autoSyncSubtitleKey != null && uiState.autoSyncSubtitleKey == selectedKey }
+        )
     }
     DisposableEffect(aiRenderersFactory) {
         onDispose {
             aiRenderersFactory.audioCaptureProcessor?.onChunk = null
+            aiRenderersFactory.autoSync.set(null)
             viewModel.bufferedReferenceIntervalsProvider = null
             viewModel.bufferedCueTextsProvider = null
+            viewModel.bufferedReferenceCuesProvider = null
+            viewModel.selectedTextTrackProvider = null
             viewModel.geminiLiveService.disconnect()
         }
     }
 
-    val exoPlayer = remember(isConstrainedPlaybackDevice, preferExtensionDecoder, playbackBufferProfile) {
+    val compatibility = remember(activity) {
+        PlaybackCompatibility.session {
+            @Suppress("DEPRECATION")
+            activity?.windowManager?.defaultDisplay?.refreshRate
+        }
+    }
+    val exoPlayer = remember(isConstrainedPlaybackDevice, preferExtensionDecoder, playbackBufferProfile, compatibility) {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 playbackBufferProfile.minBufferMs,
@@ -1041,10 +1377,11 @@ fun PlayerScreen(
             )
             .setTargetBufferBytes(playbackBufferProfile.targetBufferBytes)
             .setPrioritizeTimeOverSizeThresholds(playbackBufferProfile.prioritizeTimeOverSizeThresholds)
-            .setBackBuffer(playbackBufferProfile.backBufferMs, false)
+            .setBackBuffer(playbackBufferProfile.backBufferMs, playbackBufferProfile.prioritizeTimeOverSizeThresholds)
             .build()
 
         ExoPlayer.Builder(context)
+            .setVideoChangeFrameRateStrategy(C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF)
             .setMediaSourceFactory(mediaSourceFactory)
             .setRenderersFactory(
                 aiRenderersFactory
@@ -1098,13 +1435,38 @@ fun PlayerScreen(
                 /* handleAudioFocus = */ true
             )
             .build().apply {
+                addAnalyticsListener(compatibility)
+                addListener(compatibility)
                 // Ensure volume is at maximum
                 volume = 1.0f
+                setVideoFrameMetadataListener { presentationTimeUs, _, format, _ ->
+                    lastRenderedVideoFrameUs.set(presentationTimeUs)
+                    playbackFrameRate.onFrame(presentationTimeUs, format.frameRate)
+                }
+                addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+                    override fun onVideoInputFormatChanged(
+                        eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                        format: androidx.media3.common.Format,
+                        decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+                    ) {
+                        playbackFrameRate.onInputFormat(format.frameRate)
+                        previewVideoFormat = format
+                    }
+                })
 
                 // Add error listener to try next stream on codec errors
+                addListener(com.arflix.tv.util.UsageAnalytics.playbackListener(live = false))
                 addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         currentPlaybackState = playbackState
+                        if (playbackState == Player.STATE_READY) iptvVodGate.noteReady(System.currentTimeMillis())
+                        if (playbackState == Player.STATE_READY || playbackState == Player.STATE_ENDED) {
+                            duration = this@apply.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+                            currentSourceIsLive = this@apply.isCurrentMediaItemLive
+                        }
+                        if (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE) {
+                            hasActiveSubtitleCues = false
+                        }
                         val stateStr = when (playbackState) {
                             Player.STATE_IDLE -> "IDLE"
                             Player.STATE_BUFFERING -> "BUFFERING"
@@ -1119,6 +1481,7 @@ fun PlayerScreen(
                     // Feed the selected text track's rendered cues to "Find best match" so it can
                     // read a built-in subtitle's timing (embedded tracks have no URL to parse).
                     override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
+                        hasActiveSubtitleCues = cueGroup.cues.any { !it.text.isNullOrBlank() }
                         val shouldUseVideoFrame = cueGroup.cues.requiresVideoFrameSubtitleViewport(
                             preserveAuthoredTextPositioning = latestUiState.subtitleStylized
                         )
@@ -1130,6 +1493,10 @@ fun PlayerScreen(
                             cueGroup.presentationTimeUs / 1000L,
                             cueGroup.cues.firstOrNull()?.text?.toString()
                         )
+                    }
+
+                    override fun onPlaybackParametersChanged(playbackParameters: androidx.media3.common.PlaybackParameters) {
+                        currentPlaybackSpeed = playbackParameters.speed
                     }
 
                     override fun onIsPlayingChanged(playing: Boolean) {
@@ -1145,6 +1512,8 @@ fun PlayerScreen(
 
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         if (playerReleasedAtomic.get()) return
+                        // This device closed that session on purpose, so it says nothing about the source.
+                        if (com.arflix.tv.network.isIptvStreamSessionClosed(error)) return
 
                         // If playback was already running (has started), transient IO/timeout errors
                         // during seek or normal playback should attempt recovery by re-preparing
@@ -1157,7 +1526,16 @@ fun PlayerScreen(
                                 error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
                                 error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT ||
                                 error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW
-                            if (isTransientError && midPlaybackRecoveryAttempts < 3) {
+                            if (isTransientError && iptvVodGate.session != null) {
+                                midPlaybackRecoveryAttempts = iptvVodGate.nextRungAttempt(midPlaybackRecoveryAttempts, System.currentTimeMillis())
+                                if (midPlaybackRecoveryAttempts <= 3) {
+                                    iptvVodGate.launchRung(
+                                        coroutineScope, this@apply, error, android.os.SystemClock.elapsedRealtime(),
+                                        viewModel::iptvAccountUsage, viewModel::reportIptvAccountBusy,
+                                    )
+                                    return
+                                }
+                            } else if (isTransientError && midPlaybackRecoveryAttempts < 3) {
                                 midPlaybackRecoveryAttempts++
                                 val pos = currentPosition.coerceAtLeast(0L)
                                 val wasPlaying = playWhenReady
@@ -1188,7 +1566,12 @@ fun PlayerScreen(
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
-                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT ||
+                            // Audio-track failures were missing here, which left the audio recovery
+                            // ladder below unreachable for the two codes it was written for:
+                            // onPlayerError did nothing at all and playback hung silently.
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+                            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED
 
                         if (isSourceError) {
                             val sourceLikelyDv = isLikelyDolbyVisionStream(latestUiState.selectedStream)
@@ -1263,6 +1646,19 @@ fun PlayerScreen(
                                 }
                                 return
                             }
+                            // A source reopened after the app was closed can carry a link that has
+                            // since expired (source lists are kept on disk for hours, and a restored
+                            // player screen keeps its old URL). Before giving the source up, fetch a
+                            // fresh source list once and play the SAME source from it.
+                            if (!hasPlaybackStarted && isTransientStartupReadError && !startupSameSourceRefreshAttempted &&
+                                !userSelectedSourceManually && latestUiState.selectedStream != null
+                            ) {
+                                startupSameSourceRefreshAttempted = true
+                                if (viewModel.refetchSameSourceFresh()) {
+                                    playbackStartupDiag("same-source fresh re-fetch code=${error.errorCode}")
+                                    return
+                                }
+                            }
                             if (!hasPlaybackStarted && heavy && isTimeoutError) {
                                 // One-time full re-resolve of same source to refresh debrid URL/headers.
                                 if (!startupSameSourceRefreshAttempted) {
@@ -1272,13 +1668,93 @@ fun PlayerScreen(
                                 }
                             }
 
+                            // True when the failing renderer is the AUDIO one. A decoder that dies
+                            // mid-stream surfaces as ERROR_CODE_DECODING_FAILED with no audio hint
+                            // in its message, so neither the error code nor the text sniff below
+                            // recognized it and the whole source was thrown away.
+                            val audioRendererError =
+                                (error as? androidx.media3.exoplayer.ExoPlaybackException)
+                                    ?.takeIf { it.type == androidx.media3.exoplayer.ExoPlaybackException.TYPE_RENDERER }
+                                    ?.let { MimeTypes.isAudio(it.rendererFormat?.sampleMimeType) } == true
+
+                            // Rung 0 — keep the SOUND. A hardware audio decoder can crash while
+                            // running and take an otherwise perfect source down with it (Pixel 7:
+                            // c2.dolby.eac3.decoder.eac3 dies ~0.5 s into a 5.1 E-AC3 track while
+                            // reporting format_supported=YES). setEnableDecoderFallback does not
+                            // cover this: it only reacts to codec INIT failures. Block the crashed
+                            // decoder and re-prepare — track selection then hands the track to the
+                            // bundled FFmpeg software renderer, so the audio survives instead of
+                            // being constrained or muted by the rungs below.
+                            val crashedAudioDecoder =
+                                (error.cause as? androidx.media3.exoplayer.mediacodec.MediaCodecDecoderException)
+                                    ?.codecInfo?.name
+                            if (audioRendererError &&
+                                crashedAudioDecoder != null &&
+                                aiRenderersFactory.blockAudioDecoder(
+                                    crashedAudioDecoder,
+                                    (error as? androidx.media3.exoplayer.ExoPlaybackException)?.rendererFormat
+                                )
+                            ) {
+                                compatibility.onRecovery(PlaybackCompatibility.Recovery.SOFTWARE)
+                                playbackStartupDiag(
+                                    "audio recovery: software decoder after crash in $crashedAudioDecoder"
+                                )
+                                val player = this@apply
+                                val resumeAt = player.currentPosition.coerceAtLeast(0L)
+                                val keepPlaying = player.playWhenReady
+                                player.stop()
+                                player.prepare()
+                                player.seekTo(resumeAt)
+                                player.playWhenReady = keepPlaying
+                                return
+                            }
+
+                            // An encoded AudioTrack can fail without any MediaCodec crashing.
+                            // Try a compatible surround track before the normal PCM recovery.
+                            val outputFailure = error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+                                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED
+                            val failedFormat = (error as? androidx.media3.exoplayer.ExoPlaybackException)?.rendererFormat
+                                ?: this@apply.audioFormat
+                            val source = latestUiState.selectedStreamUrl.orEmpty()
+                            if (outputFailure && source.isNotBlank() && source !in surroundFallbackUrls) {
+                                val alternate = com.arflix.tv.ui.screens.player.engine.exoplayer.compatibleSurroundTrack(
+                                    failedFormat, this@apply.currentTracks
+                                )
+                                if (alternate != null) {
+                                    surroundFallbackUrls.add(source)
+                                    compatibility.onRecovery(PlaybackCompatibility.Recovery.SURROUND_TRACK)
+                                    val player = this@apply
+                                    val resumeAt = player.currentPosition.coerceAtLeast(0L)
+                                    val keepPlaying = player.playWhenReady
+                                    player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                                        .setOverrideForType(alternate).build()
+                                    player.stop()
+                                    player.prepare()
+                                    player.seekTo(resumeAt)
+                                    player.playWhenReady = keepPlaying
+                                    return
+                                }
+                            }
+                            if (outputFailure && aiRenderersFactory.blockAudioPassthrough(failedFormat)) {
+                                compatibility.onRecovery(PlaybackCompatibility.Recovery.PCM)
+                                playbackStartupDiag("audio recovery: PCM after failed passthrough ${failedFormat?.sampleMimeType}")
+                                val resumeAt = this@apply.currentPosition.coerceAtLeast(0L)
+                                val keepPlaying = this@apply.playWhenReady
+                                this@apply.stop()
+                                this@apply.prepare()
+                                this@apply.seekTo(resumeAt)
+                                this@apply.playWhenReady = keepPlaying
+                                return
+                            }
+
                             // Audio recovery ladder — try to save the SAME source
                             // before skipping. An audio-track init/write failure (e.g. TrueHD/DTS
                             // the device can't render, or a channel layout it rejects) shouldn't
                             // lose an otherwise-good video source. Rung 1: constrain channels + no
                             // tunneling. Rung 2: drop audio entirely so video still plays.
                             val isAudioFailure =
-                                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+                                audioRendererError ||
+                                    error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
                                     error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED ||
                                     "audiotrack" in timeoutMessage || "audio track" in timeoutMessage
                             if (isAudioFailure) {
@@ -1289,6 +1765,7 @@ fun PlayerScreen(
                                 if (selector != null && currentUrl.isNotBlank() &&
                                     safeAudioForcedUrls.add(currentUrl)
                                 ) {
+                                    compatibility.onRecovery(PlaybackCompatibility.Recovery.CONSTRAINED)
                                     playbackStartupDiag("audio recovery: safe-audio for source")
                                     selector.parameters = selector.buildUponParameters()
                                         .setConstrainAudioChannelCountToDeviceCapabilities(true)
@@ -1301,6 +1778,7 @@ fun PlayerScreen(
                                 if (selector != null && currentUrl.isNotBlank() &&
                                     audioDisabledForcedUrls.add(currentUrl)
                                 ) {
+                                    compatibility.onRecovery(PlaybackCompatibility.Recovery.DISABLED)
                                     playbackStartupDiag("audio recovery: audio-disabled for source")
                                     selector.parameters = selector.buildUponParameters()
                                         .setDisabledTrackTypes(setOf(C.TRACK_TYPE_AUDIO))
@@ -1323,13 +1801,13 @@ fun PlayerScreen(
                             if (!hasPlaybackStarted &&
                                 allowStartupSourceFallback &&
                                 !userSelectedSourceManually &&
-                                tryAdvanceToNextStream(deadAddonId, reason = classifyPlaybackFailure(error))
+                                tryAdvanceToNextStream(deadAddonId, reason = classifyPlaybackFailure(context, error))
                             ) {
                                 return
                             }
                             val sourceSearchStillActive = latestUiState.sourceSearchActive ||
                                 latestUiState.streamProgress != null ||
-                                !latestUiState.streamLoadPhase.isNullOrBlank()
+                                latestUiState.streamLoadPhase != null
                             if (!hasPlaybackStarted &&
                                 allowStartupSourceFallback &&
                                 !userSelectedSourceManually &&
@@ -1422,7 +1900,8 @@ fun PlayerScreen(
                                     // release groups often ship promo/"songs & signs" tracks without
                                     // setting the flag, so the name is a second signal.
                                     val trackTexts = listOfNotNull(format.label, format.language, format.id)
-                                    val isForced = (format.selectionFlags and C.SELECTION_FLAG_FORCED != 0) ||
+                                    val hasForcedFlag = format.selectionFlags and C.SELECTION_FLAG_FORCED != 0
+                                    val isForced = hasForcedFlag ||
                                         trackTexts.any { it.contains("forced", ignoreCase = true) } ||
                                         trackTexts.any { it.contains("songs", ignoreCase = true) && it.contains("sign", ignoreCase = true) }
                                     // Image-based subtitle tracks (PGS/VOBSUB/DVB) carry no text — they
@@ -1466,15 +1945,266 @@ fun PlayerScreen(
                                         groupIndex = groupIndex,
                                         trackIndex = i,
                                         isForced = isForced,
+                                        hasForcedFlag = hasForcedFlag,
                                         isBitmap = isBitmap,
                                     ))
                                 }
                             }
                         }
+                        // The forced-subtitles rule needs to know what language is being SPOKEN,
+                        // and this is the only place that knows it. onTracksChanged also fires when
+                        // the viewer switches audio track, so the rule re-runs on its own.
+                        viewModel.updatePlayerAudioLanguage(
+                            extractedAudioTracks.getOrNull(selectedAudioIndex)?.language
+                        )
                         viewModel.updatePlayerTextTracks(textTracks)
                     }
                 })
             }
+    }
+
+    // Disabled for TV and mobile until seek previews are consistently reliable.
+    val seekThumbnailsEnabled = false
+    val useNativeSeekKeyframes = seekThumbnailsEnabled && uiState.selectedStreamUrl?.let {
+        it.startsWith("https://", ignoreCase = true) || it.startsWith("http://", ignoreCase = true)
+    } == true &&
+        supportsNativeKeyframes(previewVideoFormat?.width ?: 0,
+        previewVideoFormat?.height ?: 0, previewVideoFormat?.sampleMimeType)
+    val allowSecondarySeekPreviewDecoder = allowSecondarySeekPreviewExtraction(
+        playbackMemoryClassMb, uiState.selectedStream?.addonId
+    ) && (useNativeSeekKeyframes || seekPreviewDecodeFitsMemory(playbackMemoryClassMb, isLowRamPlaybackDevice,
+        previewVideoFormat?.width ?: 0, previewVideoFormat?.height ?: 0, previewVideoFormat?.sampleMimeType))
+    val previewStatus by seekPreviewProvider.status.collectAsState()
+    val previewCacheRevision by seekPreviewProvider.cacheRevision.collectAsState()
+    LaunchedEffect(uiState.selectedStreamUrl, uiState.streamSelectionNonce) {
+        seekInteraction = SeekInteraction()
+        seekPreviewFrame = null
+        previewVideoFormat = null
+    }
+    LaunchedEffect(
+        uiState.selectedStreamUrl, uiState.streamSelectionNonce, duration, args.isLiveStream,
+        uiState.selectedStream?.preview, allowSecondarySeekPreviewDecoder, useNativeSeekKeyframes,
+    ) {
+        if (!seekThumbnailsEnabled) {
+            seekPreviewProvider.configure(null)
+            return@LaunchedEffect
+        }
+        val url = uiState.selectedStreamUrl
+        val selected = uiState.selectedStream
+        val headers = selected?.behaviorHints?.proxyHeaders?.request.orEmpty().safePlaybackHeaders()
+        val lowerUrl = url?.lowercase().orEmpty()
+        seekPreviewProvider.configure(
+            url?.let {
+                SeekPreviewSource(
+                    url = it,
+                    headers = baseRequestHeaders + headers,
+                    cacheIdentity = buildSeekPreviewCacheIdentity(
+                        args.mediaType, args.mediaId, args.seasonNumber, args.episodeNumber, selected,
+                    ),
+                    durationMs = duration,
+                    isLive = args.isLiveStream,
+                    isAdaptive = isLikelyHlsPlaybackUrl(it, selected) ||
+                        lowerUrl.contains(".mpd") || lowerUrl.contains("/dash") ||
+                        lowerUrl.contains("format=dash"),
+                    allowExtraction = allowSecondarySeekPreviewDecoder,
+                    maxWidthPx = if (isConstrainedPlaybackDevice) 480 else 640,
+                    preview = selected?.preview,
+                    useNativeKeyframes = useNativeSeekKeyframes,
+                    sizeBytes = selected?.let {
+                        (it.sizeBytes ?: it.behaviorHints?.videoSize ?: parseSizeToBytes(it.size)).takeIf { size -> size > 0 }
+                    },
+                )
+            }
+        )
+    }
+
+    val latestSeekBrowsing by rememberUpdatedState(seekInteraction.browsing)
+    LaunchedEffect(hasPlaybackStarted, isPlaying, isBuffering, previewStatus.sourceGeneration, isCasting) {
+        if (!seekThumbnailsEnabled || !hasPlaybackStarted || !isPlaying || isBuffering || args.isLiveStream || isCasting) return@LaunchedEffect
+        delay(3_000)
+        if (exoPlayer.isPlaying && !latestSeekBrowsing &&
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            // Bind and load native code only: no remote reads or speculative decoding.
+            seekPreviewProvider.prepareWorker()
+        }
+    }
+
+    val controlsPreviewPosition = if (isControlScrubbing || seekInteraction.phase == SeekPhase.Exiting) scrubPreviewPosition else currentPosition
+    val previewTarget = if (seekInteraction.phase != SeekPhase.Idle) seekInteraction.targetMs else currentPosition
+    val previewRequested = seekThumbnailsEnabled && !isCasting && !args.isLiveStream && hasPlaybackStarted && duration > 0L &&
+        seekInteraction.browsing
+    val previewFrameForTarget = seekPreviewFrame?.takeIf {
+        seekPreviewProvider.matchesTarget(it, previewTarget)
+    }
+    val displayPreviewFrame = seekPreviewFrame?.takeIf {
+        seekPreviewProvider.matchesDisplayTarget(it, previewTarget)
+    }
+    val previewAvailable = seekThumbnailsEnabled && (displayPreviewFrame != null || (previewStatus.capability != SeekPreviewCapability.UNAVAILABLE &&
+        unavailablePreviewTarget != (previewStatus.sourceGeneration to previewTarget)))
+    val showQuickSeekPreview = seekInteraction.previewSession &&
+        seekInteraction.surface == SeekSurface.Quick && previewAvailable
+    var restoredPreviewWindow by remember { mutableStateOf<List<SeekPreviewFrame>>(emptyList()) }
+    // Disk restoration increments cacheRevision itself. Do not cancel this batch
+    // after each restored neighbor; live memory arrivals are observed below.
+    LaunchedEffect(previewRequested, previewTarget, previewStatus.sourceGeneration) {
+        restoredPreviewWindow = if (previewRequested) seekPreviewProvider.cachedWindowAt(previewTarget) else emptyList()
+    }
+    val previewNeighbors = remember(previewTarget, previewCacheRevision, previewStatus.sourceGeneration, previewRequested, restoredPreviewWindow) {
+        if (!previewRequested) emptyList() else seekPreviewWindow(previewTarget, duration)
+            .mapNotNull { at -> seekPreviewProvider.memoryFrameAt(at) ?: restoredPreviewWindow.firstOrNull {
+                seekPreviewProvider.matchesTarget(it, at)
+            } }
+    }
+    LaunchedEffect(previewRequested, previewTarget, previewFrameForTarget) {
+        if (previewRequested && previewFrameForTarget != null) {
+            android.util.Log.println(android.util.Log.INFO, "SeekPreviewUi", "display target=$previewTarget actual=${previewFrameForTarget.positionMs} origin=${previewFrameForTarget.origin}")
+        }
+    }
+    LaunchedEffect(previewRequested, previewTarget, displayPreviewFrame) {
+        if (previewRequested && displayPreviewFrame?.approximate == true) {
+            android.util.Log.println(android.util.Log.INFO, "SeekPreviewUi",
+                "approximate target=$previewTarget actual=${displayPreviewFrame.positionMs} origin=${displayPreviewFrame.origin}")
+        }
+    }
+
+    // Keep the previous bitmap owned until its replacement is ready, but never display it
+    // under a different timestamp. A cancelled request cannot publish into the next target.
+    LaunchedEffect(
+        previewRequested, previewTarget, previewStatus.sourceGeneration, previewStatus.capability,
+        uiState.selectedStreamUrl, uiState.streamSelectionNonce,
+    ) {
+        if (!previewRequested) {
+            seekPreviewProvider.endSeekGesture()
+            return@LaunchedEffect
+        }
+        seekPreviewProvider.noteSeekTarget(previewTarget, seekInteraction.originMs)
+        unavailablePreviewTarget = null
+        seekPreviewProvider.memoryFrameAt(previewTarget)?.let { frame ->
+            if (seekPreviewProvider.matchesTarget(frame, previewTarget)) seekPreviewFrame = frame
+        }
+        if (seekPreviewProvider.matchesTarget(seekPreviewFrame, previewTarget)) {
+            seekPreviewProvider.warmWindow(previewTarget)
+            return@LaunchedEffect
+        }
+        seekPreviewProvider.cachedDisplayFrameAt(previewTarget)?.let { nearby ->
+            if (seekPreviewProvider.matchesDisplayTarget(nearby, previewTarget)) seekPreviewFrame = nearby
+        }
+        if (previewStatus.capability == SeekPreviewCapability.UNAVAILABLE) return@LaunchedEffect
+        delay(SEEK_PREVIEW_DEBOUNCE_MS)
+        val frame = loadSeekPreviewFrame(seekPreviewProvider, previewTarget, playbackPaused = !exoPlayer.playWhenReady)
+        if (frame != null && seekPreviewProvider.matchesTarget(frame, previewTarget)) {
+            seekPreviewFrame = frame
+            seekPreviewProvider.warmWindow(previewTarget)
+        } else {
+            unavailablePreviewTarget = previewStatus.sourceGeneration to previewTarget
+        }
+    }
+
+    // Monitor continuously: a previously healthy buffer is not permission to keep downloading.
+    // Low-memory TVs and heavy remuxes also accumulate rewind previews, without a second
+    // video connection or decoder. Only cache a copy tied to a renderer timestamp.
+    LaunchedEffect(hasPlaybackStarted, isPlaying, isBuffering, seekInteraction.phase,
+        previewStatus.sourceGeneration, frameRateSurface, isCasting) {
+        val surface = frameRateSurface
+        if (!seekThumbnailsEnabled || Build.VERSION.SDK_INT < 24 || surface == null || !hasPlaybackStarted || !isPlaying ||
+            isBuffering || seekInteraction.browsing || isCasting || args.isLiveStream) return@LaunchedEffect
+        var lastBucket = -1L
+        while (!playerReleased && surface.isValid) {
+            delay(500L)
+            val position = exoPlayer.currentPosition
+            val bucket = quantizeSeekPreviewPosition(position, duration)
+            val format = exoPlayer.videoFormat ?: continue
+            if (bucket == lastBucket || kotlin.math.abs(position - bucket) > 750L || !exoPlayer.isPlaying ||
+                exoPlayer.playbackState != Player.STATE_READY ||
+                !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) ||
+                format.width <= 0 || format.height <= 0 || format.rotationDegrees != 0 ||
+                format.pixelWidthHeightRatio != 1f) continue
+            val pts = lastRenderedVideoFrameUs.get() / 1_000L
+            if (com.arflix.tv.BuildConfig.DEBUG) android.util.Log.d("SeekPreviewCapture",
+                "candidate position=$position pts=$pts size=${format.width}x${format.height} sar=${format.pixelWidthHeightRatio} generation=${seekPreviewProvider.sourceGeneration}")
+            if (pts < 0 || kotlin.math.abs(pts - position) > 500L) continue
+            lastBucket = bucket
+            if (seekPreviewProvider.memoryFrameAt(pts) != null) continue
+            val generation = seekPreviewProvider.sourceGeneration
+            val width = 320
+            val height = (width.toLong() * format.height / format.width).toInt().coerceIn(1, 320)
+            val bitmap = kotlinx.coroutines.withTimeoutOrNull(RENDERED_PREVIEW_COPY_TIMEOUT_MS) {
+                captureRenderedSeekPreview(surface, width, height)
+            } ?: continue
+            // Discard copies crossing a seek, surface replacement, or delayed render.
+            val afterPts = lastRenderedVideoFrameUs.get() / 1_000L
+            if (latestSeekBrowsing || generation != seekPreviewProvider.sourceGeneration ||
+                !exoPlayer.isPlaying || !renderedPreviewCopyIsCurrent(pts, afterPts, exoPlayer.currentPosition)) {
+                bitmap.recycle()
+            } else {
+                val retained = seekPreviewProvider.rememberRenderedFrame(pts, bitmap, generation)
+                if (com.arflix.tv.BuildConfig.DEBUG) android.util.Log.d("SeekPreviewCapture", "retained=${retained != null} pts=$pts")
+                if (retained?.bitmap !== bitmap) bitmap.recycle()
+            }
+        }
+    }
+    val previewPlaybackGuard = remember(previewStatus.sourceGeneration) { SeekPreviewPlaybackGuard() }
+    LaunchedEffect(hasPlaybackStarted, isBuffering, isPlaying, seekInteraction.phase,
+        previewStatus.sourceGeneration, isCasting) {
+        if (!seekThumbnailsEnabled || !hasPlaybackStarted || isBuffering || !isPlaying || seekInteraction.browsing ||
+            args.isLiveStream || isCasting) return@LaunchedEffect
+        val guard = previewPlaybackGuard
+        val connectivity = context.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val previewPlaybackListener = object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onDroppedVideoFrames(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                droppedFrames: Int, elapsedMs: Long) {
+                android.util.Log.println(android.util.Log.INFO, "SeekPreviewPlayback", "dropped=$droppedFrames intervalMs=$elapsedMs")
+                if (droppedFrames >= 3) guard.onPlaybackStrain(android.os.SystemClock.elapsedRealtime())
+            }
+            override fun onAudioUnderrun(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                bufferSize: Int, bufferSizeMs: Long, elapsedSinceLastFeedMs: Long) {
+                android.util.Log.println(android.util.Log.INFO, "SeekPreviewPlayback", "audioUnderrun=true")
+                guard.onPlaybackStrain(android.os.SystemClock.elapsedRealtime())
+            }
+        }
+        exoPlayer.addAnalyticsListener(previewPlaybackListener)
+        var warming: Job? = null
+        var nextWarmAt = 0L
+        var nextDiagnosticAt = 0L
+        try {
+            while (!playerReleased) {
+                val now = android.os.SystemClock.elapsedRealtime()
+                val format = exoPlayer.videoFormat
+                val imageOnly = uiState.selectedStream?.preview != null
+                val nativeSafe = useNativeSeekKeyframes && allowSecondarySeekPreviewDecoder && !isLowRamPlaybackDevice
+                val minimumPreviewBufferMs = if (nativeSafe && !imageOnly) 4_000L else 8_000L
+                val resourceSafe = imageOnly || nativeSafe || (!isLowRamPlaybackDevice && !isConstrainedPlaybackDevice && playbackMemoryClassMb >= 256 &&
+                    !isLikelyHeavyStream(uiState.selectedStream) && format != null &&
+                    format.width in 1..1920 && format.height in 1..1080 &&
+                    format.sampleMimeType == MimeTypes.VIDEO_H264)
+                val safe = guard.mayWarm(now, exoPlayer.isPlaying,
+                    exoPlayer.playbackState == Player.STATE_READY && exoPlayer.playerError == null,
+                    exoPlayer.totalBufferedDuration, latestSeekBrowsing,
+                    lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED),
+                    resourceSafe && !connectivity.isActiveNetworkMetered, minimumPreviewBufferMs)
+                if (now >= nextDiagnosticAt) {
+                    nextDiagnosticAt = now + 10_000L
+                    android.util.Log.println(android.util.Log.INFO, "SeekPreviewPlayback",
+                        "preparation safe=$safe bufferedMs=${exoPlayer.totalBufferedDuration} loading=${exoPlayer.isLoading} native=$nativeSafe lowRam=$isLowRamPlaybackDevice metered=${connectivity.isActiveNetworkMetered}")
+                }
+                if (!safe && warming?.isActive == true) {
+                    warming?.cancel()
+                    seekPreviewProvider.cancelPending()
+                } else if (safe && warming?.isActive != true && now >= nextWarmAt &&
+                    (imageOnly || !nativeSafe || !exoPlayer.isLoading)) {
+                    val buffered = exoPlayer.totalBufferedDuration
+                    nextWarmAt = now + if (imageOnly) 1_000L else if (buffered >= 30_000L) 2_000L else 3_000L
+                    warming = launch { seekPreviewProvider.warmPlayback(exoPlayer.currentPosition, buffered, minimumPreviewBufferMs) }
+                }
+                delay(250L)
+            }
+        } finally {
+            warming?.cancel()
+            guard.onPlaybackInterrupted()
+            exoPlayer.removeAnalyticsListener(previewPlaybackListener)
+            // A new foreground request owns cancellation while entering paused browsing.
+            if (!latestSeekBrowsing) seekPreviewProvider.cancelPending()
+        }
     }
 
     DisposableEffect(lifecycleOwner, exoPlayer) {
@@ -1490,7 +2220,12 @@ fun PlayerScreen(
                 }
                 Lifecycle.Event.ON_STOP -> {
                     if (exoPlayer.isPlaying) exoPlayer.pause()
+                    val inPip = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                        activity?.isInPictureInPictureMode == true
+                    if (!inPip) iptvVodGate.closeForBackground(exoPlayer)
                 }
+                // Reopens through the stream effect's admission check at the saved position.
+                Lifecycle.Event.ON_START -> iptvVodGate.reopenAfterBackground()
                 else -> Unit
             }
         }
@@ -1501,6 +2236,42 @@ fun PlayerScreen(
     }
 
     // BroadcastReceiver for PiP control actions (rewind, play/pause, forward) — touch devices only
+    // Which text track the player has ACTUALLY selected, as (groupIndex, trackIndex) in
+    // currentTracks.groups. Auto-match reads its reference from the text renderer's buffer, and a
+    // selection change takes a moment to land — read before it does and the buffer still holds the
+    // previous track (From S01E10: a perfect subtitle shifted 4s against the one shown before it).
+    LaunchedEffect(exoPlayer) {
+        viewModel.selectedTextTrackProvider = {
+            exoPlayer.currentTracks.groups.withIndex().firstNotNullOfOrNull { (groupIndex, group) ->
+                if (group.type != C.TRACK_TYPE_TEXT || !group.isSelected) {
+                    null
+                } else {
+                    (0 until group.length).firstOrNull { group.isTrackSelected(it) }?.let { groupIndex to it }
+                }
+            }
+        }
+    }
+
+    // Sync by hearing (sideload build only): the playhead, the duration and the selected audio track.
+    DisposableEffect(exoPlayer) {
+        if (!com.arflix.tv.BuildConfig.AUDIO_SYNC_AVAILABLE) return@DisposableEffect onDispose {}
+        viewModel.bindAudioSyncPlayer(
+            positionMs = { if (playerReleased) 0L else exoPlayer.currentPosition },
+            durationMs = { if (playerReleased) 0L else exoPlayer.duration.takeIf { it != C.TIME_UNSET } ?: 0L },
+        )
+        val audioTrackListener = object : androidx.media3.common.Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                viewModel.onAudioSyncTrackSelected(
+                    with(com.arflix.tv.ui.screens.player.audiosync.AudioSyncTaps) { tracks.selectedAudio() }
+                )
+            }
+        }
+        exoPlayer.addListener(audioTrackListener)
+        onDispose {
+            exoPlayer.removeListener(audioTrackListener)
+            viewModel.bindAudioSyncPlayer(positionMs = { 0L }, durationMs = { 0L })
+        }
+    }
     DisposableEffect(exoPlayer) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !deviceType.isTouchDevice()) return@DisposableEffect onDispose {}
         val receiver = object : BroadcastReceiver() {
@@ -1530,43 +2301,270 @@ fun PlayerScreen(
         onDispose { context.unregisterReceiver(receiver) }
     }
 
-    val queueControlsSeek: (Long) -> Unit = queueSeek@{ deltaMs ->
-        if (isCasting) {
-            if (deltaMs > 0) castManager.skipForward(deltaMs)
-            else castManager.skipBack(-deltaMs)
-            return@queueSeek
+    val playerEngine: PlayerEngine = remember(exoPlayer) {
+        PlayerEngineFactory.createEngine(
+            type = PlayerEngineType.EXOPLAYER,
+            context = context,
+            exoPlayer = exoPlayer,
+            scope = coroutineScope
+        )
+    }
+    DisposableEffect(playerEngine) {
+        onDispose { playerEngine.release() }
+    }
+
+    val exitTransition = rememberPlayerExitTransition(
+        animateExit = deviceType.isTouchDevice(),
+        pause = { if (!playerReleased) exoPlayer.pause() },
+        leave = {
+            activity?.requestedOrientation = previousOrientation
+            args.onBack()
         }
-        if (playerReleased) return@queueSeek
-        val basePosition = if (isControlScrubbing) {
-            scrubPreviewPosition
-        } else {
-            exoPlayer.currentPosition.coerceAtLeast(0L)
+    )
+    val onExitPlayer: () -> Unit = {
+        if (viewModel.idleReturnCoordinator.shouldDiscardPlayer || viewModel.idleReturnCoordinator.isIdle()) {
+            leftForIdle = true
+            viewModel.discardProgressForIdle()
         }
-        val unclamped = (basePosition + deltaMs).coerceAtLeast(0L)
-        val targetPosition = if (duration > 0L) unclamped.coerceAtMost(duration) else unclamped
-        scrubPreviewPosition = targetPosition
-        isControlScrubbing = true
-        controlsSeekJob?.cancel()
-        controlsSeekJob = coroutineScope.launch {
-            delay(260)
-            if (!playerReleased) {
-                exoPlayer.seekTo(scrubPreviewPosition)
+        exitTransition.requestExit()
+    }
+
+    fun leaveIdlePlayer() {
+        if (playerReleased || exitTransition.isExiting || isInPipMode || exoPlayer.isPlaying) return
+        leftForIdle = true
+        viewModel.discardProgressForIdle()
+        onExitPlayer()
+    }
+
+    // A player left paused through a long idle (TV switched off on a paused episode) goes back
+    // to the previous screen, which then shows the progress pulled from the other devices.
+    DisposableEffect(Unit) {
+        viewModel.idleReturnCoordinator.isPlayerOpen = true
+        onDispose { viewModel.idleReturnCoordinator.isPlayerOpen = false }
+    }
+    LaunchedEffect(Unit) {
+        val coordinator = viewModel.idleReturnCoordinator
+        val idleReturnsAtStart = coordinator.idleReturns.value
+        launch {
+            // The box slept (or the user came back): idle ended before any timer could fire.
+            coordinator.idleReturns.collect { generation ->
+                if (generation != idleReturnsAtStart) leaveIdlePlayer()
             }
-            isControlScrubbing = false
+        }
+        while (true) {
+            // The box stayed awake with the TV off: leave once the idle period has passed.
+            delay((coordinator.idleThresholdMs / 4).coerceIn(5_000L, 60_000L))
+            if (coordinator.shouldDiscardPlayer) leaveIdlePlayer()
+        }
+    }
+    LaunchedEffect(isInPipMode) {
+        if (!isInPipMode && viewModel.idleReturnCoordinator.shouldDiscardPlayer) leaveIdlePlayer()
+    }
+    val cancelNextEpisodePrompt: () -> Unit = {
+        showNextEpisodePrompt = false
+        onExitPlayer()
+    }
+    val playbackEpisodeKey = if (args.mediaType == MediaType.TV && args.seasonNumber != null && args.episodeNumber != null) {
+        PlaybackEpisodeKey(args.mediaId, args.seasonNumber, args.episodeNumber,
+            args.tmdbSeasonNumber ?: args.seasonNumber, args.tmdbEpisodeNumber ?: args.episodeNumber,
+            args.kitsuId, args.kitsuEpisodeNumber)
+    } else null
+    val finishPlayback: () -> Unit = finishPlayback@{
+        if (!playingCheckedRealSource()) return@finishPlayback
+        // Preserve the final watched/progress write, but a slow tracking server must not hold
+        // navigation hostage. The save job belongs to the ViewModel, not this waiting coroutine.
+        showControls = true
+        val finalPosition = exoPlayer.currentPosition
+        val finalDuration = playbackTrackingDurationMs(
+            exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: duration,
+            exoPlayer.isCurrentMediaItemLive, matchedIptvVodPlayback()
+        )
+        coroutineScope.launch {
+            try {
+                withTimeoutOrNull(2_000L) {
+                    viewModel.saveProgressAndWait(finalPosition, finalDuration, 100, false, Player.STATE_ENDED)
+                }
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                // Tracking failures do not prevent leaving a finished video.
+            }
+            onExitPlayer()
+        }
+    }
+    PlayerCompletionEffect(
+        ended = currentPlaybackState == Player.STATE_ENDED,
+        enabled = hasPlaybackStarted && !args.isLiveStream && !isCasting,
+        blocked = exitTransition.isExiting || nextEpisodeTransitionInProgress ||
+            showNextEpisodePrompt || showSourceMenu || showSubtitleMenu || showSubtitleSettings || uiState.error != null ||
+            !playingCheckedRealSource(),
+        waitingForNextEpisode = uiState.autoPlayNext && playbackEpisodeKey != null &&
+            (nextEpisodeAirDateSource != playbackEpisodeKey || nextEpisodeAirDateResolution == NextEpisodeAirDateResolution.Pending),
+        offerNextEpisode = uiState.autoPlayNext && playbackEpisodeKey != null && nextEpisodeIdentity != null &&
+            nextEpisodeAirDateResolution == NextEpisodeAirDateResolution.Allowed,
+        onNextEpisode = {
+            val next = nextEpisodeIdentity
+            if (next != null && nextEpisodePromptGate.tryOpen(
+                    playbackEpisodeKey, true, nextEpisodeAirDateResolution
+                )) {
+                val selected = latestUiState.selectedStream
+                pendingNextIdentity = next
+                pendingNextAddonId = selected?.addonId?.takeIf { it.isNotBlank() }
+                pendingNextSourceName = selected?.source?.takeIf { it.isNotBlank() }
+                pendingNextBingeGroup = selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+                nextEpisodePromptButton = 0
+                showNextEpisodePrompt = true
+            } else {
+                finishPlayback()
+            }
+        },
+        onFinish = finishPlayback,
+    )
+    DisposableEffect(exoPlayer, exitTransition) {
+        val listener = object : Player.Listener {
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (playWhenReady && viewModel.idleReturnCoordinator.shouldDiscardPlayer && !playerReleased) {
+                    leftForIdle = true
+                    viewModel.discardProgressForIdle()
+                    exoPlayer.pause()
+                    leaveIdlePlayer()
+                    return
+                }
+                if (playWhenReady && exitTransition.isExiting && !playerReleased) exoPlayer.pause()
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose { exoPlayer.removeListener(listener) }
+    }
+
+    // Observe audio delay & route to video offset renderer
+    LaunchedEffect(uiState.audioDelayMs) {
+        aiRenderersFactory.audioDelayUs.set(uiState.audioDelayMs * 1000L)
+    }
+
+    LaunchedEffect(exoPlayer) {
+        currentPlaybackSpeed = exoPlayer.playbackParameters.speed
+    }
+
+    // Auto-skip intro & outro enforcement
+    LaunchedEffect(currentPosition, uiState.activeSkipInterval, uiState.autoSkipIntro, uiState.autoSkipOutro, uiState.skipIntervalDismissed) {
+        val skip = uiState.activeSkipInterval
+        if (skip != null && !uiState.skipIntervalDismissed && isPlaying && !seekInteraction.browsing) {
+            val isIntro = skip.type.lowercase() in listOf("intro", "op", "mixed-op", "recap")
+            val isOutro = skip.type.lowercase() in listOf("outro", "ed", "mixed-ed")
+            if (isIntro && uiState.autoSkipIntro && currentPosition in skip.startMs..skip.endMs) {
+                playerEngine.seekTo((skip.endMs + 500L).coerceAtLeast(0L))
+                viewModel.dismissSkipInterval()
+            } else if (isOutro && uiState.autoSkipOutro && currentPosition in skip.startMs..skip.endMs) {
+                playerEngine.seekTo((skip.endMs + 500L).coerceAtLeast(0L))
+                viewModel.dismissSkipInterval()
+            }
         }
     }
 
-    val commitControlsSeekNow: () -> Unit = commitSeek@{
-        if (isCasting) {
-            castManager.seekTo(scrubPreviewPosition)
-            isControlScrubbing = false
-            return@commitSeek
+    val finishSeek: (Boolean) -> Unit = finishSeek@{ commit ->
+        val interaction = seekInteraction
+        if (interaction.phase == SeekPhase.Idle || interaction.phase == SeekPhase.Exiting) return@finishSeek
+        seekPreviewProvider.cancelPending()
+        if (interaction.browsing) {
+            if (isCasting) {
+                if (commit) castManager.seekTo(interaction.targetMs)
+            } else if (!playerReleased) {
+                if (commit) {
+                    exoPlayer.seekTo(interaction.targetMs)
+                    currentPosition = interaction.targetMs
+                }
+                exoPlayer.playWhenReady = interaction.resumeAfterBrowse
+                android.util.Log.println(android.util.Log.INFO, "SeekPreviewUi", "finish commit=$commit target=${interaction.targetMs} resume=${interaction.resumeAfterBrowse}")
+            }
         }
-        if (playerReleased) return@commitSeek
-        if (isControlScrubbing) {
-            controlsSeekJob?.cancel()
-            exoPlayer.seekTo(scrubPreviewPosition)
-            isControlScrubbing = false
+        seekInteraction = interaction.finish()
+    }
+    val closeQuickSeekOverlay: (Boolean) -> Unit = { finishSeek(it) }
+    val stepSeek: (SeekSurface, Long) -> Unit = stepSeek@{ surface, deltaMs ->
+        if (isCasting) {
+            if (deltaMs > 0L) castManager.skipForward(deltaMs) else castManager.skipBack(-deltaMs)
+            return@stepSeek
+        }
+        if (playerReleased || duration <= 0L) return@stepSeek
+        val previous = seekInteraction
+        val next = previous.step(
+            surface, deltaMs, exoPlayer.currentPosition, duration, exoPlayer.playWhenReady,
+            android.os.SystemClock.elapsedRealtime(),
+        )
+        if (next.browsing && !previous.browsing) exoPlayer.pause()
+        if (next.phase == SeekPhase.QuickSkip) {
+            exoPlayer.seekTo(next.targetMs)
+            currentPosition = next.targetMs
+        }
+        seekInteraction = next
+        if (next.browsing && !previous.browsing && surface == SeekSurface.Quick) {
+            runCatching { containerFocusRequester.requestFocus() }
+        }
+        android.util.Log.println(android.util.Log.INFO, "SeekPreviewUi", "input phase=${next.phase} target=${next.targetMs} surface=$surface")
+        seekPreviewProvider.memoryFrameAt(next.targetMs)?.let { frame ->
+            if (seekPreviewProvider.matchesTarget(frame, next.targetMs)) seekPreviewFrame = frame
+        }
+    }
+    val queueQuickSeek: (Long) -> Unit = { stepSeek(SeekSurface.Quick, it) }
+    val queueControlsSeek: (Long) -> Unit = { stepSeek(SeekSurface.Controls, it) }
+    val skipWithoutPreview: (Long) -> Unit = { delta ->
+        if (seekInteraction.browsing) finishSeek(false)
+        if (isCasting) {
+            if (delta > 0L) castManager.skipForward(delta) else castManager.skipBack(-delta)
+        } else if (!playerReleased && duration > 0L) {
+            val target = (exoPlayer.currentPosition + delta).coerceIn(0L, duration)
+            exoPlayer.seekTo(target)
+            currentPosition = target
+        }
+    }
+    val commitControlsSeekNow: () -> Unit = { finishSeek(true) }
+    val dragSeek: (Long) -> Unit = { position ->
+        if (!playerReleased && duration > 0L) {
+            val previous = seekInteraction
+            seekInteraction = previous.dragTo(
+                position, if (isCasting) currentPosition else exoPlayer.currentPosition,
+                duration, exoPlayer.playWhenReady,
+            )
+            if (!isCasting && !previous.browsing) exoPlayer.pause()
+        }
+    }
+    val latestDragSeek by rememberUpdatedState(dragSeek)
+    val latestFinishSeek by rememberUpdatedState(finishSeek)
+    val latestQuickSeek by rememberUpdatedState(queueQuickSeek)
+
+    val waitingForSeekPreview = previewRequested && previewFrameForTarget == null && previewAvailable
+    LaunchedEffect(seekInteraction.phase, seekInteraction.lastInputMs, seekInteraction.surface, waitingForSeekPreview) {
+        val pending = seekInteraction
+        val remaining = pending.autoCommitDelayMs(android.os.SystemClock.elapsedRealtime(), waitingForSeekPreview)
+            ?: return@LaunchedEffect
+        // Give a newly delivered frame time to be seen before committing.
+        delay(if (!waitingForSeekPreview && previewFrameForTarget != null) remaining.coerceAtLeast(2_000L) else remaining)
+        // On a cold jump the center arrives first. Let its four neighbors finish
+        // while playback is paused, instead of cancelling the second forward
+        // frame every time the center's display timer expires. Remote input,
+        // OK/Back and lifecycle changes still cancel this bounded wait.
+        if (!waitingForSeekPreview && previewFrameForTarget != null) {
+            withTimeoutOrNull(4_000L) {
+                while (seekInteraction === pending &&
+                    com.arflix.tv.ui.screens.player.preview.seekPreviewNeighborTargets(
+                        pending.targetMs, duration,
+                    ).any { seekPreviewProvider.memoryFrameAt(it) == null }) {
+                    delay(100L)
+                }
+            }
+        }
+        if (seekInteraction === pending &&
+            lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            finishSeek(true)
+        }
+    }
+
+    LaunchedEffect(seekInteraction.phase) {
+        val exiting = seekInteraction
+        if (exiting.phase == SeekPhase.Exiting) {
+            delay(150L)
+            if (seekInteraction === exiting) seekInteraction = exiting.afterExit()
         }
     }
 
@@ -1582,6 +2580,7 @@ fun PlayerScreen(
                 val url = uiState.selectedStreamUrl ?: return@LaunchedEffect
                 val posMs = if (!playerReleased) exoPlayer.currentPosition else 0L
                 if (!playerReleased) exoPlayer.pause()
+                if (!playerReleased) iptvVodGate.closeForCast(exoPlayer)
                 castManager.loadMedia(
                     url = url,
                     title = uiState.title,
@@ -1593,7 +2592,9 @@ fun PlayerScreen(
             is CastManager.CastState.NotConnected -> {
                 // remoteMediaClient is null here — use the position tracked by the poll loop
                 val resumePos = lastCastPositionMs
-                if (!playerReleased && resumePos > 0L && !exoPlayer.isPlaying) {
+                if (!playerReleased && iptvVodGate.reopenAfterCast(resumePos)) {
+                    // The stream effect reopens it at the cast's last position.
+                } else if (!playerReleased && resumePos > 0L && !exoPlayer.isPlaying) {
                     exoPlayer.seekTo(resumePos)
                     exoPlayer.play()
                 }
@@ -1619,8 +2620,8 @@ fun PlayerScreen(
             isPlaying = castManager.isRemotePlaying()
             // Update Discord RPC
             val titleVal = latestUiState.title
-            val subtitleVal = if (mediaType == MediaType.TV) {
-                val epPart = if (seasonNumber != null && episodeNumber != null) "S${seasonNumber}E${episodeNumber}" else ""
+            val subtitleVal = if (args.mediaType == MediaType.TV) {
+                val epPart = if (args.seasonNumber != null && args.episodeNumber != null) "S${args.seasonNumber}E${args.episodeNumber}" else ""
                 val epTitle = latestUiState.episodeTitle
                 if (!epTitle.isNullOrBlank()) {
                     if (epPart.isNotEmpty()) "$epPart - $epTitle" else epTitle
@@ -1680,17 +2681,58 @@ fun PlayerScreen(
     }
 
     // Frame rate matching: set ExoPlayer strategy + actual display mode switching
-    val frameRateActivity = context as? android.app.Activity
-    LaunchedEffect(uiState.frameRateMatchingMode) {
+    val frameRateActivity = activity
+    LaunchedEffect(exoPlayer, uiState.frameRateMatchingMode) {
         if (playerReleased) return@LaunchedEffect
-        // We apply display-mode matching explicitly before playback starts.
-        // Keep Media3 runtime switching off to avoid late black-screen switches
-        // once playback has already begun.
-        val effectiveStrategy = resolveFrameRateOffStrategy()
-        runCatching {
-            exoPlayer.javaClass
-                .getMethod("setVideoChangeFrameRateStrategy", Int::class.javaPrimitiveType)
-                .invoke(exoPlayer, effectiveStrategy)
+        val seamless = uiState.frameRateMatchingMode.equals("Seamless only", ignoreCase = true)
+        exoPlayer.setVideoChangeFrameRateStrategy(
+            if (seamless) C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS
+            else C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF
+        )
+        if (!uiState.frameRateMatchingMode.equals("Always", ignoreCase = true)) {
+            frameRateActivity?.let { com.arflix.tv.util.FrameRateUtils.restoreOriginalMode(it) }
+        }
+    }
+
+    LaunchedEffect(exoPlayer, frameRateActivity, frameRateSurface, uiState.frameRateMatchingMode) {
+        if (!uiState.frameRateMatchingMode.equals("Always", ignoreCase = true)) return@LaunchedEffect
+        val targetActivity = frameRateActivity ?: return@LaunchedEffect
+        playbackFrameRate.rate.collectLatest { fps ->
+            if (!playerReleased && fps > 0f) {
+                // Fire TV/HDMI mode selection owns AFR when a compatible mode exists.
+                // Do not simultaneously ask SurfaceFlinger for a different display mode.
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    frameRateSurface?.takeIf { it.isValid }?.let { surface ->
+                        runCatching {
+                            surface.setFrameRate(0f, android.view.Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                                android.view.Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+                        }
+                    }
+                }
+                val modeHandled = com.arflix.tv.util.FrameRateUtils.matchFrameRateAndWait(targetActivity, fps)
+                compatibility.onFrameRateRequest(fps)
+                if (!modeHandled && !playerReleased && android.os.Build.VERSION.SDK_INT >= 31) {
+                    frameRateSurface?.takeIf { it.isValid }?.let { surface ->
+                        runCatching {
+                            surface.setFrameRate(fps, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                                android.view.Surface.CHANGE_FRAME_RATE_ALWAYS)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    DisposableEffect(frameRateSurface, uiState.frameRateMatchingMode) {
+        val surface = frameRateSurface
+        val wasAlways = uiState.frameRateMatchingMode.equals("Always", ignoreCase = true)
+        onDispose {
+            if (wasAlways && android.os.Build.VERSION.SDK_INT >= 31 && surface?.isValid == true) {
+                runCatching {
+                    surface.setFrameRate(0f, android.view.Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                        android.view.Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS)
+                }
+            }
         }
     }
 
@@ -1704,9 +2746,9 @@ fun PlayerScreen(
     LaunchedEffect(uiState.selectedStreamUrl, uiState.streams) {
         val currentUrl = uiState.selectedStreamUrl ?: return@LaunchedEffect
         val selected = uiState.selectedStream
-        val idxByUrl = uiState.streams.indexOfFirst { it.url == currentUrl }
-        val idx = if (idxByUrl >= 0) {
-            idxByUrl
+        val idxByRequest = playingRequestIndex(uiState.streams, selected, currentUrl)
+        val idx = if (idxByRequest >= 0) {
+            idxByRequest
         } else {
             uiState.streams.indexOfFirst { candidate ->
                 selected != null &&
@@ -1729,18 +2771,21 @@ fun PlayerScreen(
 
     // Update player when stream URL changes. Attach currently-known external subtitle tracks once,
     // then switch subtitle tracks via track overrides (no media source rebuild needed).
-    LaunchedEffect(uiState.selectedStreamUrl, uiState.streamSelectionNonce) {
-        if (playerReleased) return@LaunchedEffect
+    LaunchedEffect(uiState.selectedStreamUrl, uiState.streamSelectionNonce, exitTransition.isExiting, iptvVodGate.reopenSignal) {
+        if (playerReleased || exitTransition.isExiting) return@LaunchedEffect
         val url = uiState.selectedStreamUrl
         if (BuildConfig.DEBUG) {
         }
         if (url != null) {
+            startupTrace.begin()
             // Track when stream was selected (before any blocking probes)
             streamSelectedTime = System.currentTimeMillis()
             val prepareStartMs = streamSelectedTime ?: System.currentTimeMillis()
             bufferingStartTime = null
-            hasPlaybackStarted = false  // Reset for new stream
-            startupPhase = "Loading video stream…"
+            // A background or cast reopen carries on the same source, so its errors still reach the rungs.
+            val iptvVodReopening = iptvVodGate.hasPendingReopen && startupUrlLock == url
+            if (!iptvVodReopening) hasPlaybackStarted = false  // Reset for new stream
+            startupPhase = R.string.player_phase_loading_stream
             firstVideoFrameRendered = false
             readyPlayingSinceMs = null
             playbackIssueReported = false
@@ -1755,29 +2800,11 @@ fun PlayerScreen(
                 .orEmpty()
                 .safePlaybackHeaders()
 
-            // Never block first frame on MediaExtractor probing. Use a cached
-            // frame-rate if available and prewarm the cache in the background.
-            frameRateActivity?.let { activity ->
-                val mode = uiState.frameRateMatchingMode
-                if (mode == "Off" || mode.isBlank()) {
-                    com.arflix.tv.util.FrameRateUtils.restoreOriginalMode(activity)
-                } else {
-                    val cachedDetection = com.arflix.tv.util.FrameRateUtils.getCachedFrameRate(url)
-                    if (cachedDetection != null) {
-                        com.arflix.tv.util.FrameRateUtils.applyFrameRateMode(activity, cachedDetection.snapped)
-                    } else {
-                        launch(kotlinx.coroutines.Dispatchers.IO) {
-                            com.arflix.tv.util.FrameRateUtils.detectFrameRateCached(
-                                sourceUrl = url,
-                                headers = baseRequestHeaders + streamHeaders
-                            )
-                        }
-                    }
-                }
-            }
+            playbackFrameRate.reset()
 
             val isNewStartupSource = startupUrlLock != url
             if (isNewStartupSource) {
+                val hadSurroundFallback = startupUrlLock?.let(surroundFallbackUrls::contains) == true
                 startupUrlLock = url
                 startupRecoverAttempted = false
                 startupHardFailureReported = false
@@ -1790,6 +2817,7 @@ fun PlayerScreen(
                 blackVideoRecoveryStage = 0
                 blackVideoReadySinceMs = null
                 firstVideoFrameRendered = false
+                compatibility.reset()
                 val selector = exoPlayer.trackSelector as? androidx.media3.exoplayer.trackselection.DefaultTrackSelector
                 selector?.let {
                     // Reset per-source track state, then re-apply any audio-recovery rung this
@@ -1798,6 +2826,7 @@ fun PlayerScreen(
                     val audioDisabled = audioDisabledForcedUrls.contains(url)
                     val safeAudio = safeAudioForcedUrls.contains(url)
                     it.parameters = it.buildUponParameters()
+                        .apply { if (hadSurroundFallback) clearOverridesOfType(C.TRACK_TYPE_AUDIO) }
                         .setPreferredVideoMimeType(null)
                         .setExceedVideoConstraintsIfNecessary(allowVideoExceedCodecCapabilities)
                         .setExceedAudioConstraintsIfNecessary(allowAudioExceedCodecCapabilities)
@@ -1822,7 +2851,7 @@ fun PlayerScreen(
             var preloadedSubtitleConfigs = emptyList<MediaItem.SubtitleConfiguration>()
             if (latestUiState.subtitlePreloadEnabled) {
                 if (!latestUiState.subtitlePreloadComplete) {
-                    startupPhase = "Loading subtitles…"
+                    startupPhase = R.string.player_phase_loading_subtitles
                 }
                 val gateStartMs = System.currentTimeMillis()
                 val gateReady = withTimeoutOrNull(SUBTITLE_PRELOAD_GATE_TIMEOUT_MS) {
@@ -1846,7 +2875,7 @@ fun PlayerScreen(
             // (Preloaded LOCAL copies above are the exception — reading them at prepare is free.)
             val isHlsStream = isLikelyHlsPlaybackUrl(url, latestUiState.selectedStream)
             val urlLower = url.lowercase()
-            val isDashStream = urlLower.contains(".mpd") || urlLower.contains("/dash") || urlLower.contains("format=dash")
+            val isDashStream = isDashPlaybackUrl(urlLower)
             val mediaItemBuilder = MediaItem.Builder().setUri(Uri.parse(url))
             if (isHlsStream) {
                 mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
@@ -1866,12 +2895,40 @@ fun PlayerScreen(
             // - DASH/Progressive: dedicated factories for optimal handling
             val isHeavy = isLikelyHeavyStream(latestUiState.selectedStream)
             val isRemoteHttp = urlLower.startsWith("http://") || urlLower.startsWith("https://")
+            val iptvPolicy = viewModel.iptvVodPolicy(iptvVodStreamFor(latestUiState.selectedStream, url))
+            if (iptvVodReopening) {
+                val admission = iptvVodGate.admitReopen(iptvPolicy, viewModel::iptvAccountUsage)
+                if (latestUiState.selectedStreamUrl != url || playerReleased || exitTransition.isExiting) return@LaunchedEffect
+                if (admission is com.arflix.tv.network.IptvAdmission.Full) {
+                    iptvVodGate.takeReopen()?.let { viewModel.reportIptvReopenBusy(it.positionMs) }
+                    return@LaunchedEffect
+                }
+                streamSelectedTime = System.currentTimeMillis()
+            }
+            val iptvVodSession = iptvVodGate.open(exoPlayer, iptvPolicy)
+            if (iptvVodSession != null && !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                iptvVodGate.deferOpen(exoPlayer, uiState.savedPosition)
+                return@LaunchedEffect
+            }
             val mediaSource: MediaSource = when {
+                latestUiState.selectedStream?.addonId == com.arflix.tv.data.repository.YouTubeCollection.ADDON_ID ->
+                    youTubeCollectionMediaSource(
+                        context, audioTapExtractorsFactory, mediaItem, latestUiState.selectedStream?.youTubeAudioUrl
+                    )
+                iptvVodSession != null -> iptvVodMediaSources.create(
+                    iptvVodSession, baseRequestHeaders + streamHeaders, mediaItem,
+                    isHlsStream, isDashStream, hasSidecars = preloadedSubtitleConfigs.isNotEmpty(),
+                    panelCheckAllowed = iptvVodGate.panelCheckAllowed
+                )
                 // Sidecar subtitle configs only merge through a DefaultMediaSourceFactory; the
                 // preload variant streams video uncached (like directProgressiveFactory) and
                 // resolves HLS/DASH from the MIME hints set above.
                 preloadedSubtitleConfigs.isNotEmpty() ->
-                    preloadMediaSourceFactory.createMediaSource(mediaItem)
+                    preloadMediaSourceFactory.apply {
+                        if (vodPolicyEnabled) setLoadErrorHandlingPolicy(
+                            if (isHlsStream || isDashStream) adaptiveRetry!! else progressiveRetry!!
+                        )
+                    }.createMediaSource(mediaItem)
                 isHlsStream ->
                     hlsFactory.createMediaSource(mediaItem)
                 isDashStream ->
@@ -1890,7 +2947,10 @@ fun PlayerScreen(
                 exoPlayer.playWhenReady = false
             }
 
-            val resumePosition = uiState.savedPosition
+            val iptvVodReopen = iptvVodGate.takeReopen()?.takeIf { iptvVodReopening }
+            val resumePosition = iptvVodReopen?.positionMs ?: uiState.savedPosition
+            placeholderCheckedSource = null
+            currentSourceIsLive = args.isLiveStream
             if (resumePosition > 0L) {
                 exoPlayer.setMediaSource(mediaSource, resumePosition)
             } else {
@@ -1898,9 +2958,18 @@ fun PlayerScreen(
             }
             // Let ExoPlayer's RAM-aware LoadControl handle startup buffering.
             // No manual startup gate - trust the CDN/debrid while keeping enough safety margin.
-            exoPlayer.playWhenReady = true
+            exoPlayer.playWhenReady = iptvVodReopen?.playWhenReady ?: true
+            loadedSource = "${uiState.streamSelectionNonce}|$url"
+            if (uiState.frameRateMatchingMode.equals("Always", ignoreCase = true)) {
+                observedRateKey?.let(observedFrameRates::get)?.let { fps ->
+                    activity?.let { com.arflix.tv.util.FrameRateUtils.applyFrameRateMode(it, fps) }
+                }
+            }
+            startupTrace.preparing()
             exoPlayer.prepare()
-            startupPhase = "Starting playback…"
+            iptvVodGate.afterPrepare()
+            if (iptvVodReopening && hasPlaybackStarted) iptvVodGate.reattachSubtitleWhenReady()
+            startupPhase = R.string.player_phase_starting_playback
             playbackStartupDiag(
                 "prepare issued setupMs=${System.currentTimeMillis() - prepareStartMs} source=${uiState.selectedStream?.addonId}/${uiState.selectedStream?.quality}/${uiState.selectedStream?.size} host=${runCatching { Uri.parse(url).host }.getOrNull().orEmpty()}"
             )
@@ -1946,7 +3015,7 @@ fun PlayerScreen(
 
     // When subtitle selection changes, rebuild MediaItem with just the selected subtitle.
     // This avoids loading all 30+ subtitle files and fixes non-English encoding issues.
-    LaunchedEffect(uiState.selectedSubtitle, uiState.subtitleSelectionNonce, hasPlaybackStarted) {
+    LaunchedEffect(uiState.selectedSubtitle, uiState.subtitleSelectionNonce, hasPlaybackStarted, iptvVodGate.reattachSubtitleSignal) {
         if (playerReleased) return@LaunchedEffect
         val subtitle = uiState.selectedSubtitle
         val url = uiState.selectedStreamUrl ?: return@LaunchedEffect
@@ -2072,8 +3141,26 @@ fun PlayerScreen(
                 mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
             }
             val mediaItem = mediaItemBuilder.build()
-            exoPlayer.setMediaItem(mediaItem, currentPosition)
-            exoPlayer.prepare()
+            if (iptvVodGate.session != null) {
+                val urlLower = url.lowercase()
+                iptvVodGate.rebuildForSubtitle(exoPlayer) { iptvVodSession ->
+                    exoPlayer.setMediaSource(
+                        iptvVodMediaSources.create(
+                            iptvVodSession,
+                            baseRequestHeaders + latestUiState.selectedStream?.behaviorHints?.proxyHeaders?.request.orEmpty().safePlaybackHeaders(),
+                            // DefaultMediaSourceFactory infers DASH from an explicit MIME type, not from the URL.
+                            if (isDashPlaybackUrl(urlLower)) mediaItem.buildUpon().setMimeType(MimeTypes.APPLICATION_MPD).build() else mediaItem,
+                            isLikelyHlsPlaybackUrl(url, latestUiState.selectedStream), isDashPlaybackUrl(urlLower), hasSidecars = true,
+                            panelCheckAllowed = iptvVodGate.panelCheckAllowed
+                        ),
+                        currentPosition
+                    )
+                    exoPlayer.prepare()
+                }
+            } else {
+                exoPlayer.setMediaItem(mediaItem, currentPosition)
+                exoPlayer.prepare()
+            }
             if (wasPlaying) exoPlayer.play()
 
             // Enable the subtitle track after rebuild
@@ -2158,8 +3245,8 @@ fun PlayerScreen(
     }
 
     // Auto-hide controls and return focus to container
-    LaunchedEffect(showControls, isPlaying, isCasting) {
-        if (showControls && isPlaying && !isCasting && !showSubtitleMenu && !showSourceMenu && !showSubtitleSettings) {
+    LaunchedEffect(showControls, isPlaying, isCasting, seekInteraction.phase) {
+        if (showControls && isPlaying && !isCasting && !seekInteraction.browsing && !showSubtitleMenu && !showSourceMenu && !showSubtitleSettings) {
             delay(5000)
             showControls = false
             // Return focus to container so it can receive key events
@@ -2184,24 +3271,25 @@ fun PlayerScreen(
     // hasPlaybackStarted is also a key because the controls are inside
     // AnimatedVisibility(visible = hasPlaybackStarted && showControls),
     // so the play button isn't in composition until playback begins.
+    val canFocusPlaybackControls by rememberUpdatedState(
+        showControls && hasPlaybackStarted && !showSubtitleMenu && !showSourceMenu && !showSubtitleSettings && uiState.error == null
+    )
     LaunchedEffect(showControls, hasPlaybackStarted) {
-        if (showControls && hasPlaybackStarted && !showSubtitleMenu && !showSourceMenu && uiState.error == null) {
-            delay(300)
-            try {
-                playButtonFocusRequester.requestFocus()
-            } catch (e: Exception) {if (e is kotlinx.coroutines.CancellationException) throw e
-}
+        if (!canFocusPlaybackControls) return@LaunchedEffect
+        // Allow attachment, but do not restart this request when a menu closes:
+        // that menu owns restoration to the button that opened it.
+        repeat(3) {
+            androidx.compose.runtime.withFrameNanos { }
+            if (!canFocusPlaybackControls) return@LaunchedEffect
+            if (runCatching { playButtonFocusRequester.requestFocus() }.isSuccess) return@LaunchedEffect
         }
     }
 
     // Auto-hide skip overlay and reset - use lastSkipTime as key to restart on each skip
-    LaunchedEffect(lastSkipTime) {
-        if (showSkipOverlay && lastSkipTime > 0) {
-            delay(1500)
-            showSkipOverlay = false
-            skipAmount = 0
-            skipStartPosition = 0L
-            skipPreviewPosition = 0L
+    LaunchedEffect(lastSkipTime, seekInteraction.phase) {
+        if (seekInteraction.phase == SeekPhase.QuickSkip && lastSkipTime > 0) {
+            delay(QUICK_SEEK_DISMISS_DELAY_MS)
+            closeQuickSeekOverlay(true)
         }
     }
 
@@ -2243,27 +3331,54 @@ fun PlayerScreen(
         showVolumeIndicator = true
     }
 
+    fun selectSourceManually(stream: StreamSource): Boolean {
+        if (isAddonNoticeRow(stream)) {
+            android.widget.Toast.makeText(
+                context,
+                listOf(stream.source, stream.description).filterNot { it.isNullOrBlank() }.joinToString(": "),
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            return false
+        }
+        // Both touch and TV keep the title's saved position when leaving an unverified/stand-in clip.
+        val resumePosition = exoPlayer.currentPosition.takeIf { playingCheckedRealSource() }
+        userSelectedSourceManually = true
+        playbackIssueReported = false
+        startupRecoverAttempted = false
+        startupHardFailureReported = false
+        startupSameSourceRetryCount = 0
+        startupSameSourceRefreshAttempted = false
+        startupUrlLock = null
+        pendingStartupFailover = false
+        pendingStartupFailoverMessage = null
+        pendingStartupFailureRecorded = false
+        rebufferRecoverAttempted = false
+        longRebufferCount = 0
+        viewModel.selectStream(stream, resumePosition)
+        return true
+    }
+
     // Update progress periodically
     LaunchedEffect(exoPlayer, isCasting) {
         while (!playerReleasedAtomic.get()) {
             if (playerReleasedAtomic.get()) break
             if (isCasting) { delay(500); continue }
             currentPosition = runCatching { exoPlayer.currentPosition }.getOrDefault(currentPosition)
-            viewModel.onPlaybackPosition(currentPosition)
             val rawDuration = exoPlayer.duration
             duration = if (rawDuration > 0L && rawDuration != C.TIME_UNSET) rawDuration else 0L
+            currentSourceIsLive = exoPlayer.isCurrentMediaItemLive
             progress = if (duration > 0L) {
                 (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
             } else {
                 0f
             }
             isPlaying = exoPlayer.isPlaying
-            isBuffering = exoPlayer.playbackState == Player.STATE_BUFFERING
+            isBuffering = exoPlayer.playbackState == Player.STATE_BUFFERING && exoPlayer.playWhenReady
 
             // Update Discord RPC
             val titleVal = latestUiState.title
-            val subtitleVal = if (mediaType == MediaType.TV) {
-                val epPart = if (seasonNumber != null && episodeNumber != null) "S${seasonNumber}E${episodeNumber}" else ""
+            val subtitleVal = if (args.mediaType == MediaType.TV) {
+                val epPart = if (args.seasonNumber != null && args.episodeNumber != null) "S${args.seasonNumber}E${args.episodeNumber}" else ""
                 val epTitle = latestUiState.episodeTitle
                 if (!epTitle.isNullOrBlank()) {
                     if (epPart.isNotEmpty()) "$epPart - $epTitle" else epTitle
@@ -2291,8 +3406,62 @@ fun PlayerScreen(
                 readyPlayingSinceMs = null
             }
 
+            // An addon's stand-in video ("downloading", "not cached yet") plays like the real file.
+            // Recheck as duration/title metadata arrives; READY alone does not mean it is known.
+            // ENDED counts too: resuming past a stand-in clip can jump straight to its end.
+            val checkedSource = selectedSourceKey()
+            if (checkedSource != null &&
+                checkedSource == loadedSource &&
+                (exoPlayer.playbackState == Player.STATE_READY || exoPlayer.playbackState == Player.STATE_ENDED)
+            ) {
+                placeholderCheckedSource = checkedSource
+                val videoStatus = playbackVideoStatus()
+                if ("$checkedSource|$videoStatus" != placeholderLoggedCheck) {
+                    placeholderLoggedCheck = "$checkedSource|$videoStatus"
+                    sourceFailoverLog(
+                        "placeholder check ${latestUiState.selectedStream.failoverSummary()} status=$videoStatus " +
+                            "durationMs=$duration expectedDurationMs=${latestUiState.expectedDurationMs} " +
+                            "metadataPending=${latestUiState.isLoadingPlaybackMetadata} " +
+                            "manual=$userSelectedSourceManually fallbackAllowed=$allowStartupSourceFallback"
+                    )
+                }
+                if (videoStatus == PlaybackVideoStatus.PLACEHOLDER &&
+                    checkedSource != placeholderHandledSource
+                ) {
+                    placeholderHandledSource = checkedSource
+                    playbackRequestIdentity(latestUiState.selectedStream, latestUiState.selectedStreamUrl)?.let {
+                        placeholderRequests = placeholderRequests + it
+                    }
+                    if (!userSelectedSourceManually &&
+                        allowStartupSourceFallback &&
+                        tryAdvanceToNextStream(reason = context.getString(R.string.player_fail_source_not_ready))
+                    ) {
+                        streamSelectedTime = System.currentTimeMillis()
+                        startupRecoverAttempted = false
+                        continue
+                    }
+                    // A source picked on the details screen starts before the player has the
+                    // other sources; switch once they arrive (see the effect on placeholderAwaitingSources).
+                    if (!userSelectedSourceManually && allowStartupSourceFallback && latestUiState.sourceSearchActive) {
+                        placeholderAwaitingSources = checkedSource
+                    }
+                    // Picked by hand, or nothing left to switch to: the clip itself says what is
+                    // going on (often "downloading"), so it keeps playing with the reason on top.
+                    viewModel.onSelectedStreamPlaybackFailure(reportError = false)
+                    android.widget.Toast.makeText(
+                        context, R.string.player_toast_placeholder_video, android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+
+            if (playingCheckedRealSource()) viewModel.onPlaybackPosition(currentPosition)
+            if (hasPlaybackStarted && playingCheckedRealSource() && confirmedSource != checkedSource) {
+                confirmedSource = checkedSource
+                viewModel.onSelectedSourceConfirmed()
+            }
+
             // Buffering watchdog - detect long buffering but do not force a source error popup.
-            if (isBuffering && hasPlaybackStarted) {
+            if (isBuffering && hasPlaybackStarted && exoPlayer.playWhenReady && !seekInteraction.browsing) {
                 if (bufferingStartTime == null) {
                     bufferingStartTime = loopNowMs
                 } else {
@@ -2304,7 +3473,9 @@ fun PlayerScreen(
                         if (allowMidPlaybackSourceFallback &&
                             !userSelectedSourceManually &&
                             longRebufferCount >= 1 &&
-                            tryAdvanceToNextStream(reason = "Buffering too slow")
+                            tryAdvanceToNextStream(
+                                reason = context.getString(R.string.player_fail_buffering_slow)
+                            )
                         ) {
                             continue
                         }
@@ -2324,7 +3495,8 @@ fun PlayerScreen(
             }
 
             // Initial startup watchdog: while first frame has not really started, enforce bounded startup.
-            val startupPending = uiState.selectedStreamUrl != null && !hasPlaybackStarted
+            val startupPending = uiState.selectedStreamUrl != null && !hasPlaybackStarted &&
+                !iptvVodGate.isClosedForBackground && !iptvVodGate.hasPendingReopen
             if (startupPending) {
                 val selectedAt = streamSelectedTime ?: System.currentTimeMillis()
                 val startupBufferDuration = loopNowMs - selectedAt
@@ -2350,9 +3522,9 @@ fun PlayerScreen(
                     // to load (uncached/slow host); READY without a frame = the device couldn't
                     // decode the video (codec/resolution). The user sees which it is.
                     val startupReason = if (exoPlayer.playbackState == Player.STATE_READY) {
-                        "Video can't play on this device"
+                        context.getString(R.string.player_fail_device_cannot_play)
                     } else {
-                        "Source too slow to load"
+                        context.getString(R.string.player_fail_source_too_slow)
                     }
                     if (allowStartupSourceFallback &&
                         !userSelectedSourceManually &&
@@ -2371,9 +3543,9 @@ fun PlayerScreen(
                     viewModel.onSelectedStreamPlaybackFailure()
                     viewModel.reportPlaybackError(
                         if (autoAdvanceAttempts > 0 || startupSameSourceRetryCount > 0) {
-                            "Source did not start after retries. Try another source."
+                            PlayerMessage.Res(R.string.player_fail_no_start_after_retries)
                         } else {
-                            "Source did not start in time. Try another source."
+                            PlayerMessage.Res(R.string.player_fail_no_start_in_time)
                         }
                     )
                 }
@@ -2455,7 +3627,9 @@ fun PlayerScreen(
                         }
                         if (allowStartupSourceFallback &&
                             !userSelectedSourceManually &&
-                            tryAdvanceToNextStream(reason = "No video — device can't decode this format")
+                            tryAdvanceToNextStream(
+                                reason = context.getString(R.string.player_fail_no_video_decode)
+                            )
                         ) {
                             continue
                         }
@@ -2463,7 +3637,7 @@ fun PlayerScreen(
                         playbackIssueReported = true
                         viewModel.onSelectedStreamPlaybackFailure()
                         viewModel.reportPlaybackError(
-                            "Video could not render on this device. Try another source."
+                            PlayerMessage.Res(R.string.player_fail_render_failed)
                         )
                     }
                 }
@@ -2482,70 +3656,31 @@ fun PlayerScreen(
                 )
             }
 
-            if (currentPosition > 0 && duration > 0) {
+            // Checked before any progress is saved: a live stream's window looks like a duration.
+            if (exoPlayer.isCurrentMediaItemLive) viewModel.onLivePlaybackDetected()
+
+            // Someone watching without touching the remote is not idle.
+            if (exoPlayer.isPlaying) viewModel.idleReturnCoordinator.markActive()
+
+            if (!leftForIdle && canReportPlaybackProgress(currentPosition, duration, matchedIptvVodPlayback()) && playingCheckedRealSource()) {
                 val currentSecond = (currentPosition / 1000L).coerceAtLeast(0L)
-                val shouldReport =
-                    (!exoPlayer.isPlaying && currentSecond != lastProgressReportSecond) ||
-                        (exoPlayer.isPlaying && (lastProgressReportSecond < 0L || currentSecond - lastProgressReportSecond >= 3L))
+                val shouldReport = shouldReportPlaybackProgress(
+                    lastProgressReportSecond, currentSecond, lastProgressReportPlaying, exoPlayer.isPlaying
+                )
                 if (shouldReport) {
                     lastProgressReportSecond = currentSecond
-                    val progressPercent = (currentPosition.toFloat() / duration.toFloat() * 100).toInt()
+                    lastProgressReportPlaying = exoPlayer.isPlaying
+                    val trackingDuration = playbackTrackingDurationMs(duration, currentSourceIsLive, matchedIptvVodPlayback())
+                    val progressPercent = if (trackingDuration > 0L) (currentPosition.toFloat() / trackingDuration.toFloat() * 100).toInt() else 0
                     viewModel.saveProgress(
                         currentPosition,
-                        duration,
+                        trackingDuration,
                         progressPercent,
                         isPlaying = exoPlayer.isPlaying,
                         playbackState = exoPlayer.playbackState
                     )
                 }
 
-            }
-
-            // Post-episode prompt: when a TV episode ends, show the "Up Next" overlay with a
-            // 10-second countdown that auto-advances (or lets the user cancel / continue
-            // immediately). Gated on the profile's autoPlayNext setting — when disabled we
-            // stay on the ended frame rather than silently advancing. STATE_ENDED remains active
-            // after closing, so the per-episode gate prevents the countdown from reopening.
-            val endedEpisodeKey = if (
-                mediaType == MediaType.TV &&
-                seasonNumber != null &&
-                episodeNumber != null
-            ) {
-                PlaybackEpisodeKey(
-                    mediaId = mediaId,
-                    seasonNumber = seasonNumber,
-                    episodeNumber = episodeNumber,
-                    tmdbSeasonNumber = tmdbSeasonNumber ?: seasonNumber,
-                    tmdbEpisodeNumber = tmdbEpisodeNumber ?: episodeNumber,
-                    kitsuId = kitsuId,
-                    kitsuEpisodeNumber = kitsuEpisodeNumber,
-                )
-            } else {
-                null
-            }
-            if (endedEpisodeKey != null && nextEpisodePromptGate.tryOpen(
-                    episode = endedEpisodeKey,
-                    eligible = exoPlayer.playbackState == Player.STATE_ENDED &&
-                        !showNextEpisodePrompt &&
-                        !showSourceMenu &&
-                        !showSubtitleMenu &&
-                        uiState.error == null &&
-                        uiState.autoPlayNext &&
-                        nextEpisodeIdentity != null &&
-                        nextEpisodeAirDateSource == endedEpisodeKey,
-                    airDateResolution = nextEpisodeAirDateResolution,
-                )
-            ) {
-                val selected = uiState.selectedStream
-                val next = nextEpisodeIdentity
-                if (next != null) {
-                    pendingNextIdentity = next
-                    pendingNextAddonId = selected?.addonId?.takeIf { it.isNotBlank() }
-                    pendingNextSourceName = selected?.source?.takeIf { it.isNotBlank() }
-                    pendingNextBingeGroup = selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
-                    nextEpisodePromptButton = 0
-                    showNextEpisodePrompt = true
-                }
             }
 
             val tickDelayMs = when {
@@ -2559,12 +3694,19 @@ fun PlayerScreen(
 
     DisposableEffect(Unit) {
         onDispose {
-            controlsSeekJob?.cancel()
             playerReleasedAtomic.set(true)
             playerReleased = true
-            if (!nextEpisodeTransitionInProgress) {
+            if (viewModel.idleReturnCoordinator.shouldDiscardPlayer || viewModel.idleReturnCoordinator.isIdle()) {
+                viewModel.discardProgressForIdle()
+            }
+            // Leaving after an idle period saves nothing: the position is the one left here
+            // before going idle, and stamping it now would bury newer progress made elsewhere.
+            if (!nextEpisodeTransitionInProgress && !leftForIdle && playingCheckedRealSource()) {
                 runCatching {
-                    val safeDuration = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+                    if (exoPlayer.isCurrentMediaItemLive) viewModel.onLivePlaybackDetected()
+                    val safeDuration = playbackTrackingDurationMs(
+                        exoPlayer.duration, exoPlayer.isCurrentMediaItemLive, matchedIptvVodPlayback()
+                    )
                     val safeProgressPercent = if (safeDuration > 0L) {
                         ((exoPlayer.currentPosition.toDouble() / safeDuration.toDouble()) * 100.0)
                             .toInt()
@@ -2576,12 +3718,14 @@ fun PlayerScreen(
                         exoPlayer.currentPosition,
                         safeDuration,
                         safeProgressPercent,
-                        isPlaying = exoPlayer.isPlaying,
-                        playbackState = exoPlayer.playbackState
+                        isPlaying = false,
+                        playbackState = exoPlayer.playbackState,
+                        closing = true
                     )
                 }
             }
             runCatching { exoPlayer.release() }
+            iptvVodGate.close()
             // Restore the system stream volume if the player left it at zero.
             // setStreamVolume(STREAM_MUSIC, 0) silences HDMI ARC, optical, and
             // Bluetooth receivers globally — not just this app — so we must undo
@@ -2599,21 +3743,21 @@ fun PlayerScreen(
     // the user changes the boost in Settings (though in practice that requires reopening
     // the player since Settings changes don't propagate mid-session yet). 0 dB = no
     // effect created, no CPU cost. Issue #88.
-    DisposableEffect(uiState.volumeBoostDb, exoPlayer.audioSessionId) {
+    DisposableEffect(uiState.volumeBoostDb, uiState.audioNormalization, exoPlayer.audioSessionId) {
         val sessionId = exoPlayer.audioSessionId
-        val targetDb = uiState.volumeBoostDb
+        val targetGainMb = if (uiState.audioNormalization) {
+            maxOf(uiState.volumeBoostDb * 100, 500)
+        } else {
+            uiState.volumeBoostDb * 100
+        }
         val enhancer: android.media.audiofx.LoudnessEnhancer? =
-            if (targetDb > 0 && sessionId != C.AUDIO_SESSION_ID_UNSET) {
+            if (targetGainMb > 0 && sessionId != C.AUDIO_SESSION_ID_UNSET) {
                 try {
                     android.media.audiofx.LoudnessEnhancer(sessionId).apply {
-                        setTargetGain(targetDb * 100) // API takes millibels
+                        setTargetGain(targetGainMb)
                         enabled = true
                     }
                 } catch (e: Throwable) {
-                    // Some Android TV devices route audio through HDMI passthrough and
-                    // reject audio-session effects (particularly when passthrough is
-                    // enabled for DTS/AC3). Fail silently — user gets unboosted audio
-                    // but playback still works.
                     android.util.Log.w("PlayerScreen", "LoudnessEnhancer unavailable on this device: ${e.message}")
                     null
                 }
@@ -2628,11 +3772,23 @@ fun PlayerScreen(
         }
     }
 
-    // Close menus when an error occurs so the error overlay can receive input
+    // Close menus and pause playback when an error occurs so the error overlay is prominent and idle
     LaunchedEffect(uiState.error) {
+        if (uiState.error == PlayerMessage.Res(R.string.stream_no_sources_match) && uiState.streams.isNotEmpty()) {
+            showSourceMenu = true
+            showControls = true
+            viewModel.acknowledgeAutoplayNoMatch()
+            return@LaunchedEffect
+        }
         if (uiState.error != null) {
             showSourceMenu = false
             showSubtitleMenu = false
+            showSubtitleSettings = false
+            showNextEpisodePrompt = false
+            runCatching {
+                exoPlayer.pause()
+                playerEngine.pause()
+            }
         }
     }
 
@@ -2662,6 +3818,10 @@ fun PlayerScreen(
     }
 
     BackHandler(enabled = showSourceMenu) {
+        if (uiState.selectedStreamUrl.isNullOrBlank()) {
+            onExitPlayer()
+            return@BackHandler
+        }
         showSourceMenu = false
         showControls = true
         coroutineScope.launch {
@@ -2684,16 +3844,20 @@ fun PlayerScreen(
     }
 
     BackHandler(enabled = uiState.error != null) {
-        onBack()
+        onExitPlayer()
     }
 
     BackHandler(
         enabled = !showSubtitleMenu && !showSourceMenu && !showNextEpisodePrompt && !showSubtitleSettings && uiState.error == null
     ) {
-        if (showControls) {
+        if (showSkipOverlay) {
+            closeQuickSeekOverlay(false)
+        } else if (seekInteraction.browsing) {
+            finishSeek(false)
+        } else if (showControls && !deviceType.isTouchDevice()) {
             showControls = false
         } else {
-            onBack()
+            onExitPlayer()
         }
     }
 
@@ -2707,16 +3871,14 @@ fun PlayerScreen(
     val subtitleStylePref = uiState.subtitleStyle
     val subtitleFontPref = uiState.subtitleFont
     val subtitleStylizedPref = uiState.subtitleStylized
-    val aspectModeLabel = when (playerResizeMode) {
-        AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> "Zoom"
-        AspectRatioFrameLayout.RESIZE_MODE_FILL -> "Fill"
-        else -> "Fit"
-    }
+    val subtitleOffsetPref = uiState.subtitleOffset
+    val aspectModeLabel = currentAspectRatioMode.label
     val cycleAspectRatio: () -> Unit = {
-        playerResizeMode = when (playerResizeMode) {
-            AspectRatioFrameLayout.RESIZE_MODE_FIT -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-            AspectRatioFrameLayout.RESIZE_MODE_ZOOM -> AspectRatioFrameLayout.RESIZE_MODE_FILL
-            else -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        currentAspectRatioMode = when (currentAspectRatioMode) {
+            AspectRatioMode.AUTO -> AspectRatioMode.FIT
+            AspectRatioMode.FIT -> AspectRatioMode.STRETCH
+            AspectRatioMode.STRETCH -> AspectRatioMode.CROP
+            AspectRatioMode.CROP -> AspectRatioMode.AUTO
         }
         aspectIndicatorTrigger++
     }
@@ -2730,37 +3892,11 @@ fun PlayerScreen(
             .background(Color.Black)
             .focusRequester(containerFocusRequester)
             .focusable()
-            .then(
-                if (isTouchDevice) {
-                    // isCasting is a key so the handler restarts when casting changes,
-                    // picking up the updated queueControlsSeek lambda.
-                    Modifier.pointerInput(isCasting) {
-                        detectTapGestures(
-                            onTap = {
-                                if (uiState.error == null && !showSubtitleMenu && !showSourceMenu) {
-                                    showControls = !showControls
-                                }
-                            },
-                            onDoubleTap = { offset ->
-                                if (uiState.error == null && !showSubtitleMenu && !showSourceMenu) {
-                                    val halfWidth = size.width / 2
-                                    if (offset.x < halfWidth) {
-                                        // Double-tap left side: rewind 10 seconds
-                                        queueControlsSeek(-10_000L)
-                                    } else {
-                                        // Double-tap right side: forward 10 seconds
-                                        queueControlsSeek(10_000L)
-                                    }
-                                }
-                            }
-                        )
-                    }
-                } else {
-                    Modifier
-                }
-            )
+            .onPreviewKeyEvent { exitTransition.isExiting }
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown) {
+                    if (event.nativeKeyEvent.repeatCount > 0 &&
+                        event.key in listOf(Key.Enter, Key.DirectionCenter, Key.MediaPlayPause)) return@onKeyEvent true
                     // Fire TV / Bluetooth media remote keys. These must be handled at the
                     // top of the key handler so they work regardless of which overlay
                     // (error, menus, post-episode prompt) is currently visible. Previously
@@ -2769,39 +3905,41 @@ fun PlayerScreen(
                     // stick remote that has dedicated FF/RW/Play buttons. Issue #68 (part).
                     when (event.key) {
                         Key.MediaPlayPause -> {
-                            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                            if (seekInteraction.browsing) finishSeek(true)
+                            else if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                             showControls = true
                             return@onKeyEvent true
                         }
                         Key.MediaPlay -> {
+                            if (seekInteraction.browsing) finishSeek(true)
                             exoPlayer.play()
                             showControls = true
                             return@onKeyEvent true
                         }
                         Key.MediaPause -> {
+                            if (seekInteraction.browsing) finishSeek(false)
                             exoPlayer.pause()
                             showControls = true
                             return@onKeyEvent true
                         }
                         Key.MediaStop -> {
-                            exoPlayer.pause()
-                            onBack()
+                            onExitPlayer()
                             return@onKeyEvent true
                         }
                         Key.MediaRewind -> {
-                            queueControlsSeek(-10_000L)
-                            showControls = true
+                            showControls = false
+                            queueQuickSeek(-10_000L)
                             return@onKeyEvent true
                         }
                         Key.MediaFastForward -> {
-                            queueControlsSeek(10_000L)
-                            showControls = true
+                            showControls = false
+                            queueQuickSeek(10_000L)
                             return@onKeyEvent true
                         }
                         Key.MediaNext -> {
                             // Jump to next episode if this is a TV series and we have a
                             // current episode. No-op for movies (there is no next).
-                            if (mediaType == MediaType.TV && nextEpisodeIdentity != null) {
+                            if (args.mediaType == MediaType.TV && nextEpisodeIdentity != null) {
                                 val selected = uiState.selectedStream
                                 val next = nextEpisodeIdentity ?: return@onKeyEvent true
                                 playNextEpisode(
@@ -2815,10 +3953,10 @@ fun PlayerScreen(
                         }
                         Key.MediaPrevious -> {
                             // Jump to previous episode for TV series. Movies: no-op.
-                            if (mediaType == MediaType.TV && previousEpisodeIdentity != null) {
+                            if (args.mediaType == MediaType.TV && previousEpisodeIdentity != null) {
                                 val selected = uiState.selectedStream
                                 val previous = previousEpisodeIdentity ?: return@onKeyEvent true
-                                onPlayNext(
+                                args.onPlayNext(
                                     previous,
                                     selected?.addonId?.takeIf { it.isNotBlank() },
                                     selected?.source?.takeIf { it.isNotBlank() },
@@ -2859,17 +3997,22 @@ fun PlayerScreen(
                     if ((event.key == Key.Back || event.key == Key.Escape) &&
                         !showSubtitleMenu && !showSourceMenu && !showNextEpisodePrompt && !showSubtitleSettings && uiState.error == null
                     ) {
-                        if (showControls) {
+                        if (showSkipOverlay) {
+                            closeQuickSeekOverlay(false)
+                        } else if (seekInteraction.browsing) {
+                            finishSeek(false)
+                        } else if (showControls && !deviceType.isTouchDevice()) {
                             showControls = false
                         } else {
-                            onBack()
+                            onExitPlayer()
                         }
                         return@onKeyEvent true
                     }
 
                     // Handle error modal
                     if (uiState.error != null) {
-                        val maxButtons = if (uiState.isSetupError) 0 else 1 // setup=1 button, error=2 buttons
+                        val iptvBusy = uiState.error == IPTV_ACCOUNT_BUSY_MESSAGE
+                        val maxButtons = if (uiState.isSetupError) 0 else if (iptvBusy) 2 else 1 // setup=1 button, error=2 buttons, busy=3 buttons
                         return@onKeyEvent when (event.key) {
                             Key.DirectionLeft -> {
                                 if (errorModalFocusIndex > 0) errorModalFocusIndex--
@@ -2881,14 +4024,18 @@ fun PlayerScreen(
                             }
                             Key.Enter, Key.DirectionCenter -> {
                                 if (uiState.isSetupError) {
-                                    onBack()
+                                    onExitPlayer()
                                 } else {
-                                    if (errorModalFocusIndex == 0) viewModel.retry() else onBack()
+                                    when {
+                                        errorModalFocusIndex == 0 -> viewModel.retry()
+                                        iptvBusy && errorModalFocusIndex == 1 -> viewModel.playIptvAnyway()
+                                        else -> onExitPlayer()
+                                    }
                                 }
                                 true
                             }
                             Key.Back, Key.Escape -> {
-                                onBack()
+                                onExitPlayer()
                                 true
                             }
                             else -> false
@@ -2908,7 +4055,7 @@ fun PlayerScreen(
                             }
                             Key.DirectionLeft -> {
                                 when (subtitleSettingsRow) {
-                                    0 -> subtitleSyncOffsetMs = (subtitleSyncOffsetMs - 100L).coerceAtLeast(-10000L)
+                                    0 -> subtitleSyncOffsetMs = (subtitleSyncOffsetMs - SUBTITLE_OFFSET_STEP_MS).coerceAtLeast(-MAX_SUBTITLE_OFFSET_MS)
                                     1 -> subtitleSizePct = (subtitleSizePct - 10).coerceAtLeast(50)
                                     2 -> subtitleVerticalPct = (subtitleVerticalPct - 1).coerceAtLeast(0)
                                 }
@@ -2916,7 +4063,7 @@ fun PlayerScreen(
                             }
                             Key.DirectionRight -> {
                                 when (subtitleSettingsRow) {
-                                    0 -> subtitleSyncOffsetMs = (subtitleSyncOffsetMs + 100L).coerceAtMost(10000L)
+                                    0 -> subtitleSyncOffsetMs = (subtitleSyncOffsetMs + SUBTITLE_OFFSET_STEP_MS).coerceAtMost(MAX_SUBTITLE_OFFSET_MS)
                                     1 -> subtitleSizePct = (subtitleSizePct + 10).coerceAtMost(300)
                                     2 -> subtitleVerticalPct = (subtitleVerticalPct + 1).coerceAtMost(50)
                                 }
@@ -3078,29 +4225,33 @@ fun PlayerScreen(
                         }
                     }
 
+                    // Handle source menu
+                    if (showSourceMenu) {
+                        if (event.key == Key.Back || event.key == Key.Escape) {
+                            if (uiState.selectedStreamUrl.isNullOrBlank()) {
+                                onExitPlayer()
+                                return@onKeyEvent true
+                            }
+                            showSourceMenu = false
+                            showControls = true
+                            coroutineScope.launch {
+                                delay(150)
+                                runCatching { sourceButtonFocusRequester.requestFocus() }
+                            }
+                            return@onKeyEvent true
+                        }
+                    }
+
                     when (event.key) {
                         Key.Back, Key.Escape -> {
-                            onBack()
+                            onExitPlayer()
                             true
                         }
                         Key.DirectionLeft -> {
                             if (!showControls) {
-                                // Accumulate skip amount - track from start position
-                                val now = System.currentTimeMillis()
-                                if (now - lastSkipTime < 1200 && showSkipOverlay) {
-                                    // Continue accumulating from current skip session
-                                    skipAmount = (skipAmount - 10).coerceIn(-10000, 10000)
-                                } else {
-                                    // Start new skip session
-                                    skipStartPosition = exoPlayer.currentPosition
-                                    skipAmount = -10
-                                }
-                                lastSkipTime = now
-                                val unclamped = (skipStartPosition + (skipAmount * 1000L)).coerceAtLeast(0L)
-                                val targetPosition = if (duration > 0L) unclamped.coerceAtMost(duration) else unclamped
-                                skipPreviewPosition = targetPosition
-                                exoPlayer.seekTo(targetPosition)
-                                showSkipOverlay = true
+                                queueQuickSeek(
+                                    -acceleratedSeekPreviewStepMs(event.nativeKeyEvent.repeatCount)
+                                )
                                 true
                             } else {
                                 false
@@ -3108,22 +4259,9 @@ fun PlayerScreen(
                         }
                         Key.DirectionRight -> {
                             if (!showControls) {
-                                // Accumulate skip amount - track from start position
-                                val now = System.currentTimeMillis()
-                                if (now - lastSkipTime < 1200 && showSkipOverlay) {
-                                    // Continue accumulating from current skip session
-                                    skipAmount = (skipAmount + 10).coerceIn(-10000, 10000)
-                                } else {
-                                    // Start new skip session
-                                    skipStartPosition = exoPlayer.currentPosition
-                                    skipAmount = 10
-                                }
-                                lastSkipTime = now
-                                val unclamped = (skipStartPosition + (skipAmount * 1000L)).coerceAtLeast(0L)
-                                val targetPosition = if (duration > 0L) unclamped.coerceAtMost(duration) else unclamped
-                                skipPreviewPosition = targetPosition
-                                exoPlayer.seekTo(targetPosition)
-                                showSkipOverlay = true
+                                queueQuickSeek(
+                                    acceleratedSeekPreviewStepMs(event.nativeKeyEvent.repeatCount)
+                                )
                                 true
                             } else {
                                 false
@@ -3141,6 +4279,7 @@ fun PlayerScreen(
                             val skipVisible = uiState.activeSkipInterval != null && !uiState.skipIntervalDismissed
                             // When hidden, prefer focusing the skip button (if present) instead of showing controls.
                             if (!showControls) {
+                                if (showSkipOverlay) closeQuickSeekOverlay(false)
                                 if (skipVisible && event.key == Key.DirectionUp) {
                                     coroutineScope.launch {
                                         delay(40)
@@ -3156,6 +4295,10 @@ fun PlayerScreen(
                             }
                         }
                         Key.Enter, Key.DirectionCenter -> {
+                            if (!showControls && showSkipOverlay) {
+                                closeQuickSeekOverlay(true)
+                                return@onKeyEvent true
+                            }
                             // Always toggle play/pause on Enter/Select.
                             // Controls overlay buttons have their own onKeyEvent handlers
                             // that will intercept Enter before this point if they have focus.
@@ -3164,7 +4307,8 @@ fun PlayerScreen(
                             true
                         }
                         Key.Spacebar -> {
-                            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                            if (seekInteraction.browsing) finishSeek(true)
+                            else if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                             showControls = true
                             true
                         }
@@ -3195,6 +4339,19 @@ fun PlayerScreen(
                         useController = false
                         setKeepContentOnPlayerReset(true)
                         resizeMode = playerResizeMode
+                        (videoSurfaceView as? SurfaceView)?.holder?.addCallback(
+                            object : android.view.SurfaceHolder.Callback {
+                                override fun surfaceCreated(holder: android.view.SurfaceHolder) {
+                                    frameRateSurface = holder.surface
+                                }
+                                override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
+                                    frameRateSurface = holder.surface
+                                }
+                                override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                                    frameRateSurface = null
+                                }
+                            }
+                        )
 
                         // Enable subtitle view with styling based on user preference
                         subtitleView?.apply {
@@ -3233,8 +4390,14 @@ fun PlayerScreen(
                         // track under the hood to read its timing — hide its raw (e.g. English)
                         // cues while the scan runs. Display-only: the scan's cue collection
                         // listens on the player, not this view. With AI translating, the
-                        // on-screen text is the translation, so nothing is hidden.
-                        visibility = if (uiState.isFindingBestMatch && !uiState.isAiTranslating) {
+                        // on-screen text is the translation, so nothing is hidden — and while an
+                        // optimistic pick is still showing, the visible track is the user's own
+                        // subtitle, so there is nothing to hide either. The in-player reference
+                        // clears provisionalMatch when it takes the track, which is what re-enables
+                        // hiding for the rest of the scan.
+                        visibility = if (uiState.isFindingBestMatch && !uiState.isAiTranslating &&
+                            uiState.provisionalMatch == null
+                        ) {
                             android.view.View.INVISIBLE
                         } else {
                             android.view.View.VISIBLE
@@ -3245,55 +4408,20 @@ fun PlayerScreen(
             )
         }
 
-        // Loading screen overlay - keep visible until player is fully started.
-        if (uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                if (uiState.backdropUrl != null) {
-                    AsyncImage(
-                        model = uiState.backdropUrl,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.7f))
-                    )
-                }
-
-                PulsingLogo(
-                    logoUrl = uiState.logoUrl,
-                    title = uiState.title,
-                    progress = if (uiState.showLoadingStats) uiState.streamProgress else null,
-                    // streamLoadPhase covers source discovery; startupPhase takes over from
-                    // stream selection ("Loading subtitles…"/"Loading video stream…") until the
-                    // first frame renders; switchNotice overlays both for 2.5s on failover.
-                    // Unlike the percentage ring, the phase text is not gated on
-                    // showLoadingStats — status feedback should always be visible.
-                    phaseLabel = switchNotice
-                        ?: (startupPhase.takeIf { uiState.selectedStreamUrl != null })
-                            ?.let { phase ->
-                                // Name the addons still being queried so a chronically slow one
-                                // identifies itself to the user ("Loading subtitles… (bla)").
-                                val pending = uiState.pendingSubtitleAddons
-                                if (phase.startsWith("Loading subtitles") && pending.isNotEmpty()) {
-                                    val shown = pending.take(2).joinToString(", ")
-                                    val more = pending.size - 2
-                                    "Loading subtitles… ($shown${if (more > 0) " +$more" else ""})"
-                                } else phase
-                            }
-                        ?: uiState.streamLoadPhase
-                )
-            }
-        }
+        PlayerLoadingOverlay(
+            uiState = uiState,
+            hasPlaybackStarted = hasPlaybackStarted,
+            isTouchDevice = isTouchDevice,
+            isInPipMode = isInPipMode,
+            showSourceMenu = showSourceMenu,
+            onExitPlayer = onExitPlayer,
+            startupPhase = startupPhase,
+            switchNotice = switchNotice
+        )
 
         // Buffering indicator - only show after playback has started (mid-stream buffering)
         // Initial buffering is handled by the main loading screen above
-        if (isBuffering && hasPlaybackStarted && uiState.selectedStreamUrl != null) {
+        if (isBuffering && hasPlaybackStarted && uiState.selectedStreamUrl != null && !isTouchDevice) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -3304,7 +4432,7 @@ fun PlayerScreen(
 
         // Skip intro/recap overlay — only after playback has started to avoid showing
         // on the loading screen (background art + pulsing logo).
-        if (hasPlaybackStarted) {
+        if (hasPlaybackStarted && !isTouchDevice && !seekInteraction.browsing) {
             val activeSkip = uiState.activeSkipInterval
             SkipIntroButton(
                 interval = activeSkip,
@@ -3338,7 +4466,7 @@ fun PlayerScreen(
                 modifier = Modifier
                     .background(
                         color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(16.dp)
                     )
                     .padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -3361,15 +4489,18 @@ fun PlayerScreen(
         // (AI-hearing on-screen overlay removed — the hearing still runs under the hood to power
         // "Find Best Match", but its transcription is no longer displayed.)
 
-        // "Find Best Match" persistent searching indicator
-        if (hasPlaybackStarted && uiState.isFindingBestMatch) {
+        // "Find Best Match" indicator — one generic message for the whole run, not a running
+        // commentary on its internal stages (those live in logcat via matchStep). When the scan
+        // hands over to sync by hearing, the same pill stays up and says so until the audio has
+        // confirmed the timing (it can take a minute, and nothing else shows it is still working).
+        if (hasPlaybackStarted && (uiState.isFindingBestMatch || uiState.isHearingSync)) {
             androidx.compose.foundation.layout.Row(
                 modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 16.dp)
+                    .align(Alignment.TopStart)
+                    .padding(top = 16.dp, start = 24.dp)
                     .background(
                         color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.72f),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(16.dp)
                     )
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .zIndex(6f),
@@ -3382,7 +4513,10 @@ fun PlayerScreen(
                     color = androidx.compose.ui.graphics.Color(0xFF7EC8F0)
                 )
                 Text(
-                    text = uiState.matchStatusText.ifBlank { "Searching for a match…" },
+                    text = stringResource(
+                        if (uiState.isFindingBestMatch) R.string.player_subtitle_searching_match
+                        else R.string.player_subtitle_hearing_sync
+                    ),
                     style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
                     color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.9f)
                 )
@@ -3392,7 +4526,7 @@ fun PlayerScreen(
         // AI translation API error toast
         uiState.aiErrorToast?.let { msg ->
             Toast(
-                message = msg,
+                message = msg.localizedText(),
                 type = ToastType.ERROR,
                 isVisible = true,
                 durationMs = 5000,
@@ -3402,9 +4536,17 @@ fun PlayerScreen(
 
         // "Find best match" outcome — same top-center pill and spot as the scanning indicator
         // above (a bottom toast would sit on the subtitles and interrupt watching).
-        uiState.matchToast?.let { msg ->
+        // Held until the video has actually started: a remembered match is applied as soon as the
+        // subtitles load — usually behind the loading screen — and its 4s ran out unseen. A tester
+        // (Sept 2026) never saw "Remembered: …" and spent a round of debugging on a stale match
+        // replaying silently. The remembered toast then stays 6s: it is the only sign that no scan
+        // ran, and the cue to tap Find Best Match when the replayed subtitle is wrong.
+        uiState.matchToast?.takeIf { hasPlaybackStarted }?.let { msg ->
+            val remembered = (msg as? PlayerMessage.Res)?.resourceId.let {
+                it == R.string.player_match_remembered || it == R.string.player_match_remembered_offset
+            }
             LaunchedEffect(msg) {
-                delay(4000)
+                delay(if (remembered) 6000 else 4000)
                 viewModel.dismissMatchToast()
             }
             androidx.compose.foundation.layout.Row(
@@ -3412,862 +4554,1261 @@ fun PlayerScreen(
                     .align(Alignment.TopCenter)
                     // Slide below the scanning pill on the rare frames both are visible
                     // (e.g. a remembered-match toast fired before the scan state cleared).
-                    .padding(top = if (hasPlaybackStarted && uiState.isFindingBestMatch) 60.dp else 16.dp)
+                    .padding(top = if (hasPlaybackStarted && (uiState.isFindingBestMatch || uiState.isHearingSync)) 60.dp else 16.dp)
                     .background(
                         color = androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.72f),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(16.dp)
                     )
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .zIndex(6f),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = msg,
+                    text = msg.localizedText(),
                     style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
                     color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.9f)
                 )
             }
         }
 
-        // Netflix-style Controls Overlay
-        AnimatedVisibility(
-            visible = hasPlaybackStarted && showControls && !showSubtitleMenu && !showSourceMenu && !isInPipMode,
-            enter = fadeIn(androidx.compose.animation.core.tween(150)),
-            exit = fadeOut(androidx.compose.animation.core.tween(200))
-        ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                // Top info
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .fillMaxWidth()
-                        .padding(
-                            start = if (isTouchDevice) 20.dp else 28.dp,
-                            top = if (isTouchDevice) 18.dp else 30.dp,
-                            end = if (isTouchDevice) 24.dp else 48.dp
-                        )
-                        .zIndex(4f),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
-                ) {
-                    val isPaused = hasPlaybackStarted && !isPlaying && !isBuffering
-
-                    PlayerMetadataChrome(
-                        uiState = uiState,
-                        mediaType = mediaType,
-                        seasonNumber = seasonNumber,
-                        episodeNumber = episodeNumber,
-                        isPaused = isPaused,
-                        accentColor = playerAccent,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-
-                    // Right side - Cast button (mobile) + Ends At + Clock
-                    Column(horizontalAlignment = Alignment.End) {
-                        val currentTime = remember { mutableStateOf("") }
-                        val endsAtTime = remember { mutableStateOf("") }
-                        LaunchedEffect(duration, currentPosition, clockFormat) {
-                            while (true) {
-                                val now = System.currentTimeMillis()
-                                currentTime.value = formatPlayerClockTime(now, clockFormat)
-                                if (duration > 0 && currentPosition >= 0) {
-                                    val remainingMs = (duration - currentPosition).coerceAtLeast(0L)
-                                    endsAtTime.value = formatPlayerClockTime(now + remainingMs, clockFormat)
-                                } else { endsAtTime.value = "" }
-                                kotlinx.coroutines.delay(1000)
-                            }
-                        }
-
-                        // Cast button — mobile/tablet only; hidden when stream requires custom headers
-                        if (isTouchDevice && castAvailable && !streamNeedsHeaders) {
-                            val castDeviceName = (castState as? CastManager.CastState.Casting)?.deviceName
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                modifier = Modifier.padding(bottom = if (endsAtTime.value.isNotBlank() || !isTouchDevice) 4.dp else 0.dp)
-                            ) {
-                                if (castDeviceName != null) {
-                                    androidx.tv.material3.Text(
-                                        text = castDeviceName,
-                                        style = ArflixTypography.caption.copy(fontSize = 11.sp),
-                                        color = Color.White.copy(alpha = 0.85f),
-                                        maxLines = 1
-                                    )
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .clip(CircleShape)
-                                        .background(
-                                            if (isCasting) Color.White.copy(alpha = 0.2f)
-                                            else Color.Transparent
-                                        )
-                                        .clickable {
-                                            if (isCasting) {
-                                                castManager.disconnect()
-                                            } else {
-                                                val dialog = MediaRouteChooserDialog(context)
-                                                dialog.routeSelector = castManager.getRouteSelector()
-                                                dialog.show()
-                                            }
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = if (isCasting) Icons.Default.CastConnected else Icons.Default.Cast,
-                                        contentDescription = if (isCasting) stringResource(R.string.player_cd_stop_casting) else stringResource(R.string.player_cd_cast_to_tv),
-                                        tint = if (isCasting) playerAccent else Color.White.copy(alpha = 0.85f),
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        if (!isTouchDevice) {
-                            Text(
-                                currentTime.value,
-                                style = ArflixTypography.sectionTitle.copy(
-                                    fontSize = 24.sp,
-                                    fontWeight = FontWeight.Medium
-                                ),
-                                color = TextPrimary.copy(alpha = 0.92f),
-                                maxLines = 1
-                            )
-                        }
-                        if (endsAtTime.value.isNotBlank()) {
-                            Text(
-                                "${stringResource(R.string.ends_at)} ${endsAtTime.value}",
-                                style = ArflixTypography.caption.copy(fontSize = 12.sp),
-                                color = TextPrimary.copy(alpha = 0.72f),
-                                maxLines = 1,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
-                    }
-                }
-
-                // Bottom controls - positioned at very bottom.
-                // Gradient made stronger on touch devices so the icon row stays readable
-                // against bright content. Issue #97.
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .align(Alignment.BottomCenter)
-                        .background(
-                            Brush.verticalGradient(
-                                colorStops = if (isTouchDevice) arrayOf(
-                                    0.0f to Color.Transparent,
-                                    0.2f to Color.Black.copy(alpha = 0.5f),
-                                    1.0f to Color.Black.copy(alpha = 0.85f)
-                                ) else arrayOf(
-                                    0.0f to Color.Transparent,
-                                    0.3f to Color.Black.copy(alpha = 0.2f),
-                                    1.0f to Color.Black.copy(alpha = 0.7f)
-                                )
-                            )
-                        )
-                        .padding(horizontal = if (isTouchDevice) 24.dp else 48.dp)
-                        .padding(top = if (isTouchDevice) 16.dp else 24.dp, bottom = if (isTouchDevice) 32.dp else 24.dp)
-                ) {
-                    // Icon buttons row. On tablet we center the row and use slightly
-                    // larger buttons than TV to match the shorter viewing distance and
-                    // the Material minimum touch-target of 48dp. Phone keeps the compact
-                    // left-aligned layout to fit vertical orientation. Issue #97.
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = if (isTablet) Arrangement.Center else Arrangement.Start,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Three-way sizing: phone (compact) < TV (medium) < tablet (largest).
-                        // The old logic made touch devices SMALLER than TV which was
-                        // backwards for tablet finger targets.
-                        val smallBtn = when {
-                            isTablet -> 36.dp
-                            isPhone -> 24.dp
-                            else -> 28.dp
-                        }
-                        val smallIcon = when {
-                            isTablet -> 22.dp
-                            isPhone -> 17.dp
-                            else -> 19.dp
-                        }
-                        val midBtn = when {
-                            isTablet -> 40.dp
-                            isPhone -> 28.dp
-                            else -> 30.dp
-                        }
-                        val midIcon = when {
-                            isTablet -> 24.dp
-                            isPhone -> 20.dp
-                            else -> 22.dp
-                        }
-                        val bigBtn = when {
-                            isTablet -> 48.dp
-                            isPhone -> 34.dp
-                            else -> 38.dp
-                        }
-                        val bigIcon = when {
-                            isTablet -> 30.dp
-                            isPhone -> 26.dp
-                            else -> 28.dp
-                        }
-                        val gap = when {
-                            isTablet -> 16.dp
-                            isPhone -> 10.dp
-                            else -> 14.dp
-                        }
-                        val wideGap = when {
-                            isTablet -> 20.dp
-                            isPhone -> 14.dp
-                            else -> 18.dp
-                        }
-
-                        // Subtitles
-                        PlayerIconButton(icon = Icons.Default.ClosedCaption, contentDescription = "${stringResource(R.string.subtitles)} / ${stringResource(R.string.audio)}",
-                            focusRequester = subtitleButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
-                            onFocusChanged = { if (it) focusedButton = 1 },
-                            onClick = {
-                                subtitleMenuIndex = 0
-                                subtitlePanelFocus = 0
-                                val selected = latestUiState.selectedSubtitle
-                                if (selected == null) {
-                                    subtitleLangIndex = 0
-                                    subtitleTrackIndex = 0
-                                } else if (latestUiState.isAiAvailable && latestUiState.aiTargetLanguageName.isNotBlank() &&
-                                    (latestUiState.isAiTranslating || latestUiState.selectedSubtitle?.let { sub ->
-                                        subtitleGroups.none { (_, items) -> items.any { (_, s) -> s.id == sub.id } }
-                                    } == true)) {
-                                    val aiLangName = latestUiState.aiTargetLanguageName
-                                    val idx = subtitleGroups.indexOfFirst { (name, _) -> name.equals(aiLangName, ignoreCase = true) }
-                                    subtitleLangIndex = if (idx >= 0) idx + 1 else 0
-                                    subtitleTrackIndex = 0
-                                } else {
-                                    val langName = getFullLanguageName(selected.lang)
-                                    val idx = subtitleGroups.indexOfFirst { (name, _) -> name.equals(langName, ignoreCase = true) }
-                                    subtitleLangIndex = if (idx >= 0) idx + 1 else 0
-                                    subtitleTrackIndex = subtitleGroups.getOrNull(subtitleLangIndex - 1)?.second
-                                        ?.indexOfFirst { (_, sub) -> isSameSubtitleTrack(selected, sub.id) }?.coerceAtLeast(0) ?: 0
-                                }
-                                showSubtitleMenu = true
-                                // Move focus to container so all D-pad keys go to the menu handler
-                                coroutineScope.launch {
-                                    delay(50)
-                                    try { containerFocusRequester.requestFocus() } catch (_: Exception) {}
-                                }
-                            },
-                            onLeftKey = { if (mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else aspectButtonFocusRequester.requestFocus() },
-                            onRightKey = { subtitleSettingsBtnFocusRequester.requestFocus() },
-                            onDownKey = { trackbarFocusRequester.requestFocus() })
-
-                        Spacer(modifier = Modifier.width(gap))
-
-                        // Subtitle settings (delay, size, vertical position)
-                        PlayerIconButton(icon = Icons.Default.Tune, contentDescription = stringResource(R.string.subtitle_settings_title),
-                            focusRequester = subtitleSettingsBtnFocusRequester, size = smallBtn, iconSize = smallIcon,
-                            onFocusChanged = {},
-                            onClick = {
-                                showSubtitleSettings = !showSubtitleSettings
-                                if (showSubtitleSettings) {
-                                    subtitleSettingsRow = 0
-                                    coroutineScope.launch {
-                                        delay(50)
-                                        runCatching { containerFocusRequester.requestFocus() }
-                                    }
-                                }
-                            },
-                            onLeftKey = { subtitleButtonFocusRequester.requestFocus() },
-                            onRightKey = { sourceButtonFocusRequester.requestFocus() },
-                            onDownKey = { trackbarFocusRequester.requestFocus() })
-
-                        Spacer(modifier = Modifier.width(gap))
-
-                        // Sources
-                        PlayerIconButton(icon = Icons.Default.Folder, contentDescription = stringResource(R.string.sources),
-                            focusRequester = sourceButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
-                            onFocusChanged = {},
-                            onClick = { showSourceMenu = true; showControls = true },
-                            onLeftKey = { subtitleSettingsBtnFocusRequester.requestFocus() },
-                            onRightKey = { if (isTouchDevice) playButtonFocusRequester.requestFocus() else rewindButtonFocusRequester.requestFocus() },
-                            onDownKey = { trackbarFocusRequester.requestFocus() })
-
-                        if (!isTouchDevice) {
-                            Spacer(modifier = Modifier.width(wideGap))
-
-                            // Rewind 10s
-                            PlayerIconButton(icon = Icons.Default.Replay10, contentDescription = stringResource(R.string.player_cd_rewind),
-                                focusRequester = rewindButtonFocusRequester, size = midBtn, iconSize = midIcon,
-                                onFocusChanged = {},
-                                onClick = { queueControlsSeek(-10_000L) },
-                                onLeftKey = { sourceButtonFocusRequester.requestFocus() },
-                                onRightKey = { playButtonFocusRequester.requestFocus() },
-                                onDownKey = { trackbarFocusRequester.requestFocus() })
-
-                            Spacer(modifier = Modifier.width(gap))
-                        } else {
-                            Spacer(modifier = Modifier.width(wideGap))
-                        }
-
-                        // Play/Pause - center, largest
-                        PlayerIconButton(icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (isPlaying) stringResource(R.string.player_cd_pause) else stringResource(R.string.play),
-                            focusRequester = playButtonFocusRequester, size = bigBtn, iconSize = bigIcon,
-                            onFocusChanged = { if (it) focusedButton = 0 },
-                            onClick = {
-                                if (isCasting) {
-                                    if (castManager.isRemotePlaying()) castManager.pause()
-                                    else castManager.play()
-                                } else {
-                                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
-                                }
-                            },
-                            onLeftKey = { if (isTouchDevice) sourceButtonFocusRequester.requestFocus() else rewindButtonFocusRequester.requestFocus() },
-                            onRightKey = { if (isTouchDevice) aspectButtonFocusRequester.requestFocus() else forwardButtonFocusRequester.requestFocus() },
-                            onDownKey = { trackbarFocusRequester.requestFocus() },
-                            onUpKey = { val sv = uiState.activeSkipInterval != null && !uiState.skipIntervalDismissed; if (sv) skipIntroFocusRequester.requestFocus() })
-
-                        if (!isTouchDevice) {
-                            Spacer(modifier = Modifier.width(gap))
-
-                            // Forward 10s - own focus requester
-                            PlayerIconButton(icon = Icons.Default.Forward10, contentDescription = stringResource(R.string.player_cd_forward),
-                                focusRequester = forwardButtonFocusRequester, size = midBtn, iconSize = midIcon,
-                                onFocusChanged = {},
-                                onClick = { queueControlsSeek(10_000L) },
-                                onLeftKey = { playButtonFocusRequester.requestFocus() },
-                                onRightKey = { aspectButtonFocusRequester.requestFocus() },
-                                onDownKey = { trackbarFocusRequester.requestFocus() })
-
-                            Spacer(modifier = Modifier.width(wideGap))
-                        } else {
-                            Spacer(modifier = Modifier.width(wideGap))
-                        }
-
-                        // Aspect Ratio
-                        PlayerIconButton(icon = Icons.Default.AspectRatio, contentDescription = stringResource(R.string.player_cd_aspect, aspectModeLabel),
-                            focusRequester = aspectButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
-                            onFocusChanged = {},
-                            onClick = cycleAspectRatio,
-                            onLeftKey = { if (isTouchDevice) playButtonFocusRequester.requestFocus() else forwardButtonFocusRequester.requestFocus() },
-                            onRightKey = {
-                                when {
-                                    mediaType == MediaType.TV -> nextEpisodeButtonFocusRequester.requestFocus()
-                                    isTouchDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> pipButtonFocusRequester.requestFocus()
-                                    else -> subtitleButtonFocusRequester.requestFocus()
-                                }
-                            },
-                            onDownKey = { trackbarFocusRequester.requestFocus() })
-
-                        if (mediaType == MediaType.TV) {
-                            Spacer(modifier = Modifier.width(gap))
-                            PlayerIconButton(icon = Icons.Default.SkipNext, contentDescription = stringResource(R.string.next_episode),
-                                focusRequester = nextEpisodeButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
-                                onFocusChanged = {},
-                                onClick = {
-                                    val next = nextEpisodeIdentity ?: return@PlayerIconButton
-                                    val selected = uiState.selectedStream
-                                    playNextEpisode(
-                                        next,
-                                        selected?.addonId?.takeIf { it.isNotBlank() },
-                                        selected?.source?.takeIf { it.isNotBlank() },
-                                        selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
-                                    )
-                                },
-                                onLeftKey = { aspectButtonFocusRequester.requestFocus() },
-                                onRightKey = { subtitleButtonFocusRequester.requestFocus() },
-                                onDownKey = { trackbarFocusRequester.requestFocus() })
-                        }
-
-                        // PiP button — touch devices only, just right of other buttons, Android 8+
-                        if (isTouchDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            Spacer(modifier = Modifier.width(gap))
-                            PlayerIconButton(
-                                icon = Icons.Default.PictureInPicture,
-                                contentDescription = stringResource(R.string.player_cd_pip),
-                                focusRequester = pipButtonFocusRequester,
-                                size = smallBtn, iconSize = smallIcon,
-                                onFocusChanged = {},
-                                onClick = { enterPipMode() },
-                                onLeftKey = { if (mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else aspectButtonFocusRequester.requestFocus() },
-                                onRightKey = { subtitleButtonFocusRequester.requestFocus() },
-                                onDownKey = { trackbarFocusRequester.requestFocus() }
-                            )
-                        }
-                    }
-
-
-                    Spacer(modifier = Modifier.height(if (isTouchDevice) 4.dp else 6.dp))
-
-                    // Trackbar at the very bottom with time labels
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = formatTime(if (isControlScrubbing) scrubPreviewPosition else currentPosition),
-                            style = ArflixTypography.label.copy(fontSize = if (isTouchDevice) 12.sp else 13.sp),
-                            color = Color.White.copy(alpha = 0.9f),
-                            maxLines = 1,
-                            modifier = Modifier.width(if (isTouchDevice) 48.dp else 55.dp)
-                        )
-
-                        // Trackbar
-                        var trackbarFocused by remember { mutableStateOf(false) }
-                        val trackbarHeight by animateFloatAsState(if (trackbarFocused) 8f else if (isTouchDevice) 6f else 4f, label = "trackbarHeight")
-                        var trackbarWidthPx by remember { mutableIntStateOf(0) }
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(if (isTouchDevice) 28.dp else 20.dp)
-                                .onSizeChanged { trackbarWidthPx = it.width }
-                                .focusRequester(trackbarFocusRequester)
-                                .onFocusChanged { state ->
-                                    trackbarFocused = state.isFocused
-                                    if (!state.isFocused && isControlScrubbing) commitControlsSeekNow()
-                                }
-                                .focusable()
-                                .pointerInput(duration, isCasting) {
-                                    detectHorizontalDragGestures(
-                                        onDragStart = { offset -> if (duration > 0L && trackbarWidthPx > 0) { scrubPreviewPosition = ((offset.x / trackbarWidthPx).coerceIn(0f, 1f) * duration).toLong(); isControlScrubbing = true } },
-                                        onDragEnd = { if (isControlScrubbing) { if (isCasting) castManager.seekTo(scrubPreviewPosition) else if (!playerReleased) exoPlayer.seekTo(scrubPreviewPosition); isControlScrubbing = false } },
-                                        onDragCancel = { if (isControlScrubbing) { if (isCasting) castManager.seekTo(scrubPreviewPosition) else if (!playerReleased) exoPlayer.seekTo(scrubPreviewPosition); isControlScrubbing = false } },
-                                        onHorizontalDrag = { _, dragAmount -> if (duration > 0L && trackbarWidthPx > 0) { val delta = (dragAmount / trackbarWidthPx * duration).toLong(); scrubPreviewPosition = (scrubPreviewPosition + delta).coerceIn(0L, duration); isControlScrubbing = true } }
-                                    )
-                                }
-                                .pointerInput(duration, isCasting) {
-                                    detectTapGestures { offset -> if (duration > 0L && trackbarWidthPx > 0) { val pos = ((offset.x / trackbarWidthPx).coerceIn(0f, 1f) * duration).toLong(); if (isCasting) castManager.seekTo(pos) else if (!playerReleased) exoPlayer.seekTo(pos) } }
-                                }
-                                .onKeyEvent { event ->
-                                    if (event.type == KeyEventType.KeyDown && trackbarFocused) {
-                                        when (event.key) {
-                                            Key.DirectionLeft -> { queueControlsSeek(-10_000L); true }
-                                            Key.DirectionRight -> { queueControlsSeek(10_000L); true }
-                                            Key.Enter, Key.DirectionCenter -> { commitControlsSeekNow(); true }
-                                            Key.DirectionUp -> { playButtonFocusRequester.requestFocus(); true }
-                                            Key.DirectionDown -> true
-                                            else -> false
-                                        }
-                                    } else false
-                                }
-                                .background(Color.Transparent),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            // Visible thin bar centered in the larger touch target
-                            val barHeight = if (trackbarFocused) 8.dp else if (isTouchDevice) 6.dp else 4.dp
-                            Box(modifier = Modifier.fillMaxWidth().height(barHeight).background(Color.White.copy(alpha = if (trackbarFocused) 0.25f else 0.15f), RoundedCornerShape(3.dp)))
-                            val frac = if (duration > 0) ((if (isControlScrubbing) scrubPreviewPosition else currentPosition).toFloat() / duration.toFloat()).coerceIn(0f, 1f) else progress
-                            Box(modifier = Modifier.fillMaxWidth().height(barHeight).align(Alignment.Center), contentAlignment = Alignment.CenterStart) {
-                            Box(modifier = Modifier.fillMaxWidth(frac).fillMaxHeight().background(
-                                if (trackbarFocused) playerAccent else playerAccent.copy(alpha = 0.8f), RoundedCornerShape(3.dp)
-                            ))
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Text(
-                            text = formatTime(duration),
-                            style = ArflixTypography.label.copy(fontSize = if (isTouchDevice) 12.sp else 13.sp),
-                            color = Color.White.copy(alpha = 0.5f),
-                            maxLines = 1,
-                            modifier = Modifier.width(if (isTouchDevice) 48.dp else 55.dp)
-                        )
-                    }
-                }
-            }
-        }
-
-        // In-player subtitle settings panel (Delay, Size, Vertical Position)
-        AnimatedVisibility(
-            visible = showSubtitleSettings && hasPlaybackStarted,
-            enter = fadeIn(animTween(150)),
-            exit = fadeOut(animTween(150)),
-            modifier = Modifier.align(Alignment.Center).zIndex(8f)
-        ) {
-            PlayerSubtitleSettingsPanel(
-                selectedRow = subtitleSettingsRow,
-                syncOffsetMs = subtitleSyncOffsetMs,
-                sizePct = subtitleSizePct,
-                verticalPct = subtitleVerticalPct,
-                onRowSelect = { subtitleSettingsRow = it },
-                onOffsetDecrease = { subtitleSyncOffsetMs = (subtitleSyncOffsetMs - 100L).coerceAtLeast(-10000L) },
-                onOffsetIncrease = { subtitleSyncOffsetMs = (subtitleSyncOffsetMs + 100L).coerceAtMost(10000L) },
-                onSizeDecrease = { subtitleSizePct = (subtitleSizePct - 10).coerceAtLeast(50) },
-                onSizeIncrease = { subtitleSizePct = (subtitleSizePct + 10).coerceAtMost(300) },
-                onVerticalDecrease = { subtitleVerticalPct = (subtitleVerticalPct - 1).coerceAtLeast(0) },
-                onVerticalIncrease = { subtitleVerticalPct = (subtitleVerticalPct + 1).coerceAtMost(50) }
-            )
-        }
-
-        // Subtitle/Audio menu
-        AnimatedVisibility(
-            visible = showSubtitleMenu,
-            enter = fadeIn(androidx.compose.animation.core.tween(150)),
-            exit = fadeOut(androidx.compose.animation.core.tween(200))
-        ) {
-            SubtitleMenu(
-                subtitles = uiState.subtitles,
-                selectedSubtitle = uiState.selectedSubtitle,
-                isAiTranslating = uiState.isAiTranslating,
-                isAiAvailable = uiState.isAiAvailable,
-                aiTargetLanguageName = uiState.aiTargetLanguageName,
-                matchLanguageName = uiState.matchLanguageName,
+        // ARVIO Mobile Player Overlay (Phone & Tablet Touch Devices)
+        if (isTouchDevice && !isInPipMode) {
+            ArvioMobilePlayer(
+                uiState = uiState,
+                isPlaying = isPlaying,
+                isBuffering = isBuffering,
+                hasPlaybackStarted = hasPlaybackStarted,
+                currentPositionMs = currentPosition,
+                durationMs = duration,
+                bufferedPositionMs = exoPlayer.bufferedPosition,
                 audioTracks = audioTracks,
                 selectedAudioIndex = selectedAudioIndex,
-                activeTab = subtitleMenuTab,
-                focusedIndex = subtitleMenuIndex,
-                subtitleGroups = subtitleGroups,
-                streamSource = uiState.selectedStream?.source ?: "",
-                subtitleLangIndex = subtitleLangIndex,
-                subtitleTrackIndex = subtitleTrackIndex,
-                subtitlePanelFocus = subtitlePanelFocus,
-                onTabChanged = { tab ->
-                    subtitleMenuTab = tab
-                    subtitleMenuIndex = 0
+                currentPlaybackSpeed = currentPlaybackSpeed,
+                aspectModeLabel = aspectModeLabel,
+                isCasting = isCasting,
+                showCastButton = castAvailable && !streamNeedsHeaders,
+                showPipButton = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O,
+                seekPreviewFrame = displayPreviewFrame,
+                onScrubPreviewPosition = { position ->
+                    if (position != null) dragSeek(position) else finishSeek(false)
                 },
-                onSelectSubtitle = { index ->
-                    if (index == 0) {
-                        viewModel.disableSubtitles()
+                onTogglePlayPause = {
+                    if (isCasting) {
+                        if (castManager.isRemotePlaying()) castManager.pause() else castManager.play()
                     } else {
-                        uiState.subtitles.getOrNull(index - 1)?.let { viewModel.selectSubtitle(it) }
-                    }
-                    showSubtitleMenu = false
-                    showControls = true
-                    coroutineScope.launch {
-                        delay(150)
-                        try { subtitleButtonFocusRequester.requestFocus() } catch (_: Exception) {}
+                        playerEngine.togglePlayPause()
+                        isPlaying = exoPlayer.isPlaying
+                        isBuffering = exoPlayer.playbackState == Player.STATE_BUFFERING && exoPlayer.playWhenReady
                     }
                 },
-                onSelectAudio = { track ->
+                onSeekTo = { targetMs ->
+                    if (seekInteraction.browsing) {
+                        dragSeek(targetMs)
+                        finishSeek(true)
+                    } else if (isCasting) {
+                        castManager.seekTo(targetMs)
+                    } else if (!playerReleased) {
+                        playerEngine.seekTo(targetMs)
+                    }
+                },
+                onRewind10 = { skipWithoutPreview(-10_000L) },
+                onForward10 = { skipWithoutPreview(10_000L) },
+                onCycleAspectRatio = cycleAspectRatio,
+                onSelectAspectRatio = { mode ->
+                    currentAspectRatioMode = AspectRatioMode.fromLabel(mode)
+                },
+                onSelectEpisode = { ep ->
+                    val selected = uiState.selectedStream
+                    playNextEpisode(
+                        ep.identity,
+                        selected?.addonId?.takeIf { it.isNotBlank() },
+                        selected?.source?.takeIf { it.isNotBlank() },
+                        selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+                    )
+                },
+                onSelectSource = { stream ->
+                    selectSourceManually(stream)
+                },
+                onSelectAudioTrack = { track ->
                     userPickedAudioForStream = true
                     applyAudioTrackSelection(exoPlayer, track, audioTracks)?.let {
                         selectedAudioIndex = it
                     }
-                    showSubtitleMenu = false
-                    showControls = true
-                    coroutineScope.launch {
-                        delay(150)
-                        try { subtitleButtonFocusRequester.requestFocus() } catch (_: Exception) {}
+                },
+                onSelectSubtitleTrack = { sub ->
+                    if (sub == null) {
+                        viewModel.disableSubtitles()
+                    } else {
+                        viewModel.selectSubtitle(sub)
                     }
                 },
-                isLiveAudioTranslating = uiState.isLiveAudioTranslating,
-                isFindingBestMatch = uiState.isFindingBestMatch,
-                onToggleAi = { viewModel.activateAiTranslation() },
-                onToggleLiveAudio = { viewModel.toggleLiveAudioTranslation() },
-                onFindBestMatch = { viewModel.runFindBestMatch() },
-                onClose = {
-                    showSubtitleMenu = false
-                    showControls = true
-                    coroutineScope.launch {
-                        delay(150)
-                        try { subtitleButtonFocusRequester.requestFocus() } catch (_: Exception) {}
+                onSelectPlaybackSpeed = { speed ->
+                    currentPlaybackSpeed = speed
+                    exoPlayer.setPlaybackSpeed(speed)
+                    playerEngine.setPlaybackSpeed(speed)
+                },
+                onSkipIntro = {
+                    val end = uiState.activeSkipInterval?.endMs
+                    if (end != null) {
+                        playerEngine.seekTo((end + 500L).coerceAtLeast(0L))
+                        viewModel.dismissSkipInterval()
+                    } else {
+                        playerEngine.seekTo((currentPosition + 85_000L).coerceAtMost(duration))
                     }
-                }
+                },
+                onSkipOutro = {
+                    val end = uiState.activeSkipInterval?.endMs
+                    if (end != null) {
+                        playerEngine.seekTo((end + 500L).coerceAtLeast(0L))
+                        viewModel.dismissSkipInterval()
+                    } else {
+                        val next = nextEpisodeIdentity ?: return@ArvioMobilePlayer
+                        val selected = uiState.selectedStream
+                        playNextEpisode(
+                            next,
+                            selected?.addonId?.takeIf { it.isNotBlank() },
+                            selected?.source?.takeIf { it.isNotBlank() },
+                            selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+                        )
+                    }
+                },
+                canPlayNextEpisode = nextEpisodeIdentity != null &&
+                    nextEpisodeAirDateResolution == NextEpisodeAirDateResolution.Allowed,
+                onDismissNextEpisode = {
+                    nextEpisodePromptGate.dismiss(nextEpisodeAirDateSource)
+                },
+                onPlayNextEpisode = {
+                    if (nextEpisodeAirDateResolution != NextEpisodeAirDateResolution.Allowed) return@ArvioMobilePlayer
+                    val next = nextEpisodeIdentity ?: return@ArvioMobilePlayer
+                    val selected = uiState.selectedStream
+                    playNextEpisode(
+                        next,
+                        selected?.addonId?.takeIf { it.isNotBlank() },
+                        selected?.source?.takeIf { it.isNotBlank() },
+                        selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+                    )
+                },
+                onEnterPip = enterPipMode,
+                onOpenCastChooser = {
+                    if (isCasting) {
+                        castManager.disconnect()
+                    } else {
+                        val dialog = MediaRouteChooserDialog(context)
+                        dialog.routeSelector = castManager.getRouteSelector()
+                        dialog.show()
+                    }
+                },
+                onRetryPlayback = {
+                    viewModel.retryPlayback()
+                },
+                onReloadStreams = {
+                    viewModel.reloadStreams()
+                },
+                onUpdateAutoplay = { enabled ->
+                    viewModel.setAutoPlayNext(enabled)
+                },
+                onUpdateAutoSkipIntro = { enabled ->
+                    viewModel.setAutoSkipIntro(enabled)
+                },
+                onUpdateAutoSkipOutro = { enabled ->
+                    viewModel.setAutoSkipOutro(enabled)
+                },
+                onUpdateAudioDelay = { delayMs ->
+                    aiRenderersFactory.audioDelayUs.set(delayMs * 1000L)
+                    playerEngine.setAudioDelayMs(delayMs)
+                    viewModel.setAudioDelayMs(delayMs)
+                },
+                onUpdateVolumeNormalization = { enabled ->
+                    viewModel.setAudioNormalization(enabled)
+                },
+                onVolumeBoostChange = { db ->
+                    viewModel.setVolumeBoostDb(db)
+                },
+                onToggleLiveAudioTranslation = {
+                    viewModel.toggleLiveAudioTranslation()
+                },
+                onFindBestMatch = {
+                    viewModel.runFindBestMatch()
+                },
+                onActivateAiTranslation = {
+                    viewModel.activateAiTranslation()
+                },
+                subtitleDelayMs = subtitleSyncOffsetMs,
+                onUpdateSubtitleDelay = { delayMs ->
+                    subtitleSyncOffsetMs = delayMs
+                },
+                subtitleSizePct = subtitleSizePct,
+                onUpdateSubtitleSize = { sizePct ->
+                    val clamped = sizePct.coerceIn(50, 250)
+                    subtitleSizePct = clamped
+                    viewModel.setSubtitleSizePct(clamped)
+                },
+                subtitleVerticalPct = subtitleVerticalPct,
+                hasActiveSubtitleCues = hasActiveSubtitleCues,
+                onUpdateSubtitleVerticalPosition = { vertPct ->
+                    subtitleVerticalPct = vertPct
+                    viewModel.setSubtitleVerticalPct(vertPct)
+                },
+                onUpdateSubtitlePreload = { enabled ->
+                    viewModel.setSubtitlePreloadEnabled(enabled)
+                },
+                onUpdateFilterSubtitlesByLanguage = { enabled ->
+                    viewModel.setFilterSubtitlesByLanguage(enabled)
+                },
+                onUpdateSubtitleRemoveHearingImpaired = { enabled ->
+                    viewModel.setSubtitleRemoveHearingImpaired(enabled)
+                },
+                onUpdateSubtitleColor = { colorHex ->
+                    viewModel.setSubtitleColorPref(when (colorHex.lowercase()) {
+                        "#ffe066" -> "Yellow"
+                        "#66d9ff" -> "Cyan"
+                        "#ff6666" -> "Red"
+                        else -> "White"
+                    })
+                },
+                onUpdateSubtitlePosition = { pos ->
+                    viewModel.setSubtitleOffsetPref(if (pos == "top") "High" else "Bottom")
+                },
+                onUpdateSubtitleStyle = { style ->
+                    viewModel.setSubtitleStylePref(style)
+                },
+                onUpdateSubtitleFont = { font ->
+                    viewModel.setSubtitleFontPref(font)
+                },
+                onUpdateSubtitleStylized = { stylized ->
+                    viewModel.setSubtitleStylizedPref(stylized)
+                },
+                onBack = onExitPlayer
             )
         }
 
-        StreamSelector(
-            isVisible = showSourceMenu,
-            streams = uiState.streams,
-            selectedStream = uiState.selectedStream,
-            isLoading = uiState.isLoadingStreams,
-            hasStreamingAddons = !uiState.isSetupError,
-            addonOrderedIds = uiState.addonOrderedIds,
-            title = uiState.title,
-            subtitle = if (seasonNumber != null && episodeNumber != null) {
-                "S$seasonNumber E$episodeNumber"
-            } else {
-                ""
-            },
-            onFocusedStream = { stream ->
-                viewModel.prewarmStreamsAround(stream, uiState.streams)
-            },
-            onSelect = { stream: StreamSource ->
-                userSelectedSourceManually = true
-                playbackIssueReported = false
-                startupRecoverAttempted = false
-                startupHardFailureReported = false
-                startupSameSourceRetryCount = 0
-                startupSameSourceRefreshAttempted = false
-                startupUrlLock = null
-                rebufferRecoverAttempted = false
-                longRebufferCount = 0
-                viewModel.selectStream(stream, exoPlayer.currentPosition)
-                showSourceMenu = false
-                showControls = true
-                coroutineScope.launch {
-                    delay(150)
-                    runCatching { sourceButtonFocusRequester.requestFocus() }
-                }
-            },
-            onClose = {
-                showSourceMenu = false
-                showControls = true
-                coroutineScope.launch {
-                    delay(150)
-                    runCatching { sourceButtonFocusRequester.requestFocus() }
-                }
-            }
-        )
+        if (!isInPipMode) {
+            // Post-episode "Up Next" prompt (issue #86). Shown when a TV episode ends and
+            // autoPlayNext is enabled. 10-second countdown auto-advances, or the user can
+            // hit Enter to continue immediately or Back/Escape/Close to stop and return to
+            // the show overview. Placed after StreamSelector so it renders above the player
+            // but below any error/source overlays that might appear simultaneously.
+            NextEpisodeOverlay(
+                isVisible = showNextEpisodePrompt,
+                showTitle = uiState.title,
+                // We only know the current episode's title at this point; fetching the next
+                // episode's metadata would require an extra TMDB round-trip during playback.
+                // Fall back to a generic "Episode N" label — the show title, S/E number, and
+                // backdrop image still give users enough context to decide Continue/Cancel.
+                episodeTitle = stringResource(R.string.episode, pendingNextIdentity?.displayEpisode ?: 0),
+                seasonNumber = pendingNextIdentity?.displaySeason ?: 0,
+                episodeNumber = pendingNextIdentity?.displayEpisode ?: 0,
+                episodeImage = uiState.backdropUrl,
+                countdownSeconds = 10,
+                focusedButtonOverride = nextEpisodePromptButton,
+                onFocusedButtonChange = { nextEpisodePromptButton = it },
+                onPlayNext = playPendingNextEpisode,
+                onCancel = cancelNextEpisodePrompt
+            )
 
-        // Post-episode "Up Next" prompt (issue #86). Shown when a TV episode ends and
-        // autoPlayNext is enabled. 10-second countdown auto-advances, or the user can
-        // hit Enter to continue immediately or Back/Escape/Close to stop and return to
-        // the show overview. Placed after StreamSelector so it renders above the player
-        // but below any error/source overlays that might appear simultaneously.
-        NextEpisodeOverlay(
-            isVisible = showNextEpisodePrompt,
-            showTitle = uiState.title,
-            // We only know the current episode's title at this point; fetching the next
-            // episode's metadata would require an extra TMDB round-trip during playback.
-            // Fall back to a generic "Episode N" label — the show title, S/E number, and
-            // backdrop image still give users enough context to decide Continue/Cancel.
-            episodeTitle = "Episode ${pendingNextIdentity?.displayEpisode ?: 0}",
-            seasonNumber = pendingNextIdentity?.displaySeason ?: 0,
-            episodeNumber = pendingNextIdentity?.displayEpisode ?: 0,
-            episodeImage = uiState.backdropUrl,
-            countdownSeconds = 10,
-            focusedButtonOverride = nextEpisodePromptButton,
-            onFocusedButtonChange = { nextEpisodePromptButton = it },
-            onPlayNext = playPendingNextEpisode,
-            onCancel = cancelNextEpisodePrompt
-        )
+        }
 
-        // Volume indicator
-        AnimatedVisibility(
-            visible = showVolumeIndicator,
-            enter = fadeIn(androidx.compose.animation.core.tween(150)),
-            exit = fadeOut(androidx.compose.animation.core.tween(200)),
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 48.dp)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
-                    .padding(16.dp)
+        if (!isTouchDevice && !isInPipMode) {
+            // Netflix-style Controls Overlay
+            AnimatedVisibility(
+                visible = hasPlaybackStarted && showControls && !showSubtitleMenu && !showSourceMenu && !isInPipMode,
+                enter = fadeIn(androidx.compose.animation.core.tween(150)),
+                exit = fadeOut(androidx.compose.animation.core.tween(200))
             ) {
-                Icon(
-                    imageVector = when {
-                        isMuted || currentVolume == 0 -> Icons.Default.VolumeMute
-                        currentVolume < maxVolume / 2 -> Icons.Default.VolumeDown
-                        else -> Icons.Default.VolumeUp
-                    },
-                    contentDescription = stringResource(R.string.player_cd_volume),
-                    tint = Color.White,
-                    modifier = Modifier.size(32.dp)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Box(
-                    modifier = Modifier
-                        .width(8.dp)
-                        .height(100.dp)
-                        .background(Color.White.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
-                ) {
-                    Box(
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // Top info
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .fillMaxWidth()
+                            .padding(
+                                start = if (isTouchDevice) 20.dp else 28.dp,
+                                top = if (isTouchDevice) 18.dp else 30.dp,
+                                end = if (isTouchDevice) 24.dp else 48.dp
+                            )
+                            .zIndex(4f),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        val isPaused = hasPlaybackStarted && !isPlaying && !isBuffering
+
+                        PlayerMetadataChrome(
+                            uiState = uiState,
+                            mediaType = args.mediaType,
+                            seasonNumber = args.seasonNumber,
+                            episodeNumber = args.episodeNumber,
+                            isPaused = isPaused,
+                            accentColor = playerAccent,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+
+                        // Right side - Cast button (mobile) + Ends At + Clock
+                        Column(horizontalAlignment = Alignment.End) {
+                            val currentTime = remember { mutableStateOf("") }
+                            val endsAtTime = remember { mutableStateOf("") }
+                            LaunchedEffect(duration, currentPosition, clockFormat) {
+                                while (true) {
+                                    val now = System.currentTimeMillis()
+                                    currentTime.value = formatPlayerClockTime(now, clockFormat)
+                                    if (duration > 0 && currentPosition >= 0) {
+                                        val remainingMs = (duration - currentPosition).coerceAtLeast(0L)
+                                        endsAtTime.value = formatPlayerClockTime(now + remainingMs, clockFormat)
+                                    } else { endsAtTime.value = "" }
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                            }
+
+                            // Cast button — mobile/tablet only; hidden when stream requires custom headers
+                            if (isTouchDevice && castAvailable && !streamNeedsHeaders) {
+                                val castDeviceName = (castState as? CastManager.CastState.Casting)?.deviceName
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(bottom = if (endsAtTime.value.isNotBlank() || !isTouchDevice) 4.dp else 0.dp)
+                                ) {
+                                    if (castDeviceName != null) {
+                                        androidx.tv.material3.Text(
+                                            text = castDeviceName,
+                                            style = ArflixTypography.caption.copy(fontSize = 11.sp),
+                                            color = Color.White.copy(alpha = 0.85f),
+                                            maxLines = 1
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(36.dp)
+                                            .clip(CircleShape)
+                                            .background(
+                                                if (isCasting) Color.White.copy(alpha = 0.2f)
+                                                else Color.Transparent
+                                            )
+                                            .clickable {
+                                                if (isCasting) {
+                                                    castManager.disconnect()
+                                                } else {
+                                                    val dialog = MediaRouteChooserDialog(context)
+                                                    dialog.routeSelector = castManager.getRouteSelector()
+                                                    dialog.show()
+                                                }
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isCasting) Icons.Default.CastConnected else Icons.Default.Cast,
+                                            contentDescription = if (isCasting) stringResource(R.string.player_cd_stop_casting) else stringResource(R.string.player_cd_cast_to_tv),
+                                            tint = if (isCasting) playerAccent else Color.White.copy(alpha = 0.85f),
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (!isTouchDevice) {
+                                Text(
+                                    currentTime.value,
+                                    style = ArflixTypography.sectionTitle.copy(
+                                        fontSize = 24.sp,
+                                        fontWeight = FontWeight.Medium
+                                    ),
+                                    color = TextPrimary.copy(alpha = 0.92f),
+                                    maxLines = 1
+                                )
+                            }
+                            if (endsAtTime.value.isNotBlank()) {
+                                Text(
+                                    "${stringResource(R.string.ends_at)} ${endsAtTime.value}",
+                                    style = ArflixTypography.caption.copy(fontSize = 12.sp),
+                                    color = TextPrimary.copy(alpha = 0.72f),
+                                    maxLines = 1,
+                                    modifier = Modifier.padding(top = 2.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Bottom controls - positioned at very bottom.
+                    // Gradient made stronger on touch devices so the icon row stays readable
+                    // against bright content. Issue #97.
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .fillMaxSize((currentVolume.toFloat() / maxVolume).coerceIn(0f, 1f))
-                            .background(playerAccent, RoundedCornerShape(4.dp))
                             .align(Alignment.BottomCenter)
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = if (isMuted) stringResource(R.string.player_muted) else "${currentVolume * 100 / maxVolume}%",
-                    style = ArflixTypography.caption,
-                    color = Color.White
-                )
-            }
-        }
-
-        // Aspect ratio indicator - brief center popup
-        AnimatedVisibility(
-            visible = showAspectIndicator,
-            enter = fadeIn(androidx.compose.animation.core.tween(150)),
-            exit = fadeOut(androidx.compose.animation.core.tween(200)),
-            modifier = Modifier.align(Alignment.Center)
-        ) {
-            Box(
-                modifier = Modifier
-                    .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(10.dp))
-                    .padding(horizontal = 24.dp, vertical = 14.dp)
-            ) {
-                Text(
-                    text = aspectModeLabel,
-                    style = ArflixTypography.body.copy(fontSize = 18.sp, fontWeight = FontWeight.Medium),
-                    color = Color.White
-                )
-            }
-        }
-
-        // Skip overlay — floats near the bottom while the user spams ±10s.
-        // Now sits ~48dp from the bottom (was 120dp, which wasted vertical
-        // space and felt too detached). Time labels flanking the progress
-        // bar show exactly how far along the user is.
-        AnimatedVisibility(
-            visible = showSkipOverlay,
-            enter = fadeIn(androidx.compose.animation.core.tween(150)),
-            exit = fadeOut(androidx.compose.animation.core.tween(200)),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .fillMaxWidth(0.72f)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 20.dp, vertical = 14.dp)
-            ) {
-                Text(
-                    text = if (skipAmount >= 0) "+${skipAmount}s" else "${skipAmount}s",
-                    style = ArflixTypography.sectionTitle.copy(
-                        fontSize = 26.sp,
-                        fontWeight = FontWeight.Bold,
-                        shadow = Shadow(
-                            color = Color.Black,
-                            offset = Offset(2f, 2f),
-                            blurRadius = 8f
-                        )
-                    ),
-                    color = Color.White
-                )
-
-                if (duration > 0L) {
-                    val previewPosition = skipPreviewPosition
-                        .takeIf { it > 0L }
-                        ?: currentPosition
-                    val previewProgress = (previewPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
-
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.fillMaxWidth(),
+                            .background(
+                                Brush.verticalGradient(
+                                    colorStops = if (isTouchDevice) arrayOf(
+                                        0.0f to Color.Transparent,
+                                        0.2f to Color.Black.copy(alpha = 0.5f),
+                                        1.0f to Color.Black.copy(alpha = 0.85f)
+                                    ) else arrayOf(
+                                        0.0f to Color.Transparent,
+                                        0.3f to Color.Black.copy(alpha = 0.2f),
+                                        1.0f to Color.Black.copy(alpha = 0.7f)
+                                    )
+                                )
+                            )
+                            .padding(horizontal = if (isTouchDevice) 24.dp else 48.dp)
+                            .padding(top = if (isTouchDevice) 16.dp else 24.dp, bottom = if (isTouchDevice) 32.dp else 24.dp)
                     ) {
-                        Text(
-                            text = formatTime(previewPosition),
-                            style = ArflixTypography.caption.copy(
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                            ),
-                            color = Color.White,
-                        )
+                        // Icon buttons row. On tablet we center the row and use slightly
+                        // larger buttons than TV to match the shorter viewing distance and
+                        // the Material minimum touch-target of 48dp. Phone keeps the compact
+                        // left-aligned layout to fit vertical orientation. Issue #97.
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (isTablet) Arrangement.Center else Arrangement.Start,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Three-way sizing: phone (compact) < TV (medium) < tablet (largest).
+                            // The old logic made touch devices SMALLER than TV which was
+                            // backwards for tablet finger targets.
+                            val smallBtn = when {
+                                isTablet -> 36.dp
+                                isPhone -> 24.dp
+                                else -> 28.dp
+                            }
+                            val smallIcon = when {
+                                isTablet -> 22.dp
+                                isPhone -> 17.dp
+                                else -> 19.dp
+                            }
+                            val midBtn = when {
+                                isTablet -> 40.dp
+                                isPhone -> 28.dp
+                                else -> 30.dp
+                            }
+                            val midIcon = when {
+                                isTablet -> 24.dp
+                                isPhone -> 20.dp
+                                else -> 22.dp
+                            }
+                            val bigBtn = when {
+                                isTablet -> 48.dp
+                                isPhone -> 34.dp
+                                else -> 38.dp
+                            }
+                            val bigIcon = when {
+                                isTablet -> 30.dp
+                                isPhone -> 26.dp
+                                else -> 28.dp
+                            }
+                            val gap = when {
+                                isTablet -> 16.dp
+                                isPhone -> 10.dp
+                                else -> 14.dp
+                            }
+                            val wideGap = when {
+                                isTablet -> 20.dp
+                                isPhone -> 14.dp
+                                else -> 18.dp
+                            }
+
+                            // Subtitles
+                            PlayerIconButton(icon = Icons.Default.ClosedCaption, contentDescription = "${stringResource(R.string.subtitles)} / ${stringResource(R.string.audio)}",
+                                focusRequester = subtitleButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
+                                onFocusChanged = { if (it) focusedButton = 1 },
+                                onClick = {
+                                    subtitleMenuIndex = 0
+                                    subtitlePanelFocus = 0
+                                    val selected = latestUiState.selectedSubtitle
+                                    if (selected == null) {
+                                        subtitleLangIndex = 0
+                                        subtitleTrackIndex = 0
+                                    } else if (latestUiState.isAiAvailable && latestUiState.aiTargetLanguageName.isNotBlank() &&
+                                        (latestUiState.isAiTranslating || latestUiState.selectedSubtitle?.let { sub ->
+                                            subtitleGroups.none { (_, items) -> items.any { (_, s) -> s.id == sub.id } }
+                                        } == true)) {
+                                        val aiLangName = latestUiState.aiTargetLanguageName
+                                        val idx = subtitleGroups.indexOfFirst { (name, _) -> name.equals(aiLangName, ignoreCase = true) }
+                                        subtitleLangIndex = if (idx >= 0) idx + 1 else 0
+                                        subtitleTrackIndex = 0
+                                    } else {
+                                        val langName = getFullLanguageName(selected.lang)
+                                        val idx = subtitleGroups.indexOfFirst { (name, _) -> name.equals(langName, ignoreCase = true) }
+                                        subtitleLangIndex = if (idx >= 0) idx + 1 else 0
+                                        subtitleTrackIndex = subtitleGroups.getOrNull(subtitleLangIndex - 1)?.second
+                                            ?.indexOfFirst { (_, sub) -> isSameSubtitleTrack(selected, sub.id) }?.coerceAtLeast(0) ?: 0
+                                    }
+                                    showSubtitleMenu = true
+                                    // Move focus to container so all D-pad keys go to the menu handler
+                                    coroutineScope.launch {
+                                        delay(50)
+                                        try { containerFocusRequester.requestFocus() } catch (_: Exception) {}
+                                    }
+                                },
+                                onLeftKey = { if (args.mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else aspectButtonFocusRequester.requestFocus() },
+                                onRightKey = { subtitleSettingsBtnFocusRequester.requestFocus() },
+                                onDownKey = { trackbarFocusRequester.requestFocus() })
+
+                            Spacer(modifier = Modifier.width(gap))
+
+                            // Subtitle settings (delay, size, vertical position)
+                            PlayerIconButton(icon = Icons.Default.Tune, contentDescription = stringResource(R.string.subtitle_settings_title),
+                                focusRequester = subtitleSettingsBtnFocusRequester, size = smallBtn, iconSize = smallIcon,
+                                onFocusChanged = {},
+                                onClick = {
+                                    showSubtitleSettings = !showSubtitleSettings
+                                    if (showSubtitleSettings) {
+                                        subtitleSettingsRow = 0
+                                        coroutineScope.launch {
+                                            delay(50)
+                                            runCatching { containerFocusRequester.requestFocus() }
+                                        }
+                                    }
+                                },
+                                onLeftKey = { subtitleButtonFocusRequester.requestFocus() },
+                                onRightKey = { sourceButtonFocusRequester.requestFocus() },
+                                onDownKey = { trackbarFocusRequester.requestFocus() })
+
+                            Spacer(modifier = Modifier.width(gap))
+
+                            // Sources
+                            PlayerIconButton(icon = Icons.Default.Folder, contentDescription = stringResource(R.string.sources),
+                                focusRequester = sourceButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
+                                onFocusChanged = {},
+                                onClick = { showSourceMenu = true; showControls = true },
+                                onLeftKey = { subtitleSettingsBtnFocusRequester.requestFocus() },
+                                onRightKey = { if (isTouchDevice) playButtonFocusRequester.requestFocus() else rewindButtonFocusRequester.requestFocus() },
+                                onDownKey = { trackbarFocusRequester.requestFocus() })
+
+                            if (!isTouchDevice) {
+                                Spacer(modifier = Modifier.width(wideGap))
+
+                                // Rewind 10s
+                                PlayerIconButton(icon = Icons.Default.Replay10, contentDescription = stringResource(R.string.player_cd_rewind),
+                                    focusRequester = rewindButtonFocusRequester, size = midBtn, iconSize = midIcon,
+                                    onFocusChanged = {},
+                                    onClick = { skipWithoutPreview(-10_000L) },
+                                    onLeftKey = { sourceButtonFocusRequester.requestFocus() },
+                                    onRightKey = { playButtonFocusRequester.requestFocus() },
+                                    onDownKey = { trackbarFocusRequester.requestFocus() })
+
+                                Spacer(modifier = Modifier.width(gap))
+                            } else {
+                                Spacer(modifier = Modifier.width(wideGap))
+                            }
+
+                            // Play/Pause - center, largest
+                            PlayerIconButton(icon = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                contentDescription = if (isPlaying) stringResource(R.string.player_cd_pause) else stringResource(R.string.play),
+                                focusRequester = playButtonFocusRequester, size = bigBtn, iconSize = bigIcon,
+                                onFocusChanged = { if (it) focusedButton = 0 },
+                                onClick = {
+                                    if (isCasting) {
+                                        if (castManager.isRemotePlaying()) castManager.pause()
+                                        else castManager.play()
+                                    } else {
+                                        if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                                    }
+                                },
+                                onLeftKey = { if (isTouchDevice) sourceButtonFocusRequester.requestFocus() else rewindButtonFocusRequester.requestFocus() },
+                                onRightKey = { if (isTouchDevice) aspectButtonFocusRequester.requestFocus() else forwardButtonFocusRequester.requestFocus() },
+                                onDownKey = { trackbarFocusRequester.requestFocus() },
+                                onUpKey = { val sv = uiState.activeSkipInterval != null && !uiState.skipIntervalDismissed; if (sv) skipIntroFocusRequester.requestFocus() })
+
+                            if (!isTouchDevice) {
+                                Spacer(modifier = Modifier.width(gap))
+
+                                // Forward 10s - own focus requester
+                                PlayerIconButton(icon = Icons.Default.Forward10, contentDescription = stringResource(R.string.player_cd_forward),
+                                    focusRequester = forwardButtonFocusRequester, size = midBtn, iconSize = midIcon,
+                                    onFocusChanged = {},
+                                    onClick = { skipWithoutPreview(10_000L) },
+                                    onLeftKey = { playButtonFocusRequester.requestFocus() },
+                                    onRightKey = { aspectButtonFocusRequester.requestFocus() },
+                                    onDownKey = { trackbarFocusRequester.requestFocus() })
+
+                                Spacer(modifier = Modifier.width(wideGap))
+                            } else {
+                                Spacer(modifier = Modifier.width(wideGap))
+                            }
+
+                            // Aspect Ratio
+                            PlayerIconButton(icon = Icons.Default.AspectRatio, contentDescription = stringResource(R.string.player_cd_aspect, aspectModeLabel),
+                                focusRequester = aspectButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
+                                onFocusChanged = {},
+                                onClick = cycleAspectRatio,
+                                onLeftKey = { if (isTouchDevice) playButtonFocusRequester.requestFocus() else forwardButtonFocusRequester.requestFocus() },
+                                onRightKey = {
+                                    when {
+                                        args.mediaType == MediaType.TV -> nextEpisodeButtonFocusRequester.requestFocus()
+                                        isTouchDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> pipButtonFocusRequester.requestFocus()
+                                        else -> subtitleButtonFocusRequester.requestFocus()
+                                    }
+                                },
+                                onDownKey = { trackbarFocusRequester.requestFocus() })
+
+                            if (args.mediaType == MediaType.TV) {
+                                Spacer(modifier = Modifier.width(gap))
+                                PlayerIconButton(icon = Icons.Default.SkipNext, contentDescription = stringResource(R.string.next_episode),
+                                    focusRequester = nextEpisodeButtonFocusRequester, size = smallBtn, iconSize = smallIcon,
+                                    onFocusChanged = {},
+                                    onClick = {
+                                        val next = nextEpisodeIdentity ?: return@PlayerIconButton
+                                        val selected = uiState.selectedStream
+                                        playNextEpisode(
+                                            next,
+                                            selected?.addonId?.takeIf { it.isNotBlank() },
+                                            selected?.source?.takeIf { it.isNotBlank() },
+                                            selected?.behaviorHints?.bingeGroup?.takeIf { it.isNotBlank() }
+                                        )
+                                    },
+                                    onLeftKey = { aspectButtonFocusRequester.requestFocus() },
+                                    onRightKey = { subtitleButtonFocusRequester.requestFocus() },
+                                    onDownKey = { trackbarFocusRequester.requestFocus() })
+                            }
+
+                            // PiP button — touch devices only, just right of other buttons, Android 8+
+                            if (isTouchDevice && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                Spacer(modifier = Modifier.width(gap))
+                                PlayerIconButton(
+                                    icon = Icons.Default.PictureInPicture,
+                                    contentDescription = stringResource(R.string.player_cd_pip),
+                                    focusRequester = pipButtonFocusRequester,
+                                    size = smallBtn, iconSize = smallIcon,
+                                    onFocusChanged = {},
+                                    onClick = { enterPipMode() },
+                                    onLeftKey = { if (args.mediaType == MediaType.TV) nextEpisodeButtonFocusRequester.requestFocus() else aspectButtonFocusRequester.requestFocus() },
+                                    onRightKey = { subtitleButtonFocusRequester.requestFocus() },
+                                    onDownKey = { trackbarFocusRequester.requestFocus() }
+                                )
+                            }
+                        }
+
+
+                        Spacer(modifier = Modifier.height(if (isTouchDevice) 4.dp else 6.dp))
+
+                        // Preview overlays the controls; entering/exiting seek must not move them.
+                        if (seekThumbnailsEnabled && isControlScrubbing && duration > 0L && !isCasting && !args.isLiveStream) {
+                            val previewWidth = if (isTouchDevice) 168.dp else 224.dp
+                            val previewHeight = previewWidth * 9f / 16f
+                            BoxWithConstraints(
+                                modifier = Modifier.fillMaxWidth().seekPreviewOverlay().height(previewHeight + 2.dp)
+                                    .padding(start = if (isTouchDevice) 48.dp else 55.dp,
+                                        end = if (isTouchDevice) 56.dp else 63.dp),
+                            ) {
+                                val progress = (controlsPreviewPosition.toFloat() / duration).coerceIn(0f, 1f)
+                                val offset = (maxWidth * progress - previewWidth / 2f)
+                                    .coerceIn(0.dp, (maxWidth - previewWidth).coerceAtLeast(0.dp))
+                                if (!isTouchDevice) SeekPreviewFilmstrip(
+                                    frame = displayPreviewFrame, neighbors = previewNeighbors,
+                                    positionMs = controlsPreviewPosition,
+                                    sourceGeneration = previewStatus.sourceGeneration,
+                                ) else com.arflix.tv.ui.screens.player.preview.ReadySeekPreview(
+                                    frame = displayPreviewFrame,
+                                    positionMs = controlsPreviewPosition,
+                                    sourceGeneration = previewStatus.sourceGeneration,
+                                    modifier = Modifier.offset(x = offset).size(previewWidth, previewHeight),
+                                )
+                            }
+                        }
+
+                        // Trackbar at the very bottom with time labels
+                        Row(
+                            modifier = Modifier.fillMaxWidth().testTag("player_controls_seekbar"),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = formatTime(controlsPreviewPosition),
+                                style = ArflixTypography.label.copy(fontSize = if (isTouchDevice) 12.sp else 13.sp),
+                                color = Color.White.copy(alpha = 0.9f),
+                                maxLines = 1,
+                                modifier = Modifier.width(if (isTouchDevice) 48.dp else 55.dp)
+                            )
+
+                            // Trackbar
+                            var trackbarWidthPx by remember { mutableIntStateOf(0) }
+                            BoxWithConstraints(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(if (isTouchDevice) 28.dp else 20.dp)
+                                    .onSizeChanged { trackbarWidthPx = it.width }
+                                    .focusRequester(trackbarFocusRequester)
+                                    .onFocusChanged { state ->
+                                        trackbarFocused = state.isFocused
+                                        if (!state.isFocused && seekInteraction.browsing &&
+                                            seekInteraction.surface == SeekSurface.Controls) finishSeek(false)
+                                    }
+                                    .focusable()
+                                    .pointerInput(duration, isCasting) {
+                                        detectHorizontalDragGestures(
+                                            onDragStart = { offset ->
+                                                if (duration > 0L && trackbarWidthPx > 0) {
+                                                    trackbarFocusRequester.requestFocus()
+                                                    latestDragSeek(
+                                                        ((offset.x / trackbarWidthPx).coerceIn(0f, 1f) * duration).toLong()
+                                                    )
+                                                }
+                                            },
+                                            onDragEnd = { latestFinishSeek(true) },
+                                            onDragCancel = { latestFinishSeek(false) },
+                                            onHorizontalDrag = { change, dragAmount ->
+                                                if (duration > 0L && trackbarWidthPx > 0) {
+                                                    change.consume()
+                                                    val delta = (dragAmount / trackbarWidthPx * duration).toLong()
+                                                    latestDragSeek(seekInteraction.targetMs + delta)
+                                                }
+                                            }
+                                        )
+                                    }
+                                    .pointerInput(duration, isCasting) {
+                                        detectTapGestures { offset ->
+                                            if (duration > 0L && trackbarWidthPx > 0) {
+                                                val position = (
+                                                    (offset.x / trackbarWidthPx).coerceIn(0f, 1f) * duration
+                                                ).toLong()
+                                                if (isCasting) {
+                                                    castManager.seekTo(position)
+                                                } else if (!playerReleased) {
+                                                    exoPlayer.seekTo(position)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .onKeyEvent { event ->
+                                        if (event.type == KeyEventType.KeyDown && trackbarFocused) {
+                                            when (event.key) {
+                                                Key.DirectionLeft -> {
+                                                    val step = acceleratedSeekPreviewStepMs(
+                                                        event.nativeKeyEvent.repeatCount
+                                                    )
+                                                    queueControlsSeek(-step)
+                                                    true
+                                                }
+                                                Key.DirectionRight -> {
+                                                    val step = acceleratedSeekPreviewStepMs(
+                                                        event.nativeKeyEvent.repeatCount
+                                                    )
+                                                    queueControlsSeek(step)
+                                                    true
+                                                }
+                                                Key.Enter, Key.DirectionCenter -> { commitControlsSeekNow(); true }
+                                                Key.DirectionUp -> { finishSeek(false); playButtonFocusRequester.requestFocus(); true }
+                                                Key.DirectionDown -> true
+                                                else -> false
+                                            }
+                                        } else false
+                                    }
+                                    .background(Color.Transparent),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                // Visible thin bar centered in the larger touch target
+                                val barHeight = if (trackbarFocused) 8.dp else if (isTouchDevice) 6.dp else 4.dp
+                                Box(modifier = Modifier.fillMaxWidth().height(barHeight).background(Color.White.copy(alpha = if (trackbarFocused) 0.25f else 0.15f), RoundedCornerShape(8.dp)))
+                                val frac = if (duration > 0) (controlsPreviewPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else progress
+                                Box(modifier = Modifier.fillMaxWidth().height(barHeight).align(Alignment.Center), contentAlignment = Alignment.CenterStart) {
+                                Box(modifier = Modifier.fillMaxWidth(frac).fillMaxHeight().background(
+                                    if (trackbarFocused) playerAccent else playerAccent.copy(alpha = 0.8f), RoundedCornerShape(8.dp)
+                                ))
+                                }
+                                val knobSize = if (isTouchDevice) 12.dp else 14.dp
+                                Box(
+                                    modifier = Modifier.align(Alignment.CenterStart)
+                                        .offset(x = (maxWidth * frac - knobSize / 2f)
+                                            .coerceIn(0.dp, (maxWidth - knobSize).coerceAtLeast(0.dp)))
+                                        .size(knobSize)
+                                        .background(Color.White, CircleShape)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(8.dp))
+
+                            Text(
+                                text = formatTime(duration),
+                                style = ArflixTypography.label.copy(fontSize = if (isTouchDevice) 12.sp else 13.sp),
+                                color = Color.White.copy(alpha = 0.5f),
+                                maxLines = 1,
+                                modifier = Modifier.width(if (isTouchDevice) 48.dp else 55.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // In-player subtitle settings panel (Delay, Size, Vertical Position)
+            AnimatedVisibility(
+                visible = showSubtitleSettings && hasPlaybackStarted,
+                enter = fadeIn(animTween(150)),
+                exit = fadeOut(animTween(150)),
+                modifier = Modifier.align(Alignment.Center).zIndex(8f)
+            ) {
+                PlayerSubtitleSettingsPanel(
+                    selectedRow = subtitleSettingsRow,
+                    syncOffsetMs = subtitleSyncOffsetMs,
+                    sizePct = subtitleSizePct,
+                    verticalPct = subtitleVerticalPct,
+                    onRowSelect = { subtitleSettingsRow = it },
+                    onOffsetDecrease = { subtitleSyncOffsetMs = (subtitleSyncOffsetMs - SUBTITLE_OFFSET_STEP_MS).coerceAtLeast(-MAX_SUBTITLE_OFFSET_MS) },
+                    onOffsetIncrease = { subtitleSyncOffsetMs = (subtitleSyncOffsetMs + SUBTITLE_OFFSET_STEP_MS).coerceAtMost(MAX_SUBTITLE_OFFSET_MS) },
+                    onSizeDecrease = { subtitleSizePct = (subtitleSizePct - 10).coerceAtLeast(50) },
+                    onSizeIncrease = { subtitleSizePct = (subtitleSizePct + 10).coerceAtMost(300) },
+                    onVerticalDecrease = { subtitleVerticalPct = (subtitleVerticalPct - 1).coerceAtLeast(0) },
+                    onVerticalIncrease = { subtitleVerticalPct = (subtitleVerticalPct + 1).coerceAtMost(50) }
+                )
+            }
+
+            // Subtitle/Audio menu
+            AnimatedVisibility(
+                visible = showSubtitleMenu,
+                enter = fadeIn(androidx.compose.animation.core.tween(150)),
+                exit = fadeOut(androidx.compose.animation.core.tween(200))
+            ) {
+                SubtitleMenu(
+                    subtitles = uiState.subtitles,
+                    selectedSubtitle = uiState.selectedSubtitle,
+                    isAiTranslating = uiState.isAiTranslating,
+                    autoSync = uiState.autoSync,
+                    isAiAvailable = uiState.isAiAvailable,
+                    aiTargetLanguageName = uiState.aiTargetLanguageName,
+                    matchLanguageName = uiState.matchLanguageName,
+                    audioTracks = audioTracks,
+                    selectedAudioIndex = selectedAudioIndex,
+                    activeTab = subtitleMenuTab,
+                    focusedIndex = subtitleMenuIndex,
+                    subtitleGroups = subtitleGroups,
+                    streamSource = uiState.selectedStream?.source ?: "",
+                    subtitleLangIndex = subtitleLangIndex,
+                    subtitleTrackIndex = subtitleTrackIndex,
+                    subtitlePanelFocus = subtitlePanelFocus,
+                    onTabChanged = { tab ->
+                        subtitleMenuTab = tab
+                        subtitleMenuIndex = 0
+                    },
+                    onSelectSubtitle = { index ->
+                        if (index == 0) {
+                            viewModel.disableSubtitles()
+                        } else {
+                            uiState.subtitles.getOrNull(index - 1)?.let { viewModel.selectSubtitle(it) }
+                        }
+                        showSubtitleMenu = false
+                        showControls = true
+                        coroutineScope.launch {
+                            delay(150)
+                            try { subtitleButtonFocusRequester.requestFocus() } catch (_: Exception) {}
+                        }
+                    },
+                    onSelectAudio = { track ->
+                        userPickedAudioForStream = true
+                        applyAudioTrackSelection(exoPlayer, track, audioTracks)?.let {
+                            selectedAudioIndex = it
+                        }
+                        showSubtitleMenu = false
+                        showControls = true
+                        coroutineScope.launch {
+                            delay(150)
+                            try { subtitleButtonFocusRequester.requestFocus() } catch (_: Exception) {}
+                        }
+                    },
+                    isLiveAudioTranslating = uiState.isLiveAudioTranslating,
+                    isFindingBestMatch = uiState.isFindingBestMatch,
+                    onToggleAi = { viewModel.activateAiTranslation() },
+                    onToggleLiveAudio = { viewModel.toggleLiveAudioTranslation() },
+                    onFindBestMatch = { viewModel.runFindBestMatch() },
+                    onClose = {
+                        showSubtitleMenu = false
+                        showControls = true
+                        coroutineScope.launch {
+                            delay(150)
+                            try { subtitleButtonFocusRequester.requestFocus() } catch (_: Exception) {}
+                        }
+                    }
+                )
+            }
+
+            StreamSelector(
+                isVisible = showSourceMenu,
+                streams = uiState.streams + uiState.addonNotices.mapIndexed(::addonNoticeRow),
+                selectedStream = uiState.selectedStream,
+                recentSource = uiState.recentSource,
+                isLoading = uiState.isLoadingStreams,
+                hasStreamingAddons = !uiState.isSetupError,
+                addonOrderedIds = uiState.addonOrderedIds,
+                title = uiState.title,
+                subtitle = if (args.seasonNumber != null && args.episodeNumber != null) {
+                    "S${args.seasonNumber} E${args.episodeNumber}"
+                } else {
+                    ""
+                },
+                preferredAudioLanguage = uiState.sourceBadgeLanguage,
+                mediaTitle = uiState.title,
+                onFocusedStream = { stream ->
+                    if (!isAddonNoticeRow(stream)) viewModel.prewarmStreamsAround(stream, uiState.streams)
+                },
+                onSelect = { stream: StreamSource ->
+                    if (!selectSourceManually(stream)) return@StreamSelector
+                    showSourceMenu = false
+                    showControls = true
+                    coroutineScope.launch {
+                        delay(150)
+                        runCatching { sourceButtonFocusRequester.requestFocus() }
+                    }
+                },
+                onClose = {
+                    if (uiState.selectedStreamUrl.isNullOrBlank()) {
+                        onExitPlayer()
+                        return@StreamSelector
+                    }
+                    showSourceMenu = false
+                    showControls = true
+                    coroutineScope.launch {
+                        delay(150)
+                        runCatching { sourceButtonFocusRequester.requestFocus() }
+                    }
+                }
+            )
+
+            // Volume indicator
+            AnimatedVisibility(
+                visible = showVolumeIndicator,
+                enter = fadeIn(androidx.compose.animation.core.tween(150)),
+                exit = fadeOut(androidx.compose.animation.core.tween(200)),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 48.dp)
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
+                        .padding(16.dp)
+                ) {
+                    Icon(
+                        imageVector = when {
+                            isMuted || currentVolume == 0 -> Icons.Default.VolumeMute
+                            currentVolume < maxVolume / 2 -> Icons.Default.VolumeDown
+                            else -> Icons.Default.VolumeUp
+                        },
+                        contentDescription = stringResource(R.string.player_cd_volume),
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(8.dp)
+                            .height(100.dp)
+                            .background(Color.White.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                    ) {
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .height(5.dp)
-                                .background(Color.White.copy(alpha = 0.25f), RoundedCornerShape(3.dp))
+                                .fillMaxWidth()
+                                .fillMaxSize((currentVolume.toFloat() / maxVolume).coerceIn(0f, 1f))
+                                .background(playerAccent, RoundedCornerShape(8.dp))
+                                .align(Alignment.BottomCenter)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = if (isMuted) stringResource(R.string.player_muted) else "${currentVolume * 100 / maxVolume}%",
+                        style = ArflixTypography.caption,
+                        color = Color.White
+                    )
+                }
+            }
+
+            // Aspect ratio indicator - brief center popup
+            AnimatedVisibility(
+                visible = showAspectIndicator,
+                enter = fadeIn(androidx.compose.animation.core.tween(150)),
+                exit = fadeOut(androidx.compose.animation.core.tween(200)),
+                modifier = Modifier.align(Alignment.Center)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 24.dp, vertical = 14.dp)
+                ) {
+                    Text(
+                        text = aspectModeLabel,
+                        style = ArflixTypography.body.copy(fontSize = 18.sp, fontWeight = FontWeight.Medium),
+                        color = Color.White
+                    )
+                }
+            }
+
+            // Direct D-pad seek overlay. This is intentionally separate from the full player controls:
+            // left/right opens a focused thumbnail scrubber without covering the playing video.
+            AnimatedVisibility(
+                visible = showSkipOverlay && duration > 0L && !args.isLiveStream && !isCasting,
+                enter = fadeIn(androidx.compose.animation.core.tween(80)),
+                exit = fadeOut(androidx.compose.animation.core.tween(120)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+            ) {
+                BoxWithConstraints(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            start = if (isTouchDevice) 24.dp else 72.dp,
+                            end = if (isTouchDevice) 24.dp else 72.dp,
+                            top = 28.dp,
+                            bottom = if (isTouchDevice) 22.dp else 34.dp,
+                        )
+                ) {
+                    val previewPosition = skipPreviewPosition.coerceIn(0L, duration)
+                    val previewProgress =
+                        (previewPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                    val previewWidth = if (isTouchDevice) 168.dp else 224.dp
+                    val previewHeight = previewWidth * 9f / 16f
+                    val previewOffset = (maxWidth * previewProgress - previewWidth / 2f)
+                        .coerceIn(0.dp, (maxWidth - previewWidth).coerceAtLeast(0.dp))
+                    val knobSize = if (isTouchDevice) 10.dp else 12.dp
+                    val knobOffset = (maxWidth * previewProgress - knobSize / 2f)
+                        .coerceIn(0.dp, (maxWidth - knobSize).coerceAtLeast(0.dp))
+
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        if (showQuickSeekPreview) {
+                          Box(
+                            modifier = Modifier.fillMaxWidth().seekPreviewOverlay().height(previewHeight + 2.dp),
+                          ) {
+                            if (!isTouchDevice) SeekPreviewFilmstrip(
+                                frame = displayPreviewFrame, neighbors = previewNeighbors,
+                                positionMs = previewPosition,
+                                sourceGeneration = previewStatus.sourceGeneration,
+                            ) else com.arflix.tv.ui.screens.player.preview.ReadySeekPreview(
+                                frame = displayPreviewFrame,
+                                positionMs = previewPosition,
+                                sourceGeneration = previewStatus.sourceGeneration,
+                                modifier = Modifier.offset(x = previewOffset).size(previewWidth, previewHeight),
+                            )
+                          }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(14.dp),
+                            contentAlignment = Alignment.CenterStart,
                         ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(5.dp)
+                                    .background(Color.White.copy(alpha = 0.28f), RoundedCornerShape(8.dp))
+                            )
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth(previewProgress)
                                     .height(5.dp)
-                                    .background(Color.White, RoundedCornerShape(3.dp))
+                                    .background(Color.White, RoundedCornerShape(8.dp))
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .offset(x = knobOffset)
+                                    .size(knobSize)
+                                    .background(Color.White, CircleShape)
                             )
                         }
-                        Text(
-                            text = formatTime(duration),
-                            style = ArflixTypography.caption.copy(
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                            ),
-                            color = Color.White.copy(alpha = 0.75f),
-                        )
+                        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(formatTime(previewPosition), color = Color.White, style = ArflixTypography.label)
+                            Text(formatTime(duration), color = Color.White.copy(alpha = 0.65f), style = ArflixTypography.label)
+                        }
                     }
                 }
             }
-        }
 
-        // Error modal — friendly setup guide for no-addons, red error for actual playback failures
-        AnimatedVisibility(
-            visible = uiState.error != null,
-            enter = fadeIn(androidx.compose.animation.core.tween(150)),
-            exit = fadeOut(androidx.compose.animation.core.tween(200))
-        ) {
-            val isSetup = uiState.isSetupError
-            val accentColor = if (isSetup) Color(0xFF3B82F6) else Color(0xFFEF4444) // blue vs red
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.9f)),
-                contentAlignment = Alignment.Center
+            // Error modal — friendly setup guide for no-addons, red error for actual playback failures
+            AnimatedVisibility(
+                visible = uiState.error != null,
+                enter = fadeIn(androidx.compose.animation.core.tween(150)),
+                exit = fadeOut(androidx.compose.animation.core.tween(200))
             ) {
-                Column(
+                val isSetup = uiState.isSetupError
+                val iptvBusy = uiState.error == IPTV_ACCOUNT_BUSY_MESSAGE
+                val accentColor = if (isSetup) Color(0xFF3B82F6) else Color(0xFFEF4444) // blue vs red
+                Box(
                     modifier = Modifier
-                        .width(480.dp)
-                        .background(Color(0xFF1A1A1A), RoundedCornerShape(16.dp))
-                        .border(1.dp, accentColor.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
-                        .padding(32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.9f)),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
+                    Column(
                         modifier = Modifier
-                            .size(72.dp)
-                            .background(accentColor.copy(alpha = 0.15f), CircleShape),
-                        contentAlignment = Alignment.Center
+                            .width(480.dp)
+                            .background(BackgroundElevated, RoundedCornerShape(16.dp))
+                            .border(1.dp, accentColor.copy(alpha = 0.3f), RoundedCornerShape(16.dp))
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Icon(
-                            imageVector = if (isSetup) Icons.Default.Settings else Icons.Default.ErrorOutline,
-                            contentDescription = if (isSetup) stringResource(R.string.player_cd_setup) else stringResource(R.string.player_cd_error),
-                            tint = accentColor,
-                            modifier = Modifier.size(40.dp)
-                        )
-                    }
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .background(accentColor.copy(alpha = 0.15f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isSetup) Icons.Default.Settings else Icons.Default.ErrorOutline,
+                                contentDescription = if (isSetup) stringResource(R.string.player_cd_setup) else stringResource(R.string.player_cd_error),
+                                tint = accentColor,
+                                modifier = Modifier.size(40.dp)
+                            )
+                        }
 
-                    Spacer(modifier = Modifier.height(24.dp))
+                        Spacer(modifier = Modifier.height(24.dp))
 
-                    Text(
-                        text = if (isSetup) stringResource(R.string.player_addon_setup_required) else stringResource(R.string.player_playback_error),
-                        style = ArflixTypography.sectionTitle,
-                        color = TextPrimary
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Text(
-                        text = uiState.error ?: stringResource(R.string.player_error_generic),
-                        style = ArflixTypography.body,
-                        color = TextSecondary,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    if (isSetup) {
-                        Spacer(modifier = Modifier.height(16.dp))
                         Text(
-                            text = stringResource(R.string.no_results),
-                            style = ArflixTypography.caption,
-                            color = TextSecondary.copy(alpha = 0.7f),
+                            text = stringResource(playerErrorTitleRes(isSetup, uiState.error)),
+                            style = ArflixTypography.sectionTitle,
+                            color = TextPrimary
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = uiState.error?.localizedText() ?: stringResource(R.string.player_error_generic),
+                            style = ArflixTypography.body,
+                            color = TextSecondary,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                             modifier = Modifier.fillMaxWidth()
                         )
-                    }
 
-                    Spacer(modifier = Modifier.height(32.dp))
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        if (!isSetup) {
-                            ErrorButton(
-                                text = stringResource(R.string.retry).uppercase(),
-                                icon = Icons.Default.Refresh,
-                                isFocused = errorModalFocusIndex == 0,
-                                isPrimary = true,
-                                onClick = { viewModel.retry() }
+                        if (isSetup) {
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = stringResource(R.string.no_results),
+                                style = ArflixTypography.caption,
+                                color = TextSecondary.copy(alpha = 0.7f),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
                             )
                         }
-                        ErrorButton(
-                            text = stringResource(R.string.back).uppercase(),
-                            isFocused = if (isSetup) errorModalFocusIndex == 0 else errorModalFocusIndex == 1,
-                            isPrimary = isSetup,
-                            onClick = onBack
-                        )
+
+                        Spacer(modifier = Modifier.height(32.dp))
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            if (!isSetup) {
+                                ErrorButton(
+                                    text = stringResource(R.string.retry).uppercase(),
+                                    icon = Icons.Default.Refresh,
+                                    isFocused = errorModalFocusIndex == 0,
+                                    isPrimary = true,
+                                    onClick = { viewModel.retry() }
+                                )
+                            }
+                            if (iptvBusy) {
+                                ErrorButton(
+                                    text = stringResource(R.string.iptv_account_play_anyway).uppercase(),
+                                    isFocused = errorModalFocusIndex == 1,
+                                    isPrimary = false,
+                                    onClick = { viewModel.playIptvAnyway() }
+                                )
+                            }
+                            ErrorButton(
+                                text = stringResource(R.string.back).uppercase(),
+                                isFocused = if (isSetup) errorModalFocusIndex == 0 else errorModalFocusIndex == if (iptvBusy) 2 else 1,
+                                isPrimary = isSetup,
+                                onClick = onExitPlayer
+                            )
+                        }
                     }
                 }
             }
         }
+
+        PlayerExitScrim(exitTransition)
     }
+    }
+}
+
+@Composable
+internal fun PlayerLoadingOverlay(
+    uiState: PlayerUiState,
+    hasPlaybackStarted: Boolean,
+    isTouchDevice: Boolean,
+    isInPipMode: Boolean,
+    showSourceMenu: Boolean,
+    onExitPlayer: () -> Unit,
+    startupPhase: Int? = null,
+    switchNotice: String? = null
+) {
+    if (!isInPipMode && !showSourceMenu && uiState.error == null &&
+        (uiState.isLoading || uiState.selectedStreamUrl == null || !hasPlaybackStarted)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("playerLoadingOverlay")
+                .zIndex(50f),
+            contentAlignment = Alignment.Center
+        ) {
+            if (uiState.backdropUrl != null) {
+                AsyncImage(
+                    model = uiState.backdropUrl,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.7f))
+                )
+            }
+
+            if (isTouchDevice) {
+                val layoutDirection = LocalLayoutDirection.current
+                val systemBarsInsets = WindowInsets.systemBars.asPaddingValues()
+                val cutoutInsets = WindowInsets.displayCutout.asPaddingValues()
+
+                val startInset = maxOf(
+                    systemBarsInsets.calculateStartPadding(layoutDirection),
+                    cutoutInsets.calculateStartPadding(layoutDirection)
+                )
+                val endInset = maxOf(
+                    systemBarsInsets.calculateEndPadding(layoutDirection),
+                    cutoutInsets.calculateEndPadding(layoutDirection)
+                )
+                val maxHorizontalPadding = maxOf(startInset, endInset, 24.dp)
+                val topSafePadding = maxOf(
+                    systemBarsInsets.calculateTopPadding() + 8.dp,
+                    cutoutInsets.calculateTopPadding() + 12.dp,
+                    16.dp
+                )
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(
+                            top = topSafePadding,
+                            start = maxHorizontalPadding
+                        )
+                        .zIndex(52f)
+                ) {
+                    MobileIconButton(
+                        icon = Icons.Default.Close,
+                        contentDescription = stringResource(R.string.close),
+                        onClick = onExitPlayer
+                    )
+                }
+            }
+
+            PulsingLogo(
+                logoUrl = uiState.logoUrl,
+                title = uiState.title,
+                progress = if (uiState.showLoadingStats) uiState.streamProgress else null,
+                isTouchDevice = isTouchDevice,
+                // streamLoadPhase covers source discovery; startupPhase takes over from
+                // stream selection ("Loading subtitles…"/"Loading video stream…") until the
+                // first frame renders; switchNotice overlays both for 2.5s on failover.
+                // Unlike the percentage ring, the phase text is not gated on
+                // showLoadingStats — status feedback should always be visible.
+                phaseLabel = switchNotice
+                    ?: (startupPhase.takeIf { uiState.selectedStreamUrl != null })
+                        ?.let { phaseRes ->
+                            // Name the addons still being queried so a chronically slow one
+                            // identifies itself to the user ("Loading subtitles… (bla)").
+                            val pending = uiState.pendingSubtitleAddons
+                            if (phaseRes == R.string.player_phase_loading_subtitles && pending.isNotEmpty()) {
+                                val shown = pending.take(2).joinToString(", ")
+                                val more = pending.size - 2
+                                stringResource(
+                                    R.string.player_phase_loading_subtitles_detail,
+                                    "$shown${if (more > 0) " +$more" else ""}"
+                                )
+                            } else stringResource(phaseRes)
+                        }
+                    ?: uiState.streamLoadPhase?.localizedText()
+            )
+        }
     }
 }
 
@@ -4331,7 +5872,8 @@ private fun PulsingLogo(
     title: String,
     modifier: Modifier = Modifier,
     progress: Float? = null,
-    phaseLabel: String? = null
+    phaseLabel: String? = null,
+    isTouchDevice: Boolean = false
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "heartbeat")
     val scale by infiniteTransition.animateFloat(
@@ -4361,12 +5903,15 @@ private fun PulsingLogo(
         label = "progressFraction"
     )
 
+    val ringSize = if (isTouchDevice) 140.dp else 196.dp
+    val logoHeight = if (isTouchDevice) 100.dp else 152.dp
+
     Column(
         modifier = modifier.padding(horizontal = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
-            modifier = Modifier.size(196.dp),
+            modifier = Modifier.size(ringSize),
             contentAlignment = Alignment.Center
         ) {
             if (progress != null) {
@@ -4409,18 +5954,18 @@ private fun PulsingLogo(
                 if (!logoUrl.isNullOrBlank()) {
                     AsyncImage(
                         model = logoUrl, contentDescription = title, contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth(0.76f).height(152.dp)
+                        modifier = Modifier.fillMaxWidth(0.76f).height(logoHeight)
                     )
                 } else {
                     Box(
                         modifier = Modifier
-                            .size(74.dp)
+                            .size(if (isTouchDevice) 56.dp else 74.dp)
                             .border(3.dp, Color.White.copy(alpha = 0.9f), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(18.dp)
+                                .size(if (isTouchDevice) 14.dp else 18.dp)
                                 .background(Color.White.copy(alpha = 0.95f), CircleShape)
                         )
                     }
@@ -4429,17 +5974,20 @@ private fun PulsingLogo(
         }
 
         if (progress != null) {
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
             Text(
                 text = "${(animatedProgress * 100f).toInt()}%",
-                style = ArflixTypography.sectionTitle.copy(fontSize = 22.sp, fontWeight = FontWeight.SemiBold),
+                style = ArflixTypography.sectionTitle.copy(
+                    fontSize = if (isTouchDevice) 18.sp else 22.sp,
+                    fontWeight = FontWeight.SemiBold
+                ),
                 color = Color.White
             )
         }
         // Independent of the progress ring: post-selection phases ("Loading video stream…",
         // "Loading subtitles…") have no meaningful percentage but still need to show.
         if (!phaseLabel.isNullOrBlank()) {
-            Spacer(modifier = Modifier.height(if (progress != null) 6.dp else 16.dp))
+            Spacer(modifier = Modifier.height(if (progress != null) 8.dp else 16.dp))
             Text(
                 text = phaseLabel,
                 style = ArflixTypography.caption,
@@ -4655,53 +6203,110 @@ private fun isBitmapSubtitleMime(mimeType: String?): Boolean {
  * Language code to full name mapping
  */
 private fun getFullLanguageName(code: String?): String {
-    if (code == null) return "Unknown"
-    val normalizedCode = code.lowercase().trim()
-    return when {
-        normalizedCode == "en" || normalizedCode == "eng" || normalizedCode == "english" -> "English"
-        normalizedCode == "es" || normalizedCode == "spa" || normalizedCode == "spanish" -> "Spanish"
-        normalizedCode == "nl" || normalizedCode == "nld" || normalizedCode == "dut" || normalizedCode == "dutch" -> "Dutch"
-        normalizedCode == "de" || normalizedCode == "ger" || normalizedCode == "deu" || normalizedCode == "german" -> "German"
-        normalizedCode == "fr" || normalizedCode == "fra" || normalizedCode == "fre" || normalizedCode == "french" -> "French"
-        normalizedCode == "it" || normalizedCode == "ita" || normalizedCode == "italian" -> "Italian"
-        normalizedCode == "pt" || normalizedCode == "por" || normalizedCode == "portuguese" -> "Portuguese"
-        normalizedCode == "pt-br" || normalizedCode == "pob" -> "Portuguese (Brazil)"
-        normalizedCode == "ru" || normalizedCode == "rus" || normalizedCode == "russian" -> "Russian"
-        normalizedCode == "ja" || normalizedCode == "jpn" || normalizedCode == "japanese" -> "Japanese"
-        normalizedCode == "ko" || normalizedCode == "kor" || normalizedCode == "korean" -> "Korean"
-        normalizedCode == "zh" || normalizedCode == "chi" || normalizedCode == "zho" || normalizedCode == "chinese" -> "Chinese"
-        normalizedCode == "ar" || normalizedCode == "ara" || normalizedCode == "arabic" -> "Arabic"
-        normalizedCode == "hi" || normalizedCode == "hin" || normalizedCode == "hindi" -> "Hindi"
-        normalizedCode == "tr" || normalizedCode == "tur" || normalizedCode == "turkish" -> "Turkish"
-        normalizedCode == "pl" || normalizedCode == "pol" || normalizedCode == "polish" -> "Polish"
-        normalizedCode == "sv" || normalizedCode == "swe" || normalizedCode == "swedish" -> "Swedish"
-        normalizedCode == "no" || normalizedCode == "nor" || normalizedCode == "norwegian" -> "Norwegian"
-        normalizedCode == "da" || normalizedCode == "dan" || normalizedCode == "danish" -> "Danish"
-        normalizedCode == "fi" || normalizedCode == "fin" || normalizedCode == "finnish" -> "Finnish"
-        normalizedCode == "cs" || normalizedCode == "cze" || normalizedCode == "ces" || normalizedCode == "czech" -> "Czech"
-        normalizedCode == "hu" || normalizedCode == "hun" || normalizedCode == "hungarian" -> "Hungarian"
-        normalizedCode == "ro" || normalizedCode == "ron" || normalizedCode == "rum" || normalizedCode == "romanian" -> "Romanian"
-        normalizedCode == "el" || normalizedCode == "gre" || normalizedCode == "ell" || normalizedCode == "greek" -> "Greek"
-        normalizedCode == "he" || normalizedCode == "heb" || normalizedCode == "hebrew" -> "Hebrew"
-        normalizedCode == "th" || normalizedCode == "tha" || normalizedCode == "thai" -> "Thai"
-        normalizedCode == "vi" || normalizedCode == "vie" || normalizedCode == "vietnamese" -> "Vietnamese"
-        normalizedCode == "id" || normalizedCode == "ind" || normalizedCode == "indonesian" -> "Indonesian"
-        normalizedCode == "ms" || normalizedCode == "msa" || normalizedCode == "may" || normalizedCode == "malay" -> "Malay"
-        normalizedCode == "uk" || normalizedCode == "ukr" || normalizedCode == "ukrainian" -> "Ukrainian"
-        normalizedCode == "bg" || normalizedCode == "bul" || normalizedCode == "bulgarian" -> "Bulgarian"
-        normalizedCode == "hr" || normalizedCode == "hrv" || normalizedCode == "croatian" -> "Croatian"
-        normalizedCode == "sr" || normalizedCode == "srp" || normalizedCode == "serbian" -> "Serbian"
-        normalizedCode == "sk" || normalizedCode == "slo" || normalizedCode == "slk" || normalizedCode == "slovak" -> "Slovak"
-        normalizedCode == "sl" || normalizedCode == "slv" || normalizedCode == "slovenian" -> "Slovenian"
-        normalizedCode == "et" || normalizedCode == "est" || normalizedCode == "estonian" -> "Estonian"
-        normalizedCode == "lv" || normalizedCode == "lav" || normalizedCode == "latvian" -> "Latvian"
-        normalizedCode == "lt" || normalizedCode == "lit" || normalizedCode == "lithuanian" -> "Lithuanian"
-        normalizedCode == "fa" || normalizedCode == "per" || normalizedCode == "fas" || normalizedCode == "persian" -> "Persian"
-        normalizedCode == "kur" || normalizedCode == "ku" || normalizedCode == "kurdish" -> "Kurdish"
-        normalizedCode == "mon" || normalizedCode == "mn" || normalizedCode == "mongolian" -> "Mongolian"
-        normalizedCode == "und" || normalizedCode == "unknown" -> "Unknown"
-        else -> code.uppercase()
+    if (code.isNullOrBlank()) return "Unknown"
+    val raw = code.trim()
+    val normalizedCode = raw.lowercase().replace('_', '-')
+
+    val mapped = when {
+        normalizedCode in listOf("en", "eng", "english") -> "English"
+        normalizedCode in listOf("es", "spa", "spanish") -> "Spanish"
+        normalizedCode in listOf("es-419", "es-la") -> "Spanish (Latin America)"
+        normalizedCode in listOf("es-es") -> "Spanish (Spain)"
+        normalizedCode in listOf("nl", "nld", "dut", "dutch") -> "Dutch"
+        normalizedCode in listOf("de", "ger", "deu", "german") -> "German"
+        normalizedCode in listOf("fr", "fra", "fre", "french") -> "French"
+        normalizedCode in listOf("it", "ita", "italian") -> "Italian"
+        normalizedCode in listOf("pt", "por", "portuguese") -> "Portuguese"
+        normalizedCode in listOf("pt-br", "pob") -> "Portuguese (Brazil)"
+        normalizedCode in listOf("pt-pt") -> "Portuguese (Portugal)"
+        normalizedCode in listOf("ru", "rus", "russian") -> "Russian"
+        normalizedCode in listOf("ja", "jpn", "japanese") -> "Japanese"
+        normalizedCode in listOf("ko", "kor", "korean") -> "Korean"
+        normalizedCode in listOf("zh", "chi", "zho", "chinese") -> "Chinese"
+        normalizedCode in listOf("zh-cn", "zh-hans", "chs") -> "Chinese (Simplified)"
+        normalizedCode in listOf("zh-tw", "zh-hk", "zh-hant", "cht") -> "Chinese (Traditional)"
+        normalizedCode in listOf("ar", "ara", "arabic") -> "Arabic"
+        normalizedCode in listOf("hi", "hin", "hindi") -> "Hindi"
+        normalizedCode in listOf("te", "tel", "telugu") -> "Telugu"
+        normalizedCode in listOf("ta", "tam", "tamil") -> "Tamil"
+        normalizedCode in listOf("ml", "mal", "malayalam") -> "Malayalam"
+        normalizedCode in listOf("kn", "kan", "kannada") -> "Kannada"
+        normalizedCode in listOf("mr", "mar", "marathi") -> "Marathi"
+        normalizedCode in listOf("bn", "ben", "bengali") -> "Bengali"
+        normalizedCode in listOf("gu", "guj", "gujarati") -> "Gujarati"
+        normalizedCode in listOf("pa", "pan", "punjabi") -> "Punjabi"
+        normalizedCode in listOf("ur", "urd", "urdu") -> "Urdu"
+        normalizedCode in listOf("tr", "tur", "turkish") -> "Turkish"
+        normalizedCode in listOf("pl", "pol", "polish") -> "Polish"
+        normalizedCode in listOf("sv", "swe", "swedish") -> "Swedish"
+        normalizedCode in listOf("no", "nor", "nob", "norwegian") -> "Norwegian"
+        normalizedCode in listOf("da", "dan", "danish") -> "Danish"
+        normalizedCode in listOf("fi", "fin", "finnish") -> "Finnish"
+        normalizedCode in listOf("el", "gre", "ell", "greek") -> "Greek"
+        normalizedCode in listOf("he", "heb", "hebrew") -> "Hebrew"
+        normalizedCode in listOf("id", "ind", "indonesian") -> "Indonesian"
+        normalizedCode in listOf("vi", "vie", "vietnamese") -> "Vietnamese"
+        normalizedCode in listOf("th", "tha", "thai") -> "Thai"
+        normalizedCode in listOf("cs", "ces", "cze", "czech") -> "Czech"
+        normalizedCode in listOf("hu", "hun", "hungarian") -> "Hungarian"
+        normalizedCode in listOf("ro", "ron", "rum", "romanian") -> "Romanian"
+        normalizedCode in listOf("uk", "ukr", "ukrainian") -> "Ukrainian"
+        normalizedCode in listOf("ms", "msa", "may", "malay") -> "Malay"
+        normalizedCode in listOf("fa", "fas", "per", "persian") -> "Persian"
+        normalizedCode in listOf("tl", "tgl", "fil", "tagalog", "filipino") -> "Tagalog"
+        normalizedCode in listOf("bg", "bul", "bulgarian") -> "Bulgarian"
+        normalizedCode in listOf("sr", "srp", "serbian") -> "Serbian"
+        normalizedCode in listOf("hr", "hrv", "croatian") -> "Croatian"
+        normalizedCode in listOf("sk", "slk", "slo", "slovak") -> "Slovak"
+        normalizedCode in listOf("sl", "slv", "slovenian") -> "Slovenian"
+        normalizedCode in listOf("lt", "lit", "lithuanian") -> "Lithuanian"
+        normalizedCode in listOf("lv", "lav", "latvian") -> "Latvian"
+        normalizedCode in listOf("et", "est", "estonian") -> "Estonian"
+        normalizedCode in listOf("is", "isl", "ice", "icelandic") -> "Icelandic"
+        normalizedCode in listOf("ca", "cat", "catalan") -> "Catalan"
+        normalizedCode in listOf("eu", "eus", "baq", "basque") -> "Basque"
+        normalizedCode in listOf("gl", "glg", "galician") -> "Galician"
+        normalizedCode in listOf("hy", "hye", "arm", "armenian") -> "Armenian"
+        normalizedCode in listOf("ka", "kat", "geo", "georgian") -> "Georgian"
+        normalizedCode in listOf("az", "aze", "azerbaijani") -> "Azerbaijani"
+        normalizedCode in listOf("kk", "kaz", "kazakh") -> "Kazakh"
+        normalizedCode in listOf("uz", "uzb", "uzbek") -> "Uzbek"
+        normalizedCode in listOf("mn", "mon", "mongolian") -> "Mongolian"
+        normalizedCode in listOf("ne", "nep", "nepali") -> "Nepali"
+        normalizedCode in listOf("si", "sin", "sinhala") -> "Sinhala"
+        normalizedCode in listOf("my", "mya", "bur", "burmese") -> "Burmese"
+        normalizedCode in listOf("km", "khm", "khmer") -> "Khmer"
+        normalizedCode in listOf("lo", "lao") -> "Lao"
+        normalizedCode in listOf("am", "amh", "amharic") -> "Amharic"
+        normalizedCode in listOf("sw", "swa", "swahili") -> "Swahili"
+        normalizedCode in listOf("af", "afr", "afrikaans") -> "Afrikaans"
+        normalizedCode in listOf("sq", "sqi", "alb", "albanian") -> "Albanian"
+        normalizedCode in listOf("bs", "bos", "bosnian") -> "Bosnian"
+        normalizedCode in listOf("mk", "mkd", "mac", "macedonian") -> "Macedonian"
+        normalizedCode in listOf("cy", "cym", "wel", "welsh") -> "Welsh"
+        normalizedCode in listOf("ga", "gle", "irish") -> "Irish"
+        normalizedCode in listOf("gd", "gla", "scottish gaelic") -> "Scottish Gaelic"
+        normalizedCode in listOf("la", "lat", "latin") -> "Latin"
+        normalizedCode in listOf("eo", "epo", "esperanto") -> "Esperanto"
+        normalizedCode in listOf("und", "undetermined", "unknown") -> "Unknown"
+        else -> null
     }
+
+    if (mapped != null) return mapped
+
+    return runCatching {
+        val loc = if (normalizedCode.contains("-")) {
+            java.util.Locale.forLanguageTag(normalizedCode)
+        } else {
+            java.util.Locale.Builder().setLanguage(normalizedCode).build()
+        }
+        val display = loc.getDisplayLanguage(java.util.Locale.ENGLISH)
+        if (display.isNotBlank() && !display.equals(normalizedCode, ignoreCase = true)) {
+            display
+        } else {
+            null
+        }
+    }.getOrNull() ?: raw.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
 }
 
 @Composable
@@ -4771,6 +6376,8 @@ private fun SubtitleMenu(
     matchLanguageName: String = "",
     isLiveAudioTranslating: Boolean = false,
     isFindingBestMatch: Boolean = false,
+    // Auto-match timing correction on the selected track, shown as "· fixed +1.0s" on its row.
+    autoSync: SubtitleAutoSync? = null,
     audioTracks: List<AudioTrackInfo>,
     selectedAudioIndex: Int,
     activeTab: Int,
@@ -4871,7 +6478,7 @@ private fun SubtitleMenu(
                             ) {
                                 item {
                                     LangPanelItem(
-                                        name = "Off",
+                                        name = stringResource(R.string.off),
                                         count = 0,
                                         isFocused = subtitlePanelFocus == 0 && subtitleLangIndex == 0,
                                         isActivePanel = subtitleLangIndex == 0,
@@ -4938,9 +6545,13 @@ private fun SubtitleMenu(
                                         // First: "Find Best Match" — timing scan, works without AI.
                                         item {
                                             TrackMenuItem(
-                                                label = if (isFindingBestMatch) "Scanning…" else "Find Best Match",
-                                                subtitle = "Auto",
-                                                subtitleDetail = "Auto-pick the best-synced subtitle",
+                                                label = if (isFindingBestMatch) {
+                                                    stringResource(R.string.player_subtitle_scanning)
+                                                } else {
+                                                    stringResource(R.string.player_subtitle_find_best_match)
+                                                },
+                                                subtitle = stringResource(R.string.auto),
+                                                subtitleDetail = stringResource(R.string.player_subtitle_best_match_hint),
                                                 isSelected = isFindingBestMatch,
                                                 isFocused = subtitlePanelFocus == 1 && subtitleTrackIndex == 0,
                                                 onClick = { /* D-pad only */ }
@@ -4963,24 +6574,37 @@ private fun SubtitleMenu(
                                     itemsIndexed(selectedGroup.second) { idx, (_, subtitle) ->
                                         val score = subtitleMatchScore(streamSource, subtitle)
                                         val langName = getFullLanguageName(subtitle.lang)
-                                        val offsetNote = matchedOffsetMsFor(selectedSubtitle, subtitle.id)
-                                            ?.let { " · ${formatMatchOffset(it)}" } ?: ""
+                                        val offsetNote = autoSyncNote(
+                                            autoSync.takeIf { isSameSubtitleTrack(selectedSubtitle, subtitle.id) },
+                                            retimed = isRetimedCopyOf(selectedSubtitle, subtitle.id),
+                                        )
+                                        // A file can carry ten built-in English tracks. With only the
+                                        // language on the main line they all read "English" and nobody —
+                                        // viewer or reviewer — can tell which one is playing or pick a
+                                        // different one on purpose. The track's own name is the only thing
+                                        // that separates them, so it belongs on the line people read.
+                                        // Built-in only: addon labels are full release names and would
+                                        // overflow the row.
+                                        val builtInName = subtitle.label.takeIf {
+                                            subtitle.isEmbedded && it.isNotBlank() &&
+                                                !it.equals(langName, ignoreCase = true)
+                                        }
+                                        val namedLabel = if (builtInName != null) "$langName — $builtInName" else langName
                                         // Built-in tracks show no match % — muxed is assumed synced,
                                         // so a fake 100% is misleading; only addon subs carry a real score.
-                                        val mainLabel = (if (!subtitle.isEmbedded && score > 0) "$langName ($score%)" else langName) + offsetNote
+                                        val mainLabel = (if (!subtitle.isEmbedded && score > 0) "$namedLabel ($score%)" else namedLabel) + offsetNote
                                         val badge: String?
                                         val detail: String?
                                         if (subtitle.isEmbedded && subtitle.url.isBlank()) {
-                                            val langFullName = getFullLanguageName(subtitle.lang)
-                                            val trackLabel = subtitle.label.takeIf { it.isNotBlank() &&
-                                                !it.equals(langFullName, ignoreCase = true) }
                                             badge = listOfNotNull(
-                                                "Built-in", trackLabel, if (subtitle.isForced) "Forced" else null
+                                                stringResource(R.string.settings_source_builtin),
+                                                if (subtitle.isForced) stringResource(R.string.settings_value_forced) else null
                                             ).joinToString(" · ")
                                             detail = null
                                         } else {
                                             badge = listOfNotNull(
-                                                subtitle.provider.ifBlank { null }, if (subtitle.isForced) "Forced" else null
+                                                subtitle.provider.ifBlank { null },
+                                                if (subtitle.isForced) stringResource(R.string.settings_value_forced) else null
                                             ).joinToString(" · ").ifBlank { null }
                                             detail = subtitle.id
                                                 .replace(PlayerScreenRegexes.BRACKET_REGEX, "").trim()
@@ -5078,7 +6702,7 @@ private fun SubtitleMenu(
                     .fillMaxHeight(0.70f)
                     .align(Alignment.BottomCenter)
                     .background(
-                        Color(0xFF1A1A1A),
+                        BackgroundElevated,
                         RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
                     )
                     .clickable(
@@ -5095,7 +6719,11 @@ private fun SubtitleMenu(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = if (mobileTab == 0) "Subtitles" else "Audio",
+                        text = if (mobileTab == 0) {
+                            stringResource(R.string.subtitles)
+                        } else {
+                            stringResource(R.string.audio)
+                        },
                         style = ArflixTypography.body.copy(
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold
@@ -5127,7 +6755,10 @@ private fun SubtitleMenu(
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf("Subtitles" to 0, "Audio" to 1).forEach { (label, tabIndex) ->
+                    listOf(
+                        stringResource(R.string.subtitles) to 0,
+                        stringResource(R.string.audio) to 1
+                    ).forEach { (label, tabIndex) ->
                         val selected = mobileTab == tabIndex
                         Box(
                             modifier = Modifier
@@ -5140,10 +6771,10 @@ private fun SubtitleMenu(
                                 }
                                 .background(
                                     if (selected) Color.White.copy(alpha = 0.15f) else Color.Transparent,
-                                    RoundedCornerShape(20.dp)
+                                    RoundedCornerShape(16.dp)
                                 )
                                 .then(
-                                    if (selected) Modifier.border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(20.dp))
+                                    if (selected) Modifier.border(1.dp, Color.White.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
                                     else Modifier
                                 )
                                 .padding(horizontal = 20.dp, vertical = 8.dp)
@@ -5181,7 +6812,7 @@ private fun SubtitleMenu(
                         // "Off" option
                         item {
                             MobileTrackItem(
-                                name = "Off",
+                                name = stringResource(R.string.off),
                                 description = null,
                                 isSelected = selectedSubtitle == null && !isLiveAudioTranslating,
                                 onClick = { onSelectSubtitle(0) }
@@ -5218,7 +6849,7 @@ private fun SubtitleMenu(
                             if (isLiveAudioGroup) {
                                 item(key = "mobile_live_audio_item") {
                                     MobileTrackItem(
-                                        name = "Translate Audio",
+                                        name = stringResource(R.string.player_audio_translate),
                                         description = "AI",
                                         isSelected = isLiveAudioTranslating,
                                         onClick = { onToggleLiveAudio(); onClose() }
@@ -5235,8 +6866,12 @@ private fun SubtitleMenu(
                             if (isMatchGroup) {
                                 item(key = "mobile_find_best_match_item") {
                                     MobileTrackItem(
-                                        name = if (isFindingBestMatch) "Scanning…" else "Find Best Match",
-                                        description = "Auto",
+                                        name = if (isFindingBestMatch) {
+                                            stringResource(R.string.player_subtitle_scanning)
+                                        } else {
+                                            stringResource(R.string.player_subtitle_find_best_match)
+                                        },
+                                        description = stringResource(R.string.auto),
                                         isSelected = isFindingBestMatch,
                                         onClick = { onFindBestMatch(); onClose() }
                                     )
@@ -5270,20 +6905,29 @@ private fun SubtitleMenu(
                                 item(key = "mobile_${sub.id}") {
                                     val score = subtitleMatchScore(streamSource, sub)
                                     val langFullName = getFullLanguageName(sub.lang)
-                                    val offsetNote = matchedOffsetMsFor(selectedSubtitle, sub.id)
-                                        ?.let { " · ${formatMatchOffset(it)}" } ?: ""
+                                    val offsetNote = autoSyncNote(
+                                        autoSync.takeIf { isSameSubtitleTrack(selectedSubtitle, sub.id) },
+                                        retimed = isRetimedCopyOf(selectedSubtitle, sub.id),
+                                    )
+                                    // Same reason as the list above: without the track's own name, every
+                                    // built-in English track reads "English" and none can be told apart.
+                                    val builtInName = sub.label.takeIf {
+                                        sub.isEmbedded && it.isNotBlank() &&
+                                            !it.equals(langFullName, ignoreCase = true)
+                                    }
+                                    val namedLabel = if (builtInName != null) "$langFullName — $builtInName" else langFullName
                                     // No fake % on built-in tracks; only addon subs carry a real score.
-                                    val displayName = (if (!sub.isEmbedded && score > 0) "$langFullName ($score%)" else langFullName) + offsetNote
+                                    val displayName = (if (!sub.isEmbedded && score > 0) "$namedLabel ($score%)" else namedLabel) + offsetNote
                                     val description = when {
                                         sub.isEmbedded && sub.url.isBlank() -> {
-                                            val trackLabel = sub.label.takeIf { it.isNotBlank() &&
-                                                !it.equals(langFullName, ignoreCase = true) }
                                             listOfNotNull(
-                                                "Built-in", trackLabel, if (sub.isForced) "Forced" else null
+                                                stringResource(R.string.settings_source_builtin),
+                                                if (sub.isForced) stringResource(R.string.settings_value_forced) else null
                                             ).joinToString(" · ")
                                         }
                                         else -> listOfNotNull(
-                                            sub.provider.ifBlank { null }, if (sub.isForced) "Forced" else null
+                                            sub.provider.ifBlank { null },
+                                            if (sub.isForced) stringResource(R.string.settings_value_forced) else null
                                         ).joinToString(" · ").ifBlank { null }
                                     }
                                     MobileTrackItem(
@@ -5366,10 +7010,10 @@ private fun TabButton(
             .clickable { onClick() }
             .background(
                 if (isSelected) Color.White.copy(alpha = 0.2f) else Color.Transparent,
-                RoundedCornerShape(20.dp)
+                RoundedCornerShape(16.dp)
             )
             .then(
-                if (isSelected) Modifier.border(1.dp, Color.White, RoundedCornerShape(20.dp))
+                if (isSelected) Modifier.border(1.dp, Color.White, RoundedCornerShape(16.dp))
                 else Modifier
             )
             .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -5482,7 +7126,7 @@ private fun LangPanelItem(
                 modifier = Modifier
                     .background(
                         if (isFocused) Color.Black.copy(alpha = 0.2f) else Color.White.copy(alpha = 0.15f),
-                        RoundedCornerShape(10.dp)
+                        RoundedCornerShape(12.dp)
                     )
                     .padding(horizontal = 5.dp, vertical = 1.dp)
             ) {
@@ -5595,6 +7239,36 @@ private fun formatFileSize(bytes: Long): String {
     }
 }
 
+/**
+ * A YouTube collection video: its video URL, merged with the separate audio track when the
+ * stream has one. Kept out of [PlayerScreen] on purpose: R8 miscompiles that method once it
+ * grows (a dropped register move makes ART reject the class with a VerifyError in release
+ * builds only; see settings.gradle.kts). Add new playback branches as functions like this one.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+private fun youTubeCollectionMediaSource(
+    context: Context,
+    extractorsFactory: androidx.media3.extractor.ExtractorsFactory,
+    mediaItem: MediaItem,
+    audioUrl: String?
+): MediaSource {
+    val web = if (!audioUrl.isNullOrBlank()) {
+        com.arflix.tv.data.api.YoutubeChunkedDataSourceFactory()
+    } else {
+        androidx.media3.datasource.DefaultHttpDataSource.Factory()
+            .setUserAgent(com.arflix.tv.data.api.YOUTUBE_TRAILER_USER_AGENT)
+    }
+    // The same source also loads side-loaded subtitles, which are local files (Preload Subtitles):
+    // DefaultDataSource reads file:// and content:// itself and hands only web URLs to [web].
+    val factory = DefaultMediaSourceFactory(context, extractorsFactory)
+        .setDataSourceFactory(androidx.media3.datasource.DefaultDataSource.Factory(context, web))
+    val videoSource = factory.createMediaSource(mediaItem)
+    if (audioUrl.isNullOrBlank()) return videoSource
+    return androidx.media3.exoplayer.source.MergingMediaSource(
+        videoSource, factory.createMediaSource(MediaItem.fromUri(audioUrl))
+    )
+}
+
 private fun detectAudioCodecLabel(codec: String?, trackLabel: String?): String? {
     val haystack = buildString {
         codec?.let {
@@ -5634,21 +7308,29 @@ private fun detectAudioCodecLabel(codec: String?, trackLabel: String?): String? 
 // match (which strips at the last ':', past ExoPlayer's "periodIndex:") still resolves the base id.
 private const val ADDON_SUB_ID_PREFIX = "arvio-addon-sub:"
 
-// Marker appended to a served subtitle's id when a constant-offset rescue was baked in
-// ("…#ofs2000"). Kept in sync with PlayerViewModel.MATCH_OFFSET_ID_MARKER.
-private const val MATCH_OFFSET_ID_MARKER = "#ofs"
-
-/** A subtitle id with any offset-rescue marker stripped. */
-private fun subtitleBaseId(id: String): String = id.substringBefore(MATCH_OFFSET_ID_MARKER)
-
-/** True when [selected] is [rowId]'s track, ignoring an offset marker on either side. */
+/**
+ * True when [selected] is [rowId]'s track. Constant corrections are applied live by the text
+ * renderer, so that copy keeps the addon's own id; a cue-by-cue retime is a rewritten file served
+ * under "…#retimed" (see [RETIMED_SUBTITLE_ID_SUFFIX]), which this sees through.
+ */
 private fun isSameSubtitleTrack(selected: Subtitle?, rowId: String): Boolean =
-    selected != null && subtitleBaseId(selected.id) == subtitleBaseId(rowId)
+    selected != null && (selected.id == rowId || selected.id == rowId + RETIMED_SUBTITLE_ID_SUFFIX)
 
-/** The baked-in rescue offset (ms) when [selected] is [rowId]'s shifted copy, else null. */
-private fun matchedOffsetMsFor(selected: Subtitle?, rowId: String): Long? {
-    if (!isSameSubtitleTrack(selected, rowId)) return null
-    return selected!!.id.substringAfter(MATCH_OFFSET_ID_MARKER, "").toLongOrNull()?.takeIf { it != 0L }
+/** True when [selected] is [rowId]'s retimed copy. */
+private fun isRetimedCopyOf(selected: Subtitle?, rowId: String): Boolean =
+    selected?.id == rowId + RETIMED_SUBTITLE_ID_SUFFIX
+
+/**
+ * Menu suffix for an auto-corrected subtitle: " · fixed +1.0s". The word matters more than the
+ * number — it tells the user this row is no longer the file the addon published, which a bare
+ * "+1.0s" does not.
+ */
+@Composable
+private fun autoSyncNote(sync: SubtitleAutoSync?, retimed: Boolean = false): String {
+    if (retimed) return " · ${stringResource(R.string.player_subtitle_auto_retimed)}"
+    if (sync == null || sync.isIdentity) return ""
+    val fixed = stringResource(R.string.player_subtitle_auto_fixed)
+    return " · $fixed ${formatMatchOffset(sync.offsetMs)}"
 }
 
 /** "+2.0s" / "-1.5s". */
@@ -5731,7 +7413,7 @@ private fun subtitleMimeTypeFromUrl(url: String): String {
 }
 
 @androidx.compose.runtime.Immutable
-private data class PlaybackBufferProfile(
+internal data class PlaybackBufferProfile(
     val minBufferMs: Int,
     val maxBufferMs: Int,
     val bufferForPlaybackMs: Int,
@@ -5741,7 +7423,7 @@ private data class PlaybackBufferProfile(
     val prioritizeTimeOverSizeThresholds: Boolean
 )
 
-private fun buildPlaybackBufferProfile(
+internal fun buildPlaybackBufferProfile(
     memoryClassMb: Int,
     isLowRamDevice: Boolean,
     isTvDevice: Boolean
@@ -5777,10 +7459,14 @@ private fun buildPlaybackBufferProfile(
         heapMb <= 512 -> 6_500
         else -> 8_000
     }
+    // Media3 fixes this duration before track bitrates are known. Keep the existing conservative
+    // limits on byte-capped devices: increasing them can crowd out forward loading on remuxes.
+    // Only time-prioritized devices get the larger in-memory rewind buffer.
     val backBufferMs = when {
         isLowRamDevice || heapMb <= 256 -> 2_000
         heapMb <= 384 -> 3_000
-        else -> 5_000
+        heapMb <= 768 -> 5_000
+        else -> 20_000
     }
 
     return PlaybackBufferProfile(
@@ -5837,44 +7523,50 @@ private fun estimateInitialStartupTimeoutMs(
 private fun playbackErrorMessageFor(
     error: androidx.media3.common.PlaybackException,
     hasPlaybackStarted: Boolean
-): String {
-    val reason = when (error.errorCode) {
-        androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
-        androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
-        androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
-        androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
-            "Codec not supported by this device"
+): PlayerMessage {
+    val reason = PlayerMessage.Res(
+        when (error.errorCode) {
+            androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+            androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+            androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+            androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
+                R.string.player_err_codec_unsupported
 
-        androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
-        androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-        androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT ->
-            "Network timeout while loading source"
+            androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+            androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+            androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT ->
+                R.string.player_err_network_timeout
 
-        androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
-            "Source server rejected playback request"
+            androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+                R.string.player_err_http_rejected
 
-        androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
-        androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
-            "Source format is invalid or unsupported"
+            androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+            androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
+                R.string.player_err_container_invalid
 
-        else -> "Source failed to play"
-    }
+            else -> R.string.player_err_failed_to_play
+        }
+    )
 
-    return if (hasPlaybackStarted) {
-        "$reason. Try another source."
-    } else {
-        "$reason during startup. Trying another source may work."
-    }
+    return PlayerMessage.Res(
+        if (hasPlaybackStarted) {
+            R.string.player_err_try_another
+        } else {
+            R.string.player_err_startup_try_another
+        },
+        listOf(reason)
+    )
 }
 
 /**
- * Short, user-facing reason for a playback failure — shown on the "switching source" notice and the
- * terminal error. it unwraps the cause chain for an HTTP
- * status (blocked/removed/expired/rate-limited/unavailable) and otherwise distinguishes
- * decode/unsupported vs invalid-content vs timeout/offline, so the user gets a real clue instead of
- * a generic "failed".
+ * User-facing reason for a playback failure — unwraps the cause chain for HTTP status
+ * (blocked/removed/expired/rate-limited/unavailable), decode/unsupported codecs,
+ * container corruption, and network timeouts.
  */
-private fun classifyPlaybackFailure(error: androidx.media3.common.PlaybackException): String {
+private fun classifyPlaybackFailure(
+    context: android.content.Context,
+    error: androidx.media3.common.PlaybackException
+): String {
     // Walk the cause chain looking for an HTTP status — the most actionable signal.
     var cause: Throwable? = error
     var httpStatus = -1
@@ -5886,12 +7578,12 @@ private fun classifyPlaybackFailure(error: androidx.media3.common.PlaybackExcept
     }
     if (httpStatus > 0) {
         return when (httpStatus) {
-            403 -> "Source blocked"
-            404 -> "Source removed"
-            410 -> "Source expired"
-            429 -> "Source rate-limited"
-            in 500..599 -> "Source unavailable"
-            else -> "Source error ($httpStatus)"
+            401, 403 -> context.getString(R.string.player_err_source_blocked)
+            404 -> context.getString(R.string.player_err_source_removed)
+            410 -> context.getString(R.string.player_err_source_expired)
+            429 -> context.getString(R.string.player_err_source_rate_limited)
+            in 500..599 -> context.getString(R.string.player_err_source_unavailable)
+            else -> context.getString(R.string.player_err_source_status, httpStatus)
         }
     }
 
@@ -5903,25 +7595,32 @@ private fun classifyPlaybackFailure(error: androidx.media3.common.PlaybackExcept
     val isDns = "unknownhost" in msg || "unable to resolve host" in msg ||
         "no address associated with hostname" in msg
 
-    return when {
-        isDns -> "Source offline"
-        error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
-            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
-            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED ||
-            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ||
-            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
-            "Video format not supported by this device"
-        error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
-            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
-            "Unplayable content"
-        error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT ||
-            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
-            "timeout" in msg || "timed out" in msg || "sockettimeout" in msg ->
-            "Source too slow to load"
-        error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
-            "Source rejected request"
-        else -> "Playback error"
-    }
+    return context.getString(
+        when {
+            isDns -> R.string.player_err_source_offline
+            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FAILED ||
+                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED ||
+                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED ||
+                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES ->
+                R.string.player_err_format_unsupported
+            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED ||
+                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED ->
+                R.string.player_err_format_unsupported
+            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
+                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ->
+                R.string.player_err_unplayable_content
+            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT ||
+                error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+                "timeout" in msg || "timed out" in msg || "sockettimeout" in msg ->
+                R.string.player_fail_source_too_slow
+            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
+                R.string.player_err_source_rejected
+            error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+                R.string.player_err_source_rejected
+            else -> R.string.player_err_playback
+        }
+    )
 }
 
 private fun parseSizeToBytes(sizeStr: String): Long {
@@ -6019,35 +7718,26 @@ private fun isLikelyDolbyVisionStream(stream: StreamSource?): Boolean {
 
 private const val PLAYER_SCREEN_DIAGNOSTICS = true
 
+/**
+ * Why a source was skipped, or why none was left to switch to. A started source gets a
+ * "placeholder check" line each time its status changes (pending, real, placeholder); a source
+ * with no such line never reached a playable state. Warning
+ * level because R8 strips Log.i/d/v from release builds. No URLs, only their host.
+ */
+private fun sourceFailoverLog(message: String) {
+    android.util.Log.w("PlayerSourceFailover", message)
+}
+
+private fun StreamSource?.failoverSummary(): String {
+    if (this == null) return "none"
+    val host = runCatching { java.net.URI(url.orEmpty()).host }.getOrNull() ?: "-"
+    val name = source.replace(Regex("""\s+"""), " ").take(60)
+    return "[$addonId/$quality/${size.ifBlank { "-" }}/host=$host/\"$name\"]"
+}
+
 private fun playbackStartupDiag(message: String) {
     if (PLAYER_SCREEN_DIAGNOSTICS) {
         System.err.println("[PlaybackStartup] $message")
-    }
-}
-
-private fun resolveFrameRateOffStrategy(): Int {
-    return readMedia3FrameRateConst("VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF", fallback = 0)
-}
-
-
-private fun readMedia3FrameRateConst(fieldName: String, fallback: Int): Int {
-    return runCatching { C::class.java.getField(fieldName).getInt(null) }.getOrDefault(fallback)
-}
-
-private object PlaybackCacheSingleton {
-    @Volatile
-    private var instance: SimpleCache? = null
-
-    fun getInstance(context: android.content.Context): SimpleCache {
-        return instance ?: synchronized(this) {
-            instance ?: run {
-                val cacheDir = java.io.File(context.applicationContext.cacheDir, "media3_playback_cache").apply { mkdirs() }
-                val evictor = LeastRecentlyUsedCacheEvictor(256L * 1024L * 1024L)
-                SimpleCache(cacheDir, evictor, StandaloneDatabaseProvider(context.applicationContext)).also {
-                    instance = it
-                }
-            }
-        }
     }
 }
 
@@ -6093,8 +7783,34 @@ private class PlaybackCookieJar : CookieJar {
     }
 }
 
+private fun buildSeekPreviewCacheIdentity(
+    mediaType: MediaType,
+    mediaId: Int,
+    seasonNumber: Int?,
+    episodeNumber: Int?,
+    stream: StreamSource?,
+): String = buildString {
+    // Bump when preview rendering changes so malformed frames from older builds are not reused.
+    append("v5|")
+    append(mediaType.name).append('|').append(mediaId)
+    append('|').append(seasonNumber ?: 0).append('|').append(episodeNumber ?: 0)
+    if (stream != null) {
+        append('|').append(stream.addonId)
+        append('|').append(stream.infoHash.orEmpty()).append('|').append(stream.fileIdx ?: -1)
+        append('|').append(stream.behaviorHints?.videoHash.orEmpty())
+        append('|').append(stream.behaviorHints?.filename.orEmpty())
+        append('|').append(stream.sizeBytes ?: stream.behaviorHints?.videoSize ?: 0L)
+        append('|').append(stream.source)
+        if (stream.infoHash.isNullOrBlank() && stream.behaviorHints?.videoHash.isNullOrBlank()) {
+            append('|').append(
+                stream.preview?.let(::nativePreviewCacheIdentity) ?: stream.url
+            )
+        }
+    }
+}
+
 @Composable
-private fun PlayerMetadataChrome(
+internal fun PlayerMetadataChrome(
     uiState: PlayerUiState,
     mediaType: MediaType,
     seasonNumber: Int?,
@@ -6111,7 +7827,9 @@ private fun PlayerMetadataChrome(
     val selectedStream = uiState.selectedStream
     val streamSizeLabel = selectedStream?.let { formatStreamSizeInGb(it) }
     val hasQualityBadges = selectedStream?.let { buildPlaybackBadges(it).isNotEmpty() } == true
-    val overview = uiState.overview?.trim().orEmpty()
+    val overview = playerPauseOverview(
+        mediaType, seasonNumber, episodeNumber, uiState.seasonEpisodes, uiState.overview
+    )
     val logoHeight = 44.dp
     val logoWidth = 230.dp
     val chromeHeight = when {
@@ -6242,6 +7960,7 @@ private fun PlayerMetaSeparator() {
     )
 }
 
+@Composable
 private fun buildPlaybackBaseMetaLine(
     uiState: PlayerUiState,
     mediaType: MediaType,
@@ -6250,8 +7969,8 @@ private fun buildPlaybackBaseMetaLine(
 ): String {
     val parts = mutableListOf<String>()
     if (mediaType == MediaType.TV) {
-        seasonNumber?.let { parts.add("Season $it") }
-        episodeNumber?.let { parts.add("Episode $it") }
+        seasonNumber?.let { parts.add(stringResource(R.string.season, it)) }
+        episodeNumber?.let { parts.add(stringResource(R.string.episode, it)) }
     } else {
         uiState.releaseYear?.trim()?.takeIf { it.isNotBlank() }?.let { parts.add(it) }
     }
@@ -6366,7 +8085,7 @@ private fun PlayerSubtitleSettingRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(rowBg, RoundedCornerShape(10.dp))
+            .background(rowBg, RoundedCornerShape(12.dp))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -6388,7 +8107,7 @@ private fun PlayerSubtitleSettingRow(
             Box(
                 modifier = Modifier
                     .size(40.dp)
-                    .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+                    .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -6410,7 +8129,7 @@ private fun PlayerSubtitleSettingRow(
             Box(
                 modifier = Modifier
                     .size(40.dp)
-                    .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+                    .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,

@@ -67,6 +67,8 @@
     <string name="secondary_subtitle_desc">Langue de sous-titres de secours quand la principale est indisponible</string>
     <string name="filter_subtitles">Filtrer les sous-titres par langue</string>
     <string name="filter_subtitles_desc">N’affiche que les sous-titres dans votre langue préférée</string>
+    <string name="use_forced_subtitles">Sous-titres forcés</string>
+    <string name="use_forced_subtitles_desc">Préfère les sous-titres forcés lorsque la langue audio correspond à celle des sous-titres ; s’il n’y en a aucun, rien n’est sélectionné</string>
 
     <!-- Playback -->
     <string name="auto_play_next">Lecture auto. du suivant</string>
@@ -167,16 +169,17 @@
     <string name="auto_play_desc">Démarre automatiquement l’épisode suivant</string>
     <string name="autoplay_desc">Désactivé, le sélecteur de source s’ouvre à la lecture</string>
     <string name="auto_play_quality_desc">Qualité minimale pour la lecture auto.</string>
-    <string name="trailer_desc">Lire les bandes-annonces dans la bannière hero</string>
+    <string name="trailer_desc">TV : lancer automatiquement les aperçus de bandes-annonces sur l’accueil</string>
     <string name="trailer_sound">Son des bandes-annonces</string>
-    <string name="trailer_sound_desc">Lire l’audio des bandes-annonces dans la bannière hero</string>
+    <string name="trailer_sound_desc">TV : activer le son des aperçus de bandes-annonces</string>
     <string name="trailer_delay">Délai des bandes-annonces</string>
     <string name="trailer_delay_desc">Secondes avant le démarrage de la bande-annonce</string>
     <string name="trailer_in_cards">Bandes-annonces dans les cartes</string>
-    <string name="trailer_in_cards_desc">TV : lit les bandes-annonces dans la carte sélectionnée au lieu du plein écran</string>
+    <string name="trailer_in_cards_desc">TV : lire les bandes-annonces dans la carte agrandie plutôt que dans l’en-tête</string>
     <string name="frame_rate_desc">Désactivé, fluide ou toujours</string>
     <string name="quality_filters_desc">Exclure des niveaux de qualité sur cet appareil</string>
     <string name="card_layout_desc">Cartes paysage ou affiche</string>
+    <string name="card_layout_netflix_exception_desc">Sans effet sur les rangées standard de l’accueil façon Netflix</string>
     <string name="ui_mode_desc">Forcer TV, tablette ou téléphone</string>
     <string name="skip_profile_desc">Charge auto. le dernier profil utilisé au redémarrage</string>
     <string name="oled_black_background_desc">Utilisez des fonds noir pur pour les écrans OLED</string>
@@ -238,7 +241,7 @@
     <string name="ai_remove_hi_title">Retirer le texte pour malentendants</string>
     <string name="ai_remove_hi_desc">Supprimez les marqueurs pour malentendants [entre crochets] avant la traduction</string>
     <string name="ai_api_key_title">Clé API</string>
-    <string name="ai_api_key_desc">Saisissez manuellement votre clé API Groq ou Gemini</string>
+    <string name="ai_api_key_desc">Saisissez manuellement votre clé API Groq, Gemini ou Claude</string>
     <string name="ai_scan_qr_title">Scanner un QR code pour définir la clé</string>
     <string name="ai_scan_qr_desc">Ouvrez un navigateur sur votre téléphone pour saisir la clé API</string>
     <string name="ai_groq_disclaimer">Offre gratuite Groq : ~30 requêtes/min</string>
@@ -251,7 +254,7 @@
     <string name="ai_api_key_dialog_subtitle_gemini">Saisissez votre clé API Gemini</string>
     <string name="ai_key_saved_title">Clé API enregistrée</string>
     <string name="ai_key_saved_subtitle">La traduction IA est prête à l’emploi</string>
-    <string name="ai_qr_scan_hint">Scannez avec votre téléphone — choisissez Groq ou Gemini</string>
+    <string name="ai_qr_scan_hint">Scannez avec votre téléphone — choisissez Groq, Gemini ou Claude</string>
     <string name="smooth_scrolling">Défilement plus fluide</string>
     <string name="smooth_scrolling_desc">Utilisez des transitions fluides premium dans les rangées d’affiches</string>
 
@@ -293,6 +296,7 @@
 
     <!-- Extracted from code: Settings screen -->
     <string name="settings_home_server">Serveur personnel</string>
+    <string name="library_homeserver_tab">Serveur personnel</string>
     <string name="settings_app_version_label">ARVIO V%1$s</string>
     <string name="settings_label_url">URL</string>
     <string name="settings_home_server_https_note">Utilisez HTTPS quand c’est possible. Les URL de serveur HTTP sont autorisées pour les réseaux locaux mais ne sont pas chiffrées.</string>
@@ -469,7 +473,7 @@
     <string name="settings_help_source_autoplay">Lecture auto de la source</string>
     <string name="settings_help_source_autoplay_desc">Détermine si une source unique démarre immédiatement ou ouvre le sélecteur.</string>
     <string name="settings_help_trailers">Bandes-annonces</string>
-    <string name="settings_help_trailers_desc">Réglez la lecture auto et le son des bandes-annonces sur les bannières hero.</string>
+    <string name="settings_help_trailers_desc">Réglez la lecture auto et le son des bandes-annonces en arrière-plan de l’accueil.</string>
     <string name="settings_help_volume_boost_desc">Amplifie la sortie audio de lecture quand c’est activé.</string>
     <string name="settings_help_playback_desc">Réglez la qualité des sources, la synchro de fréquence d’images et le comportement de lecture.</string>
     <string name="settings_help_interface_desc">Contrôle la mise en page, le mode OLED, l’horloge et le style de focus.</string>
@@ -521,14 +525,13 @@
     <string name="settings_test">Tester</string>
     <string name="settings_cd_qr_code">QR code</string>
     <string name="settings_cd_drag_reorder">Glisser pour réordonner</string>
-    <string name="settings_cd_manage_categories">Gérer les catégories</string>
     <string name="settings_progress_format">%1$s (%2$d%%)</string>
     <string name="settings_refreshing_channels_epg">Actualisation des chaînes et de l’EPG…</string>
     <string name="settings_reload_playlists_now">Recharger les playlists maintenant</string>
     <string name="settings_reload_playlist_epg_now">Recharger la playlist et l’EPG maintenant</string>
     <string name="settings_no_playlists_configured">Aucune playlist configurée</string>
     <string name="settings_remove_playlists_epg">Retirez les playlists, l’EPG et les favoris</string>
-    <string name="settings_add_iptv_lists_hint">Ajoutez jusqu’à 3 listes IPTV M3U / Xtream avec des noms</string>
+    <string name="settings_add_iptv_lists_hint">Ajoutez jusqu’à 10 listes IPTV M3U / Xtream avec des noms</string>
     <string name="settings_create_another_iptv">Créer une autre liste IPTV</string>
     <string name="settings_badge_full">PLEIN</string>
     <string name="settings_badge_add">AJOUTER</string>
@@ -538,16 +541,16 @@
     <string name="settings_badge_delete">SUPPRIMER</string>
     <string name="settings_n_selected">%1$d sélectionné(s)</string>
     <string name="settings_section_playlists">PLAYLISTS</string>
-    <string name="settings_add_tv_lists_hint">Ajoutez jusqu’à 3 listes TV M3U / Xtream</string>
+    <string name="settings_add_tv_lists_hint">Ajoutez jusqu’à 10 listes TV M3U / Xtream</string>
     <string name="settings_create_another_tv">Créer une autre liste TV</string>
     <string name="settings_badge_full_short">Plein</string>
     <string name="settings_search_lists">Rechercher des listes</string>
     <string name="settings_paste_url">Coller une URL</string>
-    <string name="settings_ph_trakt_mdblist">URL Trakt ou MDBList</string>
+    <string name="settings_ph_trakt_mdblist">URL Trakt, MDBList, SIMKL ou TMDB</string>
     <string name="settings_add_url">Ajouter l’URL</string>
     <string name="settings_searching_both_sources">Recherche dans les deux sources</string>
     <string name="settings_lists_found">%1$d listes trouvées</string>
-    <string name="settings_searches_trakt_mdblist">Recherche automatiquement dans Trakt et MDBList</string>
+    <string name="settings_searches_trakt_mdblist">Recherche automatiquement dans Trakt et MDBList, SIMKL</string>
     <string name="settings_tap_field_to_edit">Appuyez sur un champ pour le modifier</string>
     <string name="settings_press_select_to_edit">Appuyez sur Sélectionner sur un champ pour le modifier</string>
     <string name="settings_searching_lists">Recherche des listes</string>
@@ -826,6 +829,7 @@
     <string name="component_label_media">Média</string>
     <string name="component_media_logo">Logo %1$s</string>
     <string name="component_badge_new_episode">Nouvel épisode</string>
+    <string name="component_badge_new_episode_short">Nouveau</string>
     <string name="component_ep_left_one">1 ép restant</string>
     <string name="component_eps_left">%1$d ép restants</string>
     <string name="component_season_episode_marker">S%1$d • E%2$d</string>
@@ -987,6 +991,7 @@
     <string name="profile_updated">Profil mis à jour</string>
     <string name="profile_deleted">Profil supprimé</string>
     <string name="profile_pin_set_success">Code PIN du profil défini</string>
+    <string name="profile_pin_removed_success">Code PIN du profil supprimé</string>
     <string name="tv_failed_load_iptv">Échec du chargement de l’IPTV</string>
     <string name="tv_link_failed_start">Échec du démarrage de l’authentification TV</string>
     <string name="tv_link_failed_poll">Échec de la vérification du statut d’authentification TV</string>
@@ -1135,4 +1140,15 @@
     <string name="live_menu_hide_category">Masquer la catégorie</string>
     <string name="live_menu_unhide_category">Afficher la catégorie</string>
     <string name="ratings">Notes des Épisodes</string>
+
+    <!-- Type on the phone (QR in TV text dialogs) -->
+    <string name="phone_input_button">Utiliser le téléphone</string>
+    <string name="phone_input_button_hide">Masquer le code du téléphone</string>
+    <string name="phone_input_qr_title">📱 Depuis le téléphone</string>
+    <string name="phone_input_qr_hint">Scannez pour le saisir ou le coller sur votre téléphone.</string>
+    <string name="phone_input_page_hint">Ce que vous envoyez s’affiche sur la TV. Appuyez sur OK pour l’enregistrer.</string>
+    <string name="phone_input_page_send">Envoyer à la TV</string>
+    <string name="phone_input_page_sent">Envoyé ✓ — appuyez sur OK sur la TV.</string>
+    <string name="phone_input_page_not_sent">Non envoyé</string>
+    <string name="phone_input_page_expired">Ce code a expiré — scannez à nouveau le QR code sur la TV.</string>
 </resources>

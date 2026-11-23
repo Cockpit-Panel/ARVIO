@@ -24,12 +24,14 @@ class RemoteSyncManager @Inject constructor(
     private val store: SyncProviderStore,
     private val traktProvider: TraktRemoteProvider,
     private val mdbListProvider: MdbListRemoteProvider,
-    private val simklProvider: SimklRemoteProvider
+    private val simklProvider: SimklRemoteProvider,
+    private val wetrakrProvider: com.arflix.tv.data.repository.wetrakr.WeTrakrRemoteProvider? = null
 ) {
     private fun providerFor(provider: SyncProvider): RemoteSyncProvider? = when (provider) {
         SyncProvider.TRAKT -> traktProvider
         SyncProvider.MDBLIST -> mdbListProvider
         SyncProvider.SIMKL -> simklProvider
+        SyncProvider.WETRAKR -> wetrakrProvider
         SyncProvider.NONE -> null
     }
 
@@ -58,16 +60,26 @@ class RemoteSyncManager @Inject constructor(
         } else {
             readers
         }
-        return connected(candidates).isNotEmpty()
+        // SIMKL's connection check may refresh its token. A failure there must not
+        // hide another healthy tracker (or stop its watchlist write).
+        return candidates.mapNotNull(::providerFor).any { provider ->
+            try {
+                provider.isConnected()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     // ===== Watchlist =====
 
     suspend fun addToWatchlist(mediaType: MediaType, tmdbId: Int, isAnime: Boolean = false): Boolean =
-        writeResults { it.addToWatchlist(mediaType, tmdbId, isAnime) }
+        writeResults(allowLocalOnly = true) { it.addToWatchlist(mediaType, tmdbId, isAnime) }
 
     suspend fun removeFromWatchlist(mediaType: MediaType, tmdbId: Int, isAnime: Boolean = false): Boolean =
-        writeResults { it.removeFromWatchlist(mediaType, tmdbId, isAnime) }
+        writeResults(allowLocalOnly = true) { it.removeFromWatchlist(mediaType, tmdbId, isAnime) }
 
     suspend fun getWatchlist(): RemoteWatchlistResult? = coroutineScope {
         val providers = connected(store.readProviders(TrackingFeature.WATCHLIST))
@@ -93,12 +105,21 @@ class RemoteSyncManager @Inject constructor(
         )
     }
 
-    private suspend fun writeResults(block: suspend (RemoteSyncProvider) -> Boolean): Boolean = coroutineScope {
-        val providers = connected(store.writeProviders())
+    private suspend fun writeResults(
+        allowLocalOnly: Boolean = false,
+        block: suspend (RemoteSyncProvider) -> Boolean
+    ): Boolean = coroutineScope {
+        val selected = store.writeProviders()
+        // Reading a connected tracker does not require writing to it. When all
+        // writes are intentionally disabled, let the caller persist to ARVIO.
+        if (selected.isEmpty()) return@coroutineScope allowLocalOnly
+        val providers = selected.mapNotNull(::providerFor)
         providers.map { provider ->
             async {
                 try {
-                    block(provider)
+                    // Include token refresh/connection checks in each provider's
+                    // failure boundary so one broken account cannot block another.
+                    provider.isConnected() && block(provider)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
@@ -124,6 +145,9 @@ class RemoteSyncManager @Inject constructor(
     }
 
     // ===== Scrobble (no-op when no remote is connected) =====
+    //
+    // Remotes identify titles by TMDB id; a native addon item's stand-in id is negative and
+    // means nothing to them, so those plays are never sent.
 
     suspend fun scrobbleStart(
         mediaType: MediaType,
@@ -133,6 +157,7 @@ class RemoteSyncManager @Inject constructor(
         episode: Int? = null,
         isAnime: Boolean = false
     ) {
+        if (tmdbId <= 0) return
         writeAll { it.scrobbleStart(mediaType, tmdbId, progress, season, episode, isAnime) }
     }
 
@@ -144,6 +169,7 @@ class RemoteSyncManager @Inject constructor(
         episode: Int? = null,
         isAnime: Boolean = false
     ) {
+        if (tmdbId <= 0) return
         writeAll { it.scrobblePause(mediaType, tmdbId, progress, season, episode, isAnime) }
     }
 
@@ -155,6 +181,7 @@ class RemoteSyncManager @Inject constructor(
         episode: Int? = null,
         isAnime: Boolean = false
     ) {
+        if (tmdbId <= 0) return
         writeAll { it.scrobbleProgress(mediaType, tmdbId, progress, season, episode, isAnime) }
     }
 
@@ -166,6 +193,7 @@ class RemoteSyncManager @Inject constructor(
         episode: Int? = null,
         isAnime: Boolean = false
     ) {
+        if (tmdbId <= 0) return
         writeAll { it.scrobbleStop(mediaType, tmdbId, progress, season, episode, isAnime) }
     }
 
@@ -195,14 +223,21 @@ class RemoteSyncManager @Inject constructor(
         connected(store.readProviders(TrackingFeature.CONTINUE_WATCHING)).map { provider ->
             async {
                 try {
-                    provider.getContinueWatching(forceRefresh)
+                    Result.success(provider.getContinueWatching(forceRefresh))
                 } catch (e: CancellationException) {
                     throw e
-                } catch (_: Exception) {
-                    emptyList()
+                } catch (error: Exception) {
+                    Result.failure<List<ContinueWatchingItem>>(error)
                 }
             }
-        }.awaitAll().flatten()
+        }.awaitAll().let { results ->
+            val items = results.flatMap { it.getOrDefault(emptyList()) }
+            if (items.isEmpty() && results.any { it.isFailure }) {
+                // An empty response from another provider cannot prove the failed one is empty.
+                throw results.first { it.isFailure }.exceptionOrNull()!!
+            }
+            items
+        }
             .groupBy { it.mediaType to it.id }
             .map { (_, matches) ->
                 matches.maxWithOrNull(

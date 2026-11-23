@@ -1,0 +1,66 @@
+{
+  "name": "My Collections",
+  "collections": [
+    {
+      "id": "studios",
+      "title": "Studios",
+      "folders": [
+        {
+          "id": "pixar",
+          "title": "Pixar",
+          "tileShape": "LANDSCAPE",
+          "sources": [
+            { "provider": "tmdb", "tmdbSourceType": "COMPANY", "tmdbId": 3, "mediaType": "MOVIE", "sortBy": "primary_release_date.desc" }
+          ]
+        },
+        {
+          "id": "a24",
+          "title": "A24",
+          "sources": [
+            { "provider": "tmdb", "tmdbSourceType": "COMPANY", "tmdbId": 41077, "mediaType": "MOVIE" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "israeli",
+      "title": "Israeli",
+      "folders": [
+        {
+          "id": "israeli_movies",
+          "title": "Israeli Movies",
+          "sources": [
+            { "provider": "tmdb", "tmdbSourceType": "DISCOVER", "mediaType": "MOVIE", "filters": { "withOriginalLanguage": "he", "voteCountGte": 20 } }
+          ]
+        },
+        {
+          "id": "israeli_series",
+          "title": "Israeli Series",
+          "sources": [
+            { "provider": "tmdb", "tmdbSourceType": "DISCOVER", "mediaType": "TV", "filters": { "withOriginCountry": "IL" } }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "franchises",
+      "title": "My Franchises",
+      "folders": [
+        {
+          "id": "harry_potter",
+          "title": "Harry Potter",
+          "sources": [
+            { "provider": "tmdb", "tmdbSourceType": "COLLECTION", "tmdbId": 1241, "mediaType": "MOVIE" }
+          ]
+        },
+        {
+          "id": "hbo",
+          "title": "HBO",
+          "sources": [
+            { "provider": "tmdb", "tmdbSourceType": "NETWORK", "tmdbId": 49, "mediaType": "TV" }
+          ]
+        }
+      ]
+    }
+  ]
+}

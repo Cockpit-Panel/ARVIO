@@ -1,7 +1,6 @@
 package com.arflix.tv.util
 
 import com.google.common.truth.Truth.assertThat
-import io.sentry.SentryLevel
 import java.net.UnknownHostException
 import java.util.concurrent.CancellationException
 import javax.net.ssl.SSLHandshakeException
@@ -13,7 +12,7 @@ class CrashReportFilterTest {
         val throwable = CancellationException("Job was cancelled")
 
         assertThat(CrashReportFilter.shouldReportHandledException(throwable)).isFalse()
-        assertThat(CrashReportFilter.shouldSendSentryEvent(throwable, SentryLevel.ERROR)).isFalse()
+        assertThat(CrashReportFilter.shouldSendCrashReport(throwable)).isFalse()
     }
 
     @Test
@@ -30,7 +29,7 @@ class CrashReportFilterTest {
         )
 
         assertThat(CrashReportFilter.shouldReportHandledException(throwable)).isFalse()
-        assertThat(CrashReportFilter.shouldSendSentryEvent(throwable, SentryLevel.ERROR)).isFalse()
+        assertThat(CrashReportFilter.shouldSendCrashReport(throwable)).isFalse()
     }
 
     @Test
@@ -71,14 +70,14 @@ class CrashReportFilterTest {
     fun `keeps real fatal crashes even when message resembles provider failure`() {
         val throwable = UnknownHostException("Unable to resolve host \"provider.example\"")
 
-        assertThat(CrashReportFilter.shouldSendSentryEvent(throwable, SentryLevel.FATAL)).isTrue()
+        assertThat(CrashReportFilter.shouldSendCrashReport(throwable, isFatal = true)).isTrue()
     }
 
     @Test
     fun `keeps fatal crashes with ignored message fragments`() {
         val throwable = IllegalStateException("Trakt token request failed")
 
-        assertThat(CrashReportFilter.shouldSendSentryEvent(throwable, SentryLevel.FATAL)).isTrue()
+        assertThat(CrashReportFilter.shouldSendCrashReport(throwable, isFatal = true)).isTrue()
     }
 
     @Test
@@ -86,12 +85,12 @@ class CrashReportFilterTest {
         val throwable = NullPointerException("items was null")
 
         assertThat(CrashReportFilter.shouldReportHandledException(throwable)).isTrue()
-        assertThat(CrashReportFilter.shouldSendSentryEvent(throwable, SentryLevel.ERROR)).isTrue()
+        assertThat(CrashReportFilter.shouldSendCrashReport(throwable)).isTrue()
     }
 
     @Test
     fun `drops non fatal message only events`() {
-        assertThat(CrashReportFilter.shouldSendSentryEvent(null, SentryLevel.ERROR)).isFalse()
+        assertThat(CrashReportFilter.shouldSendCrashReport(null)).isFalse()
     }
 
     @Test
@@ -99,10 +98,9 @@ class CrashReportFilterTest {
         val throwable = UnknownHostException("Unable to resolve host provider.example")
 
         assertThat(
-            CrashReportFilter.shouldSendSentryEvent(
+            CrashReportFilter.shouldSendCrashReport(
                 throwable = throwable,
-                level = SentryLevel.ERROR,
-                isCrashed = true
+                isFatal = true
             )
         ).isTrue()
     }

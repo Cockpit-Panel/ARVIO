@@ -1,0 +1,9 @@
+{
+  "Play {value0}": "Atskaņot {value0}",
+  "Collection": "Kolekcija",
+  "Watching": "Skatos",
+  "Completed": "Pabeigts",
+  "Dropped": "Pamests",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: izmantojiet ar Jellyfin saderīgu adresi. Neobligāts profils: username#ProfileName. Aizsargāts profils: password#PIN.",
+  "None of your enabled addons provide playback sources.": "Neviens no jūsu iespējotajiem papildinājumiem nenodrošina atskaņošanas avotus."
+}

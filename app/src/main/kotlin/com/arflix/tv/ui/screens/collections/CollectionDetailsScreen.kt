@@ -1,20 +1,29 @@
 package com.arflix.tv.ui.screens.collections
 
-import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -29,9 +38,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -40,6 +49,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -55,10 +65,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.tv.foundation.lazy.grid.TvGridCells
+import androidx.tv.foundation.PivotOffsets
 import androidx.tv.foundation.lazy.grid.TvLazyVerticalGrid
 import androidx.tv.foundation.lazy.grid.itemsIndexed
 import androidx.tv.foundation.lazy.grid.rememberTvLazyGridState
-import coil.compose.AsyncImage
 import com.arflix.tv.R
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.CatalogKind
@@ -71,12 +81,17 @@ import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.data.model.SportsAddonCapabilities
 import com.arflix.tv.data.repository.CatalogRepository
+import com.arflix.tv.data.repository.KidsContentFilter
 import com.arflix.tv.data.repository.MediaRepository
 import com.arflix.tv.data.repository.SportsRepository
 import com.arflix.tv.ui.components.CardLayoutMode
+import com.arflix.tv.ui.components.LocalBottomBarInset
 import com.arflix.tv.ui.components.MediaCard
+import com.arflix.tv.ui.components.movieGenreNameRes
 import com.arflix.tv.ui.components.rememberCatalogueRowLayoutMode
+import com.arflix.tv.ui.components.tvGenreNameRes
 import com.arflix.tv.ui.focus.arvioDpadFocusGroup
+import com.arflix.tv.ui.screens.home.stableHomeRowItemKeys
 import com.arflix.tv.ui.theme.ArflixTypography
 import com.arflix.tv.ui.theme.appBackgroundDark
 import com.arflix.tv.ui.theme.TextPrimary
@@ -87,10 +102,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import javax.inject.Inject
 
 enum class CollectionTab { MOVIES, SERIES }
@@ -101,6 +125,12 @@ enum class CollectionTab { MOVIES, SERIES }
  * [stringResource] at the @Composable display point (see CollectionDetailsScreen).
  */
 private const val COLLECTION_LOAD_FAILED_ERROR = "__collection_load_failed__"
+
+/** Same sentinel mechanism as [COLLECTION_LOAD_FAILED_ERROR], for an unknown collection id. */
+private const val COLLECTION_NOT_FOUND_ERROR = "__collection_not_found__"
+
+/** Prefix for an empty collection whose add-on sources are missing; the add-on ids follow it. */
+private const val COLLECTION_MISSING_ADDON_PREFIX = "__collection_missing_addon__:"
 
 data class CollectionDetailsUiState(
     val catalog: CatalogConfig? = null,
@@ -116,8 +146,16 @@ data class CollectionDetailsUiState(
     val hasMoreSeries: Boolean = false,
     val loadedMovieOffset: Int = 0,
     val loadedSeriesOffset: Int = 0,
-    val error: String? = null
+    val error: String? = null,
+    /** Service pages can be narrowed to a genre per tab; null is every genre. */
+    val genreFilterable: Boolean = false,
+    val movieGenreId: Int? = null,
+    val seriesGenreId: Int? = null,
+    /** A streaming service shown as its own Home (ServiceHomeScreen) instead of the grid. */
+    val serviceHome: Boolean = false,
+    val initialTab: CollectionTab? = null
 ) {
+    fun genreId(tab: CollectionTab): Int? = if (tab == CollectionTab.MOVIES) movieGenreId else seriesGenreId
     val hasMovies: Boolean get() = movieItems.isNotEmpty()
     val hasSeries: Boolean get() = seriesItems.isNotEmpty()
 }
@@ -126,12 +164,39 @@ data class CollectionDetailsUiState(
 class CollectionDetailsViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val mediaRepository: MediaRepository,
-    private val sportsRepository: SportsRepository
+    private val sportsRepository: SportsRepository,
+    private val kidsContentFilter: KidsContentFilter
 ) : ViewModel() {
+    val kidsFilterState: StateFlow<KidsContentFilter.State> = kidsContentFilter.state
+
+    /** The collection as a kids profile may see it; others get [state] unchanged. */
+    fun applyKidsFilter(
+        state: CollectionDetailsUiState,
+        kids: KidsContentFilter.State
+    ): CollectionDetailsUiState {
+        if (!kids.isActive) return state
+        return state.copy(
+            movieItems = kidsContentFilter.filter(state.movieItems, kids),
+            seriesItems = kidsContentFilter.filter(state.seriesItems, kids)
+        )
+    }
     private val _uiState = MutableStateFlow(CollectionDetailsUiState())
     val uiState: StateFlow<CollectionDetailsUiState> = _uiState.asStateFlow()
     private val _cardLogoUrls = MutableStateFlow<Map<String, String>>(emptyMap())
     val cardLogoUrls: StateFlow<Map<String, String>> = _cardLogoUrls.asStateFlow()
+    private val _providerLogos = MutableStateFlow<Map<String, String?>>(emptyMap())
+    val providerLogos: StateFlow<Map<String, String?>> = _providerLogos.asStateFlow()
+    private var providerJob: Job? = null
+    private var collectionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
+    private var collectionScope = CoroutineScope(viewModelScope.coroutineContext + collectionJob)
+    private var loadJob: Job? = null
+    private var loadedCatalogId: String? = null
+    private var loadGeneration = 0L
+    private val detailsSemaphore = Semaphore(2)
+    private val detailJobs = mutableMapOf<Pair<MediaType, Int>, Job>()
+    private val detailAttempts = mutableSetOf<Pair<MediaType, Int>>()
+    private val enrichedDetails = mutableMapOf<Pair<MediaType, Int>, MediaItem>()
+    private var visibleDetailKeys = emptySet<Pair<MediaType, Int>>()
 
     private companion object {
         const val FIRST_PAGE = 8
@@ -140,51 +205,136 @@ class CollectionDetailsViewModel @Inject constructor(
         const val TMDB_COLLECTION_PREFIX = "tmdb_collection:"
     }
 
-    fun load(catalogId: String) {
-        viewModelScope.launch {
-            val normalizedCatalogId = normalizeCatalogId(catalogId)
-            // Skip reload if this catalog is already loaded — the composable is re-entered
-            // after back navigation (Navigation Compose tears down composables on forward nav)
-            // and we want to preserve all paginated data so saved scroll positions stay valid.
-            val current = _uiState.value
-            if (current.catalog?.id == normalizedCatalogId && !current.isLoadingMovies && !current.isLoadingSeries) return@launch
-
-            _uiState.value = CollectionDetailsUiState(isLoadingMovies = true, isLoadingSeries = true)
-            val catalog = sportsRepository.sportsCollectionCatalog(normalizedCatalogId)
+    /**
+     * [serviceHome] lets a streaming service open as its Home-like page; the grid otherwise.
+     * [serviceRowId] opens the full query for one row rather than the whole service.
+     */
+    fun load(catalogId: String, serviceHome: Boolean = false, serviceRowId: String? = null, serviceFilter: String? = null) {
+        val normalizedCatalogId = normalizeCatalogId(catalogId)
+        // Preserve partial and paginated data when composition is recreated during a load.
+        if (loadedCatalogId == normalizedCatalogId &&
+            (loadJob?.isActive == true || (_uiState.value.catalog != null &&
+                !_uiState.value.isLoadingMovies && !_uiState.value.isLoadingSeries))
+        ) return
+        val generation = restartCollectionScope()
+        loadedCatalogId = normalizedCatalogId
+        enrichedDetails.clear()
+        visibleDetailKeys = emptySet()
+        _cardLogoUrls.value = emptyMap()
+        _providerLogos.value = emptyMap()
+        _uiState.value = CollectionDetailsUiState()
+        loadJob = collectionScope.launch {
+            val baseCatalog = sportsRepository.sportsCollectionCatalog(normalizedCatalogId)
                 ?: catalogRepository.getCatalogs().firstOrNull { it.id == normalizedCatalogId || it.id == catalogId }
                 ?: syntheticTmdbCollectionCatalog(normalizedCatalogId)
+            ensureCurrentLoad(generation)
+            val filter = ServiceHome.Filter.entries.firstOrNull { it.name == serviceFilter } ?: ServiceHome.Filter.ALL
+            val serviceRow = if (baseCatalog != null && serviceRowId != null) {
+                ServiceHome.gridRow(baseCatalog, java.time.LocalDate.now(), serviceRowId, filter)
+            } else null
+            val catalog = if (serviceRowId == null) baseCatalog else serviceRow?.catalog
             if (catalog == null) {
                 _uiState.value = CollectionDetailsUiState(
                     isLoadingMovies = false,
                     isLoadingSeries = false,
-                    error = "Collection not found"
+                    error = COLLECTION_NOT_FOUND_ERROR
                 )
                 return@launch
             }
+            if (serviceHome && ServiceHome.supports(catalog)) {
+                // ServiceHomeViewModel loads the page's rows; the grid's tabs are never needed.
+                _uiState.value = CollectionDetailsUiState(
+                    catalog = catalog,
+                    isLoadingMovies = false,
+                    isLoadingSeries = false,
+                    serviceHome = true
+                )
+                return@launch
+            }
+            val genreFilterable = ServiceGenreFilter.supports(catalog)
+            val requestedTab = serviceRow?.viewAll?.tab
+                ?: ServiceHome.grid(filter).tab.takeIf { serviceFilter != null && genreFilterable }
             _uiState.value = CollectionDetailsUiState(
                 catalog = catalog,
                 supportsMovies = supportsTab(catalog, CollectionTab.MOVIES),
                 supportsSeries = supportsTab(catalog, CollectionTab.SERIES),
                 isLoadingMovies = true,
-                isLoadingSeries = true
+                isLoadingSeries = true,
+                genreFilterable = genreFilterable,
+                initialTab = requestedTab
             )
 
-            val primaryTab = when {
+            val primaryTab = requestedTab?.takeIf { supportsTab(catalog, it) } ?: when {
                 _uiState.value.supportsMovies -> CollectionTab.MOVIES
                 _uiState.value.supportsSeries -> CollectionTab.SERIES
                 else -> CollectionTab.MOVIES
             }
-            loadInitialTab(catalog, primaryTab)
-            launch {
-                delay(1200L)
-                val secondaryTab = if (primaryTab == CollectionTab.MOVIES) CollectionTab.SERIES else CollectionTab.MOVIES
-                if (supportsTab(catalog, secondaryTab)) {
-                    loadInitialTab(catalog, secondaryTab)
-                } else {
-                    _uiState.value = when (secondaryTab) {
-                        CollectionTab.MOVIES -> _uiState.value.copy(isLoadingMovies = false)
-                        CollectionTab.SERIES -> _uiState.value.copy(isLoadingSeries = false)
-                    }
+            loadTabs(catalog, primaryTab, generation, loadSecondary = true)
+        }
+    }
+
+    /**
+     * Narrow [tab] to [genreId] (null for every genre) and reload it from the first page.
+     * The other tab keeps its loaded pages even if an append was in flight.
+     */
+    fun selectGenre(tab: CollectionTab, genreId: Int?) {
+        val state = _uiState.value
+        val catalog = state.catalog ?: return
+        if (!state.genreFilterable || state.genreId(tab) == genreId) return
+        val other = if (tab == CollectionTab.MOVIES) CollectionTab.SERIES else CollectionTab.MOVIES
+        val otherLoaded = when (other) {
+            CollectionTab.MOVIES -> !state.isLoadingMovies
+            CollectionTab.SERIES -> !state.isLoadingSeries
+        }
+        val generation = restartCollectionScope()
+        _uiState.value = CollectionDetailsUiState(
+            catalog = catalog,
+            supportsMovies = state.supportsMovies,
+            supportsSeries = state.supportsSeries,
+            isLoadingMovies = true,
+            isLoadingSeries = true,
+            genreFilterable = true,
+            movieGenreId = if (tab == CollectionTab.MOVIES) genreId else state.movieGenreId,
+            seriesGenreId = if (tab == CollectionTab.SERIES) genreId else state.seriesGenreId
+        ).let { reset ->
+            if (!otherLoaded) reset else when (other) {
+                CollectionTab.MOVIES -> reset.copy(
+                    movieItems = state.movieItems, isLoadingMovies = false, hasMoreMovies = state.hasMoreMovies,
+                    loadedMovieOffset = state.loadedMovieOffset
+                )
+                CollectionTab.SERIES -> reset.copy(
+                    seriesItems = state.seriesItems, isLoadingSeries = false, hasMoreSeries = state.hasMoreSeries,
+                    loadedSeriesOffset = state.loadedSeriesOffset
+                )
+            }
+        }
+        loadJob = collectionScope.launch { loadTabs(catalog, tab, generation, loadSecondary = !otherLoaded) }
+    }
+
+    /** Cancels every in-flight page, logo and detail request of the previous load. */
+    private fun restartCollectionScope(): Long {
+        loadGeneration += 1
+        collectionJob.cancel()
+        collectionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
+        collectionScope = CoroutineScope(viewModelScope.coroutineContext + collectionJob)
+        detailJobs.clear()
+        detailAttempts.clear()
+        return loadGeneration
+    }
+
+    private suspend fun loadTabs(catalog: CatalogConfig, primaryTab: CollectionTab, generation: Long, loadSecondary: Boolean) {
+        loadInitialTab(catalog, primaryTab, generation)
+        if (!loadSecondary) return
+        collectionScope.launch {
+            delay(1200L)
+            ensureCurrentLoad(generation)
+            val secondaryTab = if (primaryTab == CollectionTab.MOVIES) CollectionTab.SERIES else CollectionTab.MOVIES
+            if (supportsTab(catalog, secondaryTab)) {
+                loadInitialTab(catalog, secondaryTab, generation)
+            } else {
+                _uiState.value = when (secondaryTab) {
+                    CollectionTab.MOVIES -> _uiState.value.copy(isLoadingMovies = false)
+                    CollectionTab.SERIES -> _uiState.value.copy(isLoadingSeries = false)
                 }
             }
         }
@@ -225,29 +375,65 @@ class CollectionDetailsViewModel @Inject constructor(
         )
     }
 
-    private suspend fun loadInitialTab(catalog: CatalogConfig, tab: CollectionTab) {
-        val page = runCatching { loadCollectionPage(catalog, tab, offset = 0, limit = FIRST_PAGE) }.getOrNull()
+    private suspend fun loadInitialTab(catalog: CatalogConfig, tab: CollectionTab, generation: Long) {
+        val requestScope = collectionScope
+        val page = collectionResultOrNull {
+            loadCollectionPage(catalog, tab, offset = 0, limit = FIRST_PAGE, onItemsAvailable = { items ->
+                // Repository callbacks may arrive off Main; serialize with enrichment and final publication.
+                requestScope.launch {
+                    ensureCurrentLoad(generation)
+                    val state = _uiState.value
+                    val loading = if (tab == CollectionTab.MOVIES) state.isLoadingMovies else state.isLoadingSeries
+                    if (!loading) return@launch
+                    val partial = mergeEnrichedItems(items.filter { it.mediaType == tab.mediaType() })
+                    _uiState.value = when (tab) {
+                        CollectionTab.MOVIES -> state.copy(movieItems = partial)
+                        CollectionTab.SERIES -> state.copy(seriesItems = partial)
+                    }
+                }
+            })
+        }
+        ensureCurrentLoad(generation)
         val pageItems = when (tab) {
-            CollectionTab.MOVIES -> page?.items.orEmpty().filter { it.mediaType == MediaType.MOVIE }
-            CollectionTab.SERIES -> page?.items.orEmpty().filter { it.mediaType == MediaType.TV }
+            CollectionTab.MOVIES -> (page?.items ?: _uiState.value.movieItems).filter { it.mediaType == MediaType.MOVIE }
+            CollectionTab.SERIES -> (page?.items ?: _uiState.value.seriesItems).filter { it.mediaType == MediaType.TV }
+        }
+        val missingAddons = if (page != null && pageItems.isEmpty() &&
+            !SportsAddonCapabilities.isSportsCollectionCatalogId(catalog.id)
+        ) {
+            try {
+                mediaRepository.missingCollectionAddons(catalogForTab(catalog, tab))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emptyList()
+            }
+        } else {
+            emptyList()
+        }
+        ensureCurrentLoad(generation)
+        val pageError = when {
+            page == null -> COLLECTION_LOAD_FAILED_ERROR
+            missingAddons.isNotEmpty() -> COLLECTION_MISSING_ADDON_PREFIX + missingAddons.joinToString(", ")
+            else -> null
         }
         val decoratedCatalog = decorateSportsCatalogWithArtwork(catalog, pageItems)
         _uiState.value = when (tab) {
             CollectionTab.MOVIES -> _uiState.value.copy(
                 catalog = decoratedCatalog,
-                movieItems = pageItems,
+                movieItems = mergeEnrichedItems(pageItems),
                 isLoadingMovies = false,
                 hasMoreMovies = page?.hasMore == true,
-                loadedMovieOffset = pageItems.size,
-                error = _uiState.value.error ?: if (page == null) COLLECTION_LOAD_FAILED_ERROR else null
+                loadedMovieOffset = page?.nextOffset ?: pageItems.size,
+                error = _uiState.value.error ?: pageError
             )
             CollectionTab.SERIES -> _uiState.value.copy(
                 catalog = decoratedCatalog,
-                seriesItems = pageItems,
+                seriesItems = mergeEnrichedItems(pageItems),
                 isLoadingSeries = false,
                 hasMoreSeries = page?.hasMore == true,
-                loadedSeriesOffset = pageItems.size,
-                error = _uiState.value.error ?: if (page == null) COLLECTION_LOAD_FAILED_ERROR else null
+                loadedSeriesOffset = page?.nextOffset ?: pageItems.size,
+                error = _uiState.value.error ?: pageError
             )
         }
         preloadLogos(pageItems.take(2))
@@ -256,8 +442,9 @@ class CollectionDetailsViewModel @Inject constructor(
             CollectionTab.SERIES -> _uiState.value.hasMoreSeries
         }
         if (hasMore) {
-            viewModelScope.launch {
+            requestScope.launch {
                 delay(BACKGROUND_PREFETCH_DELAY_MS)
+                ensureCurrentLoad(generation)
                 loadMoreIfNeeded(tab)
             }
         }
@@ -275,34 +462,37 @@ class CollectionDetailsViewModel @Inject constructor(
             CollectionTab.MOVIES -> state.copy(isLoadingMoreMovies = true)
             CollectionTab.SERIES -> state.copy(isLoadingMoreSeries = true)
         }
-        viewModelScope.launch {
+        val generation = loadGeneration
+        collectionScope.launch {
             val pageCatalog = catalogForTab(catalog, tab)
             val nextOffset = when (tab) {
                 CollectionTab.MOVIES -> state.loadedMovieOffset
                 CollectionTab.SERIES -> state.loadedSeriesOffset
             }
-            val next = runCatching { loadCollectionPage(pageCatalog, tab, offset = nextOffset, limit = PAGE_STEP) }.getOrNull()
+            val next = collectionResultOrNull { loadCollectionPage(pageCatalog, tab, offset = nextOffset, limit = PAGE_STEP) }
+            ensureCurrentLoad(generation)
             val freshItems = when (tab) {
                 CollectionTab.MOVIES -> next?.items.orEmpty().filter { it.mediaType == MediaType.MOVIE }
                 CollectionTab.SERIES -> next?.items.orEmpty().filter { it.mediaType == MediaType.TV }
             }
+            val current = _uiState.value
             val existingIds = when (tab) {
-                CollectionTab.MOVIES -> state.movieItems.mapTo(HashSet()) { it.id to it.mediaType }
-                CollectionTab.SERIES -> state.seriesItems.mapTo(HashSet()) { it.id to it.mediaType }
+                CollectionTab.MOVIES -> current.movieItems.mapTo(HashSet()) { it.id to it.mediaType }
+                CollectionTab.SERIES -> current.seriesItems.mapTo(HashSet()) { it.id to it.mediaType }
             }
             val uniqueNew = freshItems.filter { (it.id to it.mediaType) !in existingIds }
             _uiState.value = when (tab) {
                 CollectionTab.MOVIES -> _uiState.value.copy(
-                    movieItems = state.movieItems + uniqueNew,
+                    movieItems = current.movieItems + mergeEnrichedItems(uniqueNew),
                     isLoadingMoreMovies = false,
                     hasMoreMovies = next?.hasMore == true,
-                    loadedMovieOffset = state.loadedMovieOffset + freshItems.size
+                    loadedMovieOffset = next?.nextOffset ?: (state.loadedMovieOffset + freshItems.size)
                 )
                 CollectionTab.SERIES -> _uiState.value.copy(
-                    seriesItems = state.seriesItems + uniqueNew,
+                    seriesItems = current.seriesItems + mergeEnrichedItems(uniqueNew),
                     isLoadingMoreSeries = false,
                     hasMoreSeries = next?.hasMore == true,
-                    loadedSeriesOffset = state.loadedSeriesOffset + freshItems.size
+                    loadedSeriesOffset = next?.nextOffset ?: (state.loadedSeriesOffset + freshItems.size)
                 )
             }
             preloadLogos(uniqueNew)
@@ -311,7 +501,9 @@ class CollectionDetailsViewModel @Inject constructor(
 
     fun preloadLogos(items: List<MediaItem>) {
         if (items.isEmpty()) return
-        viewModelScope.launch {
+        val generation = loadGeneration
+        collectionScope.launch {
+            ensureCurrentLoad(generation)
             val current = _cardLogoUrls.value.toMutableMap()
             val missing = items
                 .filterNot { item -> SportsAddonCapabilities.isSportsEventStatus(item.status) }
@@ -338,17 +530,118 @@ class CollectionDetailsViewModel @Inject constructor(
             val fetched = remoteMissing.map { item ->
                 async {
                     val key = "${item.mediaType}_${item.id}"
-                    val logo = runCatching {
+                    val logo = collectionResultOrNull {
                         mediaRepository.getLogoUrl(item.mediaType, item.id)
-                    }.getOrNull()
+                    }
                     if (logo.isNullOrBlank()) null else key to logo
                 }
             }.awaitAll().filterNotNull()
 
+            ensureCurrentLoad(generation)
             if (fetched.isNotEmpty()) {
                 _cardLogoUrls.value = (_cardLogoUrls.value + fetched).toMap()
             }
         }
+    }
+
+    fun enrichVisibleDetails(items: List<MediaItem>) {
+        val state = _uiState.value
+        val loadedKeys = (state.movieItems + state.seriesItems).mapTo(HashSet()) { it.mediaType to it.id }
+        val visible = items.filter {
+            it.id > 0 && !it.isHomeServer && !SportsAddonCapabilities.isSportsEventStatus(it.status) &&
+                (it.mediaType to it.id) in loadedKeys
+        }
+        visibleDetailKeys = visible.mapTo(HashSet()) { it.mediaType to it.id }
+        val generation = loadGeneration
+        visible.forEach { item ->
+            val key = item.mediaType to item.id
+            if (key in detailAttempts || key in detailJobs) return@forEach
+            val job = collectionScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    detailsSemaphore.withPermit {
+                        ensureCurrentLoad(generation)
+                        if (key !in visibleDetailKeys || !detailAttempts.add(key)) return@withPermit
+                        val details = collectionResultOrNull {
+                            when (item.mediaType) {
+                                MediaType.MOVIE -> mediaRepository.getMovieDetails(item.id)
+                                MediaType.TV -> mediaRepository.getTvDetails(item.id)
+                            }
+                        }
+                        ensureCurrentLoad(generation)
+                        if (details == null || details.id != item.id || details.mediaType != item.mediaType) return@withPermit
+                        enrichedDetails[key] = details
+                        val current = _uiState.value
+                        _uiState.value = current.copy(
+                            movieItems = mergeEnrichedItems(current.movieItems),
+                            seriesItems = mergeEnrichedItems(current.seriesItems)
+                        )
+                    }
+                } finally {
+                    if (generation == loadGeneration) detailJobs.remove(key)
+                }
+            }
+            detailJobs[key] = job
+            job.start()
+        }
+    }
+
+    fun loadPreviewProvider(item: MediaItem) {
+        providerJob?.cancel()
+        val key = "${item.mediaType}_${item.id}"
+        if (key in _providerLogos.value || item.id <= 0 ||
+            item.status?.startsWith("iptv:") == true || SportsAddonCapabilities.isSportsEventStatus(item.status.orEmpty())) return
+        val generation = loadGeneration
+        providerJob = collectionScope.launch {
+            delay(180)
+            val providers = collectionResultOrNull {
+                mediaRepository.getStreamingServices(item.mediaType, item.id,
+                    preferredRegion = java.util.Locale.getDefault().country)
+            }
+            ensureCurrentLoad(generation)
+            _providerLogos.value += key to providers?.services?.firstOrNull()?.logoUrl?.takeIf(String::isNotBlank)
+        }
+    }
+
+    private fun mergeEnrichedItems(items: List<MediaItem>): List<MediaItem> = items.map { item ->
+        val details = enrichedDetails[item.mediaType to item.id] ?: return@map item
+        // Keep source identity, nonblank artwork, ordering and playback state on the original card.
+        item.copy(
+            image = item.image.ifBlank { details.image },
+            backdrop = item.backdrop?.takeIf { it.isNotBlank() } ?: details.backdrop,
+            overview = details.overview.ifBlank { item.overview },
+            year = details.year.ifBlank { item.year },
+            releaseDate = details.releaseDate ?: item.releaseDate,
+            rating = details.rating.ifBlank { item.rating },
+            contentRating = details.contentRating ?: item.contentRating,
+            duration = details.duration.ifBlank { item.duration },
+            imdbRating = details.imdbRating.ifBlank { item.imdbRating },
+            tmdbRating = details.tmdbRating.ifBlank { item.tmdbRating },
+            genreIds = details.genreIds.ifEmpty { item.genreIds },
+            originalLanguage = details.originalLanguage ?: item.originalLanguage,
+            originalTitle = details.originalTitle ?: item.originalTitle,
+            primaryNetworkLogo = details.primaryNetworkLogo ?: item.primaryNetworkLogo,
+            isOngoing = details.isOngoing,
+            totalEpisodes = details.totalEpisodes ?: item.totalEpisodes,
+            status = item.status ?: details.status,
+            budget = details.budget ?: item.budget,
+            revenue = details.revenue ?: item.revenue,
+            popularity = details.popularity
+        )
+    }
+
+    private fun CollectionTab.mediaType() = if (this == CollectionTab.MOVIES) MediaType.MOVIE else MediaType.TV
+
+    private suspend fun ensureCurrentLoad(generation: Long) {
+        currentCoroutineContext().ensureActive()
+        if (generation != loadGeneration) throw CancellationException("Collection changed")
+    }
+
+    private suspend fun <T> collectionResultOrNull(block: suspend () -> T): T? = try {
+        block()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
     }
 
     fun openSportsCollectionItem(
@@ -362,8 +655,10 @@ class CollectionDetailsViewModel @Inject constructor(
             onUnavailable()
             return
         }
-        viewModelScope.launch {
+        val generation = loadGeneration
+        collectionScope.launch {
             val playback = sportsRepository.resolvePlayback(status, item.title)
+            ensureCurrentLoad(generation)
             if (playback == null) {
                 onUnavailable()
                 return@launch
@@ -382,7 +677,8 @@ class CollectionDetailsViewModel @Inject constructor(
         catalog: CatalogConfig,
         tab: CollectionTab,
         offset: Int,
-        limit: Int
+        limit: Int,
+        onItemsAvailable: ((List<MediaItem>) -> Unit)? = null
     ): MediaRepository.CategoryPageResult {
         return if (SportsAddonCapabilities.isSportsCollectionCatalogId(catalog.id)) {
             sportsRepository.loadSportsCollectionPage(catalog.id, offset = offset, limit = limit)
@@ -390,7 +686,11 @@ class CollectionDetailsViewModel @Inject constructor(
             mediaRepository.loadCollectionCatalogPage(
                 catalogForTab(catalog, tab),
                 offset = offset,
-                limit = limit
+                limit = limit,
+                // Lists without a per-source type (MDBList, Trakt, TMDB lists) mix movies and
+                // series; page through this tab's type only, or the tab stalls on pages of the other.
+                mediaType = tab.mediaType(),
+                onItemsAvailable = onItemsAvailable
             )
         }
     }
@@ -415,7 +715,9 @@ class CollectionDetailsViewModel @Inject constructor(
 
     private fun catalogForTab(catalog: CatalogConfig, tab: CollectionTab): CatalogConfig {
         val filteredSources = catalog.collectionSources.filter { sourceMatchesTab(it, tab) }
-        return catalog.copy(collectionSources = filteredSources)
+        val genreId = _uiState.value.takeIf { it.genreFilterable }?.genreId(tab)
+        val sources = ServiceGenreFilter.newestFirst(ServiceGenreFilter.apply(filteredSources, genreId))
+        return catalog.copy(collectionSources = sources)
     }
 
     private fun supportsTab(catalog: CatalogConfig, tab: CollectionTab): Boolean {
@@ -428,9 +730,14 @@ class CollectionDetailsViewModel @Inject constructor(
             if (mediaType == "all" || mediaType == "any" || mediaType == "both" || mediaType == "mixed") {
                 return true
             }
+            val isMovie = mediaType == "movie" || mediaType == "film"
+            val isSeries = mediaType == "series" || mediaType == "tv" || mediaType == "show" || mediaType == "anime"
+            // Addon-defined types ("Live Docs", "Podcasts") can hold either; the loader keeps
+            // only the items whose own type matches the tab.
+            if (!isMovie && !isSeries) return true
             return when (tab) {
-                CollectionTab.MOVIES -> mediaType == "movie" || mediaType == "film"
-                CollectionTab.SERIES -> mediaType == "series" || mediaType == "tv" || mediaType == "show" || mediaType == "anime"
+                CollectionTab.MOVIES -> isMovie
+                CollectionTab.SERIES -> isSeries
             }
         }
 
@@ -454,56 +761,62 @@ fun CollectionDetailsScreen(
     onNavigateToTv: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onSwitchProfile: () -> Unit = {},
+    serviceRowId: String? = null,
+    serviceFilter: String? = null,
+    onNavigateToDetailsAutoPlay: (MediaType, Int) -> Unit = onNavigateToDetails,
+    onOpenServiceGrid: (catalogId: String, rowId: String?, filter: String) -> Unit = { _, _, _ -> },
     onBack: () -> Unit
 ) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val rawUiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val kidsFilterState by viewModel.kidsFilterState.collectAsStateWithLifecycle()
+    val uiState = remember(rawUiState, kidsFilterState) {
+        viewModel.applyKidsFilter(rawUiState, kidsFilterState)
+    }
     val cardLogoUrls by viewModel.cardLogoUrls.collectAsStateWithLifecycle()
+    val providerLogos by viewModel.providerLogos.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    LaunchedEffect(catalogId) { viewModel.load(catalogId) }
+    val isTouchDevice = LocalDeviceType.current.isTouchDevice()
+    LaunchedEffect(catalogId) {
+        viewModel.load(
+            catalogId,
+            serviceHome = serviceRowId == null && serviceFilter == null && !isTouchDevice,
+            serviceRowId = serviceRowId,
+            serviceFilter = serviceFilter
+        )
+    }
     BackHandler(onBack = onBack)
+
+    val serviceCatalog = uiState.catalog?.takeIf { uiState.serviceHome }
+    if (serviceCatalog != null) {
+        ServiceHomeScreen(
+            service = serviceCatalog,
+            onOpen = { item, play ->
+                if (play) onNavigateToDetailsAutoPlay(item.mediaType, item.id) else onNavigateToDetails(item.mediaType, item.id)
+            },
+            onViewAll = { viewAll ->
+                onOpenServiceGrid(serviceCatalog.id, viewAll.rowId, viewAll.filter.name)
+            },
+            onBack = onBack
+        )
+        return
+    }
 
     val rowKey = remember(catalogId) { "collection:$catalogId" }
     val isSportsCollection = SportsAddonCapabilities.isSportsCollectionCatalogId(uiState.catalog?.id ?: catalogId)
     val usePosterCards = uiState.catalog?.collectionGroup != CollectionGroupKind.GENRE &&
         rememberCatalogueRowLayoutMode(rowKey) == CardLayoutMode.POSTER
-    val configuration = LocalConfiguration.current
     val isMobile = LocalDeviceType.current.isTouchDevice()
-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val cardWidth = if (usePosterCards) {
-        if (isMobile) 138.dp else when {
-            configuration.screenWidthDp >= 2200 -> 196.dp
-            configuration.screenWidthDp >= 1600 -> 184.dp
-            else -> 172.dp
-        }
-    } else if (isMobile) 220.dp else 260.dp
-    val gridColumns = if (isMobile) {
-        if (isLandscape) {
-            if (usePosterCards) 4 else 3
-        } else if (usePosterCards) {
-            3
-        } else {
-            2
-        }
-    } else if (usePosterCards) {
-        when {
-            configuration.screenWidthDp >= 2200 -> 8
-            configuration.screenWidthDp >= 1600 -> 7
-            else -> 5
-        }
-    } else {
-        when {
-            configuration.screenWidthDp >= 2200 -> 6
-            configuration.screenWidthDp >= 1600 -> 5
-            else -> 4
-        }
-    }
 
-    val initialTab = when {
+    val defaultTab = when {
         uiState.supportsMovies -> CollectionTab.MOVIES
         uiState.supportsSeries -> CollectionTab.SERIES
         else -> CollectionTab.MOVIES
     }
-    var selectedTab by rememberSaveable(uiState.catalog?.id) { mutableStateOf(initialTab) }
+    var selectedTab by rememberSaveable(uiState.catalog?.id) {
+        mutableStateOf(uiState.initialTab?.takeIf { requested ->
+            if (requested == CollectionTab.MOVIES) uiState.supportsMovies else uiState.supportsSeries
+        } ?: defaultTab)
+    }
     val moviesGridState = rememberTvLazyGridState()
     val seriesGridState = rememberTvLazyGridState()
     val moviesTabFocusRequester = remember { FocusRequester() }
@@ -536,6 +849,8 @@ fun CollectionDetailsScreen(
     val currentSupportsSeries by rememberUpdatedState(uiState.supportsSeries)
 
     fun requestTabFocus() {
+        // Touch keeps its saved scroll position; TV restoration must not steal focus or jump it.
+        if (isMobile) return
         coroutineScope.launch {
             // 300ms clears the 250ms pop-enter animation before touching the focus tree
             kotlinx.coroutines.delay(300)
@@ -562,8 +877,14 @@ fun CollectionDetailsScreen(
                         CollectionTab.MOVIES -> moviesGridState
                         CollectionTab.SERIES -> seriesGridState
                     }
-                    // Grid has 2 header items (tab bar + spacer) before the media cards
-                    runCatching { currentGridState.scrollToItem(savedIndex + 2) }
+                    // Spotlight and tabs share the grid's only header item.
+                    try {
+                        currentGridState.scrollToItem(savedIndex + 1)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // The saved item may no longer exist after a collection update.
+                    }
                     pendingFocusIndex = savedIndex
                 } else {
                     runCatching {
@@ -610,7 +931,6 @@ fun CollectionDetailsScreen(
                 }
             }
     ) {
-        CollectionBackdrop(catalog = uiState.catalog)
         val activeTab = selectedTab
         val items = if (activeTab == CollectionTab.MOVIES) {
             uiState.movieItems
@@ -633,9 +953,11 @@ fun CollectionDetailsScreen(
             seriesGridState
         }
         CollectionItemsGrid(
+            catalog = uiState.catalog?.let { catalog ->
+                if (serviceRowId == null) catalog else catalog.copy(title = serviceRowTitle(serviceRowId, catalog.title))
+            },
+            onBack = onBack,
             items = items,
-            gridColumns = gridColumns,
-            cardWidth = cardWidth,
             usePosterCards = usePosterCards,
             gridState = gridState,
             pendingFocusIndex = pendingFocusIndex,
@@ -648,6 +970,9 @@ fun CollectionDetailsScreen(
             seriesTabFocusRequester = seriesTabFocusRequester,
             isSportsCollection = isSportsCollection,
             onTabSelected = { selectedTab = it },
+            genreIds = if (uiState.genreFilterable) ServiceGenreFilter.genreIds(activeTab) else emptyList(),
+            selectedGenreId = uiState.genreId(activeTab),
+            onGenreSelected = { viewModel.selectGenre(activeTab, it) },
             onItemClick = { item ->
                 if (SportsAddonCapabilities.isSportsEventStatus(item.status)) {
                     viewModel.openSportsCollectionItem(
@@ -677,74 +1002,28 @@ fun CollectionDetailsScreen(
                 }
             },
             onVisibleItemsChanged = { visibleItems -> viewModel.preloadLogos(visibleItems) },
+            onVisibleDetailsChanged = { visibleItems -> viewModel.enrichVisibleDetails(visibleItems) },
             onNearEnd = { viewModel.loadMoreIfNeeded(activeTab) },
             isLoading = isTabLoading,
             isLoadingMore = isTabLoadingMore,
-            emptyMessage = when (uiState.error) {
+            emptyMessage = when (val error = uiState.error) {
                 null -> stringResource(R.string.collection_empty)
                 COLLECTION_LOAD_FAILED_ERROR -> stringResource(R.string.collection_failed_load)
-                else -> uiState.error!!
+                COLLECTION_NOT_FOUND_ERROR -> stringResource(R.string.collection_not_found)
+                else -> if (error != null && error.startsWith(COLLECTION_MISSING_ADDON_PREFIX)) {
+                    stringResource(
+                        R.string.collection_missing_addon,
+                        error.removePrefix(COLLECTION_MISSING_ADDON_PREFIX)
+                    )
+                } else {
+                    error.orEmpty()
+                }
             },
-            topContentPadding = if (isMobile) 18.dp else if (usePosterCards) 22.dp else 10.dp
+            topContentPadding = if (isMobile) 12.dp else 8.dp,
+            onPreviewItemChanged = viewModel::loadPreviewProvider,
+            providerLogos = providerLogos
         )
     }
-}
-
-@Composable
-private fun CollectionBackdrop(catalog: CatalogConfig?) {
-    val accent = collectionAccentColor(catalog?.collectionGroup)
-    val backdrop = catalog?.collectionHeroImageUrl
-        ?.takeIf { it.isNotBlank() }
-        ?: catalog?.collectionCoverImageUrl?.takeIf { it.isNotBlank() }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (backdrop != null) {
-            AsyncImage(
-                model = backdrop,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                alpha = 0.2f
-            )
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            accent.copy(alpha = 0.32f),
-                            accent.copy(alpha = 0.1f),
-                            Color.Transparent
-                        )
-                    )
-                )
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            appBackgroundDark().copy(alpha = 0.62f),
-                            accent.copy(alpha = 0.12f),
-                            appBackgroundDark().copy(alpha = 0.88f),
-                            appBackgroundDark()
-                        )
-                    )
-                )
-        )
-    }
-}
-
-private fun collectionAccentColor(group: CollectionGroupKind?): Color = when (group) {
-    CollectionGroupKind.FEATURED -> Color(0xFFE6A23C)
-    CollectionGroupKind.SERVICE -> Color(0xFF1AA7EC)
-    CollectionGroupKind.GENRE -> Color(0xFFC65D3B)
-    CollectionGroupKind.DECADE -> Color(0xFFB98B32)
-    CollectionGroupKind.FRANCHISE -> Color(0xFF2F9C95)
-    CollectionGroupKind.NETWORK -> Color(0xFF4F9D69)
-    null -> Color.White
 }
 
 @Composable
@@ -755,21 +1034,29 @@ private fun CollectionTabBar(
     moviesTabFocusRequester: FocusRequester,
     seriesTabFocusRequester: FocusRequester,
     isSportsCollection: Boolean,
-    onTabSelected: (CollectionTab) -> Unit
+    onTabSelected: (CollectionTab) -> Unit,
+    genreIds: List<Int>,
+    selectedGenreId: Int?,
+    onGenreSelected: (Int?) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val showMovies = hasMovies || !hasSeries
     val showSeries = hasSeries || !hasMovies
     val onlyOne = showMovies xor showSeries
+    val showGenres = !isSportsCollection && genreIds.isNotEmpty()
+    // The grid moves focus between whole items, so Down from a tab would skip the genre row.
+    val genreRowFocusRequester = remember { FocusRequester() }
+    val tabDown = genreRowFocusRequester.takeIf { showGenres }
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .arvioDpadFocusGroup()
-            .padding(start = 42.dp, end = 42.dp),
+            .arvioDpadFocusGroup(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         if (isSportsCollection) {
             CollectionTabChip(
-                label = "Live & Upcoming",
+                label = stringResource(R.string.collection_tab_live_upcoming),
                 isSelected = true,
                 focusRequester = seriesTabFocusRequester,
                 onClick = { onTabSelected(CollectionTab.SERIES) }
@@ -781,6 +1068,7 @@ private fun CollectionTabBar(
                 label = stringResource(R.string.movies),
                 isSelected = selectedTab == CollectionTab.MOVIES || onlyOne,
                 focusRequester = moviesTabFocusRequester,
+                downFocusRequester = tabDown,
                 onClick = { onTabSelected(CollectionTab.MOVIES) }
             )
         }
@@ -789,7 +1077,75 @@ private fun CollectionTabBar(
                 label = stringResource(R.string.series),
                 isSelected = selectedTab == CollectionTab.SERIES || onlyOne,
                 focusRequester = seriesTabFocusRequester,
+                downFocusRequester = tabDown,
                 onClick = { onTabSelected(CollectionTab.SERIES) }
+            )
+        }
+    }
+    if (showGenres) {
+        CollectionGenreRow(
+            genreIds = genreIds,
+            isSeries = selectedTab == CollectionTab.SERIES,
+            selectedGenreId = selectedGenreId,
+            focusRequester = genreRowFocusRequester,
+            onGenreSelected = onGenreSelected
+        )
+    }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+private fun CollectionGenreRow(
+    genreIds: List<Int>,
+    isSeries: Boolean,
+    selectedGenreId: Int?,
+    focusRequester: FocusRequester,
+    onGenreSelected: (Int?) -> Unit
+) {
+    // Null is the "All genres" chip.
+    val chips = listOf<Pair<Int?, String>>(null to stringResource(R.string.all_genres)) +
+        genreIds.mapNotNull { id ->
+            val res = if (isSeries) tvGenreNameRes(id) else movieGenreNameRes(id)
+            res?.let { id to stringResource(it) }
+        }
+    if (LocalDeviceType.current.isTouchDevice()) {
+        var expanded by remember { mutableStateOf(false) }
+        Box {
+            androidx.compose.material3.TextButton(onClick = { expanded = true }) {
+                androidx.compose.material3.Text(chips.firstOrNull { it.first == selectedGenreId }?.second.orEmpty(), color = Color.White)
+                androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Default.ArrowDropDown, null, tint = Color.White)
+            }
+            androidx.compose.material3.DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false },
+                modifier = Modifier.heightIn(max = 420.dp), containerColor = Color(0xFF171717)) {
+                chips.forEach { (id, label) -> androidx.compose.material3.DropdownMenuItem(
+                    text = { androidx.compose.material3.Text(label, color = Color.White) },
+                    trailingIcon = { if (id == selectedGenreId) androidx.compose.material3.Icon(
+                        Icons.Default.Check, null, tint = Color.White) },
+                    onClick = { expanded = false; onGenreSelected(id) }) }
+            }
+        }
+        return
+    }
+    // Wrapped instead of scrolled: every genre stays in view, and a scrolling row inside the
+    // TV grid is pivot-scrolled off its start in right-to-left layouts.
+    FlowRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            // No restorer: Down from the tabs targets a chip directly, and a restorer around
+            // that target crashes ("Release should only be called once") on entry.
+            .arvioDpadFocusGroup(enableFocusRestorer = false),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        chips.forEach { (id, label) ->
+            CollectionTabChip(
+                label = label,
+                isSelected = selectedGenreId == id,
+                // Down from the tabs lands on the genre that is applied.
+                focusRequester = focusRequester.takeIf { selectedGenreId == id },
+                blockUp = false,
+                onClick = { onGenreSelected(id) }
             )
         }
     }
@@ -799,15 +1155,18 @@ private fun CollectionTabBar(
 private fun CollectionTabChip(
     label: String,
     isSelected: Boolean,
-    focusRequester: FocusRequester,
+    focusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
+    // The tab row is the top of the page; the genre row below it lets Up return to the tabs.
+    blockUp: Boolean = true,
     onClick: () -> Unit
 ) {
     var isFocused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(50)
+    val shape = RoundedCornerShape(8.dp)
     val bg = when {
         isSelected -> Color.White
         isFocused -> Color.Transparent
-        else -> Color.White.copy(alpha = 0.08f)
+        else -> Color.Transparent
     }
     val fg = when {
         isSelected -> appBackgroundDark()
@@ -829,21 +1188,21 @@ private fun CollectionTabChip(
             .clip(shape)
             .background(bg)
             .border(width = borderWidth, color = borderColor, shape = shape)
-            .focusRequester(focusRequester)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (downFocusRequester != null) Modifier.focusProperties { down = downFocusRequester } else Modifier)
             .onFocusChanged { isFocused = it.isFocused }
             .onPreviewKeyEvent { event ->
-                event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp
+                blockUp && event.type == KeyEventType.KeyDown && event.key == Key.DirectionUp
             }
-            .focusable()
             .clickable(onClick = onClick)
-            .padding(horizontal = 22.dp, vertical = 10.dp)
+            .padding(horizontal = 18.dp, vertical = 7.dp)
     ) {
         androidx.tv.material3.Text(
             text = label,
             style = ArflixTypography.sectionTitle.copy(
-                fontSize = 14.sp,
+                fontSize = 13.sp,
                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
-                letterSpacing = 0.4.sp
+                letterSpacing = 0.sp
             ),
             color = fg
         )
@@ -851,10 +1210,10 @@ private fun CollectionTabChip(
 }
 
 @Composable
-private fun CollectionItemsGrid(
+internal fun CollectionItemsGrid(
+    catalog: CatalogConfig?,
+    onBack: () -> Unit,
     items: List<MediaItem>,
-    gridColumns: Int,
-    cardWidth: androidx.compose.ui.unit.Dp,
     usePosterCards: Boolean,
     gridState: androidx.tv.foundation.lazy.grid.TvLazyGridState,
     pendingFocusIndex: Int,
@@ -870,32 +1229,82 @@ private fun CollectionItemsGrid(
     onItemClick: (MediaItem) -> Unit,
     onItemFocused: (MediaItem, Int) -> Unit,
     onVisibleItemsChanged: (List<MediaItem>) -> Unit,
+    onVisibleDetailsChanged: (List<MediaItem>) -> Unit,
     onNearEnd: () -> Unit,
     isLoading: Boolean,
     isLoadingMore: Boolean,
     emptyMessage: String,
-    topContentPadding: androidx.compose.ui.unit.Dp
+    topContentPadding: androidx.compose.ui.unit.Dp,
+    onPreviewItemChanged: (MediaItem) -> Unit = {},
+    providerLogos: Map<String, String?> = emptyMap(),
+    showTabs: Boolean = true,
+    previewItemOverride: MediaItem? = null,
+    onVisiblePositionChanged: (Int, Int) -> Unit = { _, _ -> },
+    genreIds: List<Int> = emptyList(),
+    selectedGenreId: Int? = null,
+    onGenreSelected: (Int?) -> Unit = {}
 ) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+    val isMobile = LocalDeviceType.current.isTouchDevice()
+    val layout = collectionGridLayout(maxWidth.value.toInt(), isMobile, usePosterCards)
+    val gridColumns = layout.columns
+    val cardWidth = layout.cardWidthDp.dp
+    val compact = LocalConfiguration.current.screenHeightDp < 480
+    val headerItems = (if (showTabs) 1 else 0) + (if (isMobile) 1 else 0)
+    val itemKeys = remember(catalog?.id, items) { stableHomeRowItemKeys(catalog?.id.orEmpty(), items) }
+    var focusedKey by rememberSaveable(catalog?.id, selectedTab) { mutableStateOf<String?>(null) }
+    var previewKey by remember(catalog?.id, selectedTab) { mutableStateOf<String?>(null) }
+    LaunchedEffect(focusedKey) {
+        // Focus feedback stays immediate; only expensive artwork waits for rapid navigation to settle.
+        delay(100)
+        previewKey = focusedKey
+    }
+    val focusedItem = remember(items, itemKeys, previewKey) {
+        items.getOrNull(itemKeys.indexOf(previewKey)) ?: items.firstOrNull()
+    }
+    val previewItem = previewItemOverride?.takeIf {
+        it.id == focusedItem?.id && it.mediaType == focusedItem?.mediaType
+    } ?: focusedItem
+    val latestPreviewChanged by rememberUpdatedState(onPreviewItemChanged)
+    LaunchedEffect(focusedItem?.mediaType, focusedItem?.id) {
+        focusedItem?.let { latestPreviewChanged(it) }
+    }
     val cardContentType = if (usePosterCards) "poster_card" else "landscape_card"
     val focusBleedPadding = if (usePosterCards) 10.dp else 6.dp
+    val scrollScope = rememberCoroutineScope()
+    var revealJob by remember(gridState) { mutableStateOf<Job?>(null) }
+    var focusedRow by remember(gridState) { mutableStateOf(-1) }
+    val focusBleedPx = with(androidx.compose.ui.platform.LocalDensity.current) { focusBleedPadding.toPx() }
     val latestItems by rememberUpdatedState(items)
     val latestGridColumns by rememberUpdatedState(gridColumns)
     val latestOnVisibleItemsChanged by rememberUpdatedState(onVisibleItemsChanged)
+    val latestOnVisibleDetailsChanged by rememberUpdatedState(onVisibleDetailsChanged)
     val latestOnNearEnd by rememberUpdatedState(onNearEnd)
+    val latestOnVisiblePositionChanged by rememberUpdatedState(onVisiblePositionChanged)
+    LaunchedEffect(gridState, headerItems) {
+        try {
+            snapshotFlow {
+                gridState.layoutInfo.visibleItemsInfo.mapNotNull { latestItems.getOrNull(it.index - headerItems) }
+            }.distinctUntilChanged().collect { latestOnVisibleDetailsChanged(it) }
+        } finally {
+            latestOnVisibleDetailsChanged(emptyList())
+        }
+    }
     // Collect scroll position without restarting on page-load-size changes —
     // items.size used to live in the key, which relaunched the snapshotFlow on
     // every page append and caused a stutter frame during scroll.
-    LaunchedEffect(gridState) {
+    LaunchedEffect(gridState, headerItems) {
         snapshotFlow {
             val layout = gridState.layoutInfo
             val last = layout.visibleItemsInfo.lastOrNull()?.index ?: 0
             val mediaIndexes = layout.visibleItemsInfo
                 .asSequence()
-                .map { it.index - 2 }
+                .map { it.index - headerItems }
                 .filter { it >= 0 }
                 .toList()
             Triple(last, layout.totalItemsCount, mediaIndexes)
         }.distinctUntilChanged().collect { (last, total, mediaIndexes) ->
+            latestOnVisiblePositionChanged(last - headerItems, latestGridColumns)
             if (total > 12 && last >= total - 3) latestOnNearEnd()
             if (mediaIndexes.isNotEmpty()) {
                 val start = (mediaIndexes.minOrNull() ?: 0).coerceAtLeast(0)
@@ -909,22 +1318,50 @@ private fun CollectionItemsGrid(
         }
     }
 
-    TvLazyVerticalGrid(
+    Box(Modifier.fillMaxSize().background(appBackgroundDark())) {
+        CollectionBackdrop(catalog, previewItem, isMobile,
+            collectionSpotlightHeight(isMobile, compact) + 150.dp)
+        Column(Modifier.fillMaxSize().padding(top = topContentPadding)) {
+        if (isMobile) Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.IconButton(onClick = onBack) {
+                androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.back), tint = Color.White)
+            }
+            androidx.compose.material3.Text(catalog?.title.orEmpty(), color = Color.White, fontSize = 18.sp,
+                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+        if (!isMobile) CollectionSpotlight(
+            catalog, previewItem, isMobile, compact, onBack,
+            providerLogoUrl = providerLogos["${previewItem?.mediaType}_${previewItem?.id}"]
+                ?: previewItem?.primaryNetworkLogo,
+            clearLogoUrl = cardLogoUrls["${previewItem?.mediaType}_${previewItem?.id}"]
+        )
+        TvLazyVerticalGrid(
         columns = TvGridCells.Fixed(gridColumns),
         state = gridState,
-        modifier = Modifier.fillMaxSize().arvioDpadFocusGroup().clipToBounds(),
+        // On TV, reveal whole rows ourselves; automatic pivot scrolling follows
+        // the focus scale and fights the row animation. Touch retains native scrolling.
+        userScrollEnabled = isMobile,
+        pivotOffsets = PivotOffsets(parentFraction = 0f),
+        modifier = Modifier.weight(1f).fillMaxWidth().arvioDpadFocusGroup().clipToBounds()
+            .testTag("collection_grid"),
         contentPadding = PaddingValues(
-            start = 42.dp,
-            top = topContentPadding,
-            end = 42.dp,
-            bottom = 48.dp + focusBleedPadding
+            start = if (isMobile) 20.dp else 42.dp,
+            top = focusBleedPadding,
+            end = if (isMobile) 20.dp else 42.dp,
+            bottom = 48.dp + focusBleedPadding + LocalBottomBarInset.current
         ),
         verticalArrangement = Arrangement.spacedBy(if (usePosterCards) 18.dp else 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(if (usePosterCards) 18.dp else 14.dp)
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item(
+        if (isMobile) item(span = { androidx.tv.foundation.lazy.grid.TvGridItemSpan(maxLineSpan) }, contentType = "spotlight") {
+            CollectionSpotlight(catalog, previewItem, true, compact, onBack,
+                providerLogoUrl = providerLogos["${previewItem?.mediaType}_${previewItem?.id}"] ?: previewItem?.primaryNetworkLogo,
+                clearLogoUrl = cardLogoUrls["${previewItem?.mediaType}_${previewItem?.id}"],
+                showBackButton = false, horizontalInset = 0.dp)
+        }
+        if (showTabs) item(
             span = { androidx.tv.foundation.lazy.grid.TvGridItemSpan(maxLineSpan) },
-            contentType = "tabs"
+            contentType = "header"
         ) {
             CollectionTabBar(
                 hasMovies = hasMovies,
@@ -933,25 +1370,31 @@ private fun CollectionItemsGrid(
                 moviesTabFocusRequester = moviesTabFocusRequester,
                 seriesTabFocusRequester = seriesTabFocusRequester,
                 isSportsCollection = isSportsCollection,
-                onTabSelected = onTabSelected
+                onTabSelected = onTabSelected,
+                genreIds = genreIds,
+                selectedGenreId = selectedGenreId,
+                onGenreSelected = onGenreSelected,
+                modifier = Modifier.onFocusChanged { state ->
+                    if (!isMobile && state.hasFocus) {
+                        focusedRow = -1
+                        revealJob?.cancel()
+                        revealJob = scrollScope.launch { gridState.animateScrollToItem(0) }
+                    }
+                }
             )
         }
-        item(
-            span = { androidx.tv.foundation.lazy.grid.TvGridItemSpan(maxLineSpan) },
-            contentType = "tabs_gap"
-        ) {
-            Box(modifier = Modifier.height(6.dp))
-        }
-
-        if (isLoading) {
+        if (isLoading && items.isEmpty()) {
             val cardHeight = if (usePosterCards) cardWidth * 1.5f else cardWidth * 9f / 16f
             itemsIndexed((1..gridColumns * 3).toList(), contentType = { _, _ -> "skeleton" }) { _, _ ->
+                Box(Modifier.fillMaxWidth()) {
                 Box(
-                    modifier = Modifier
+                    modifier = (if (isMobile) Modifier.fillMaxWidth() else Modifier)
+                        .width(cardWidth)
                         .height(cardHeight)
-                        .clip(RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(8.dp))
                         .background(Color.White.copy(alpha = 0.05f))
                 )
+                }
             }
         } else if (items.isEmpty() && !isLoadingMore) {
             item(
@@ -963,7 +1406,7 @@ private fun CollectionItemsGrid(
         } else {
             itemsIndexed(
                 items,
-                key = { _, item -> "${item.mediaType}-${item.id}" },
+                key = { index, _ -> itemKeys[index] },
                 contentType = { _, _ -> cardContentType }
             ) { index, item ->
                 val cardLogoUrl = cardLogoUrls["${item.mediaType}_${item.id}"]
@@ -979,6 +1422,9 @@ private fun CollectionItemsGrid(
                     }
                 }
 
+                // Touch cards fill their measured cell, including after a window resize.
+                // TV cards keep Home's fixed width inside the wider grid slot.
+                Box(Modifier.fillMaxWidth()) {
                 MediaCard(
                     item = item,
                     width = cardWidth,
@@ -986,13 +1432,42 @@ private fun CollectionItemsGrid(
                     logoImageUrl = cardLogoUrl,
                     showTitle = true,
                     titleMaxLines = if (usePosterCards) 2 else 1,
+                    titleMinLines = if (usePosterCards) 2 else 1,
                     onFocused = {
+                        // Reveal unscaled rows only. TV's automatic pivot follows the animated
+                        // card bounds and otherwise nudges the grid on every sideways move.
+                        val row = index / gridColumns
+                        if (!isMobile && focusedRow != row) {
+                            focusedRow = row
+                            revealJob?.cancel()
+                            revealJob = scrollScope.launch {
+                                val layout = gridState.layoutInfo
+                                val cell = layout.visibleItemsInfo.firstOrNull { it.index == index + headerItems }
+                                if (cell != null) {
+                                    val top = cell.offset.y.toFloat()
+                                    val bottom = top + cell.size.height
+                                    val minTop = layout.viewportStartOffset + focusBleedPx
+                                    val maxBottom = layout.viewportEndOffset - focusBleedPx
+                                    val delta = when {
+                                        top < minTop -> top - minTop
+                                        bottom > maxBottom -> bottom - maxBottom
+                                        else -> 0f
+                                    }
+                                    if (delta != 0f) gridState.animateScrollBy(delta, tween(160))
+                                } else {
+                                    gridState.animateScrollToItem(row * gridColumns + headerItems, -focusBleedPx.toInt())
+                                }
+                            }
+                        }
+                        focusedKey = itemKeys[index]
                         onItemFocused(item, index)
                         if (items.size > 10 && index >= items.size - 2) onNearEnd()
                     },
                     onClick = { onItemClick(item) },
-                    modifier = Modifier.focusRequester(itemFocusRequester)
+                    modifier = (if (isMobile) Modifier.fillMaxWidth() else Modifier)
+                        .focusRequester(itemFocusRequester).testTag("collection_item_$index")
                 )
+                }
             }
         }
 
@@ -1016,6 +1491,10 @@ private fun CollectionItemsGrid(
             }
         }
     }
+    }
+    }
+}
+
 }
 
 @Composable

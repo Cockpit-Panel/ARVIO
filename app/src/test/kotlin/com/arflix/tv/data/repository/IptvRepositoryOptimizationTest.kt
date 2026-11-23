@@ -5,6 +5,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.ByteArrayInputStream
@@ -12,6 +13,7 @@ import java.io.InputStream
 import java.lang.reflect.Constructor
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
+import java.time.OffsetDateTime
 
 class IptvRepositoryOptimizationTest {
 
@@ -164,6 +166,88 @@ class IptvRepositoryOptimizationTest {
     }
 
     @Test
+    fun fixedXmlTvDateParserHandlesCommonOffsets() {
+        val repository = repositoryForPrivateMethodTests()
+        val method = IptvRepository::class.java.getDeclaredMethod("parseFixedXmlTvDate", String::class.java)
+        method.isAccessible = true
+
+        val utc = method.invoke(repository, "20260903214540 +0000") as Long
+        val positiveOffset = method.invoke(repository, "20260903234540 +02:00") as Long
+        val negativeOffset = method.invoke(repository, "20260903164540 -0500") as Long
+        val expected = OffsetDateTime.parse("2026-09-03T21:45:40Z").toInstant().toEpochMilli()
+
+        assertEquals(expected, utc)
+        assertEquals(expected, positiveOffset)
+        assertEquals(expected, negativeOffset)
+    }
+
+    @Test
+    fun largeGuideLookupUsesExactProviderKeysWithoutFuzzyCacheChurn() {
+        val repository = repositoryForPrivateMethodTests()
+        val channels = (1..10_001).map { index ->
+            com.arflix.tv.data.model.IptvChannel(
+                id = "provider:channel-$index",
+                name = "Scale Channel $index FHD",
+                streamUrl = "https://example.test/live/$index",
+                group = "Group ${index / 200}",
+                epgId = "scale.channel.$index",
+                tvgName = "Scale Channel $index",
+            )
+        }
+        val method = IptvRepository::class.java.getDeclaredMethod("buildChannelKeyLookup", List::class.java)
+        method.isAccessible = true
+
+        @Suppress("UNCHECKED_CAST")
+        val lookup = method.invoke(repository, channels) as Map<String, List<com.arflix.tv.data.model.IptvChannel>>
+        val cacheField = IptvRepository::class.java.getDeclaredField("guideKeyCandidatesCache")
+        cacheField.isAccessible = true
+        val fuzzyCache = cacheField.get(repository) as Map<*, *>
+
+        assertEquals("provider:channel-42", lookup.getValue("scale.channel.42").single().id)
+        assertTrue(fuzzyCache.isEmpty())
+    }
+
+    @Test
+    fun m3uAttributeParserPreservesProviderMetadata() {
+        val repository = repositoryForPrivateMethodTests()
+        val method = IptvRepository::class.java.getDeclaredMethod("parseM3uAttributes", String::class.java)
+        method.isAccessible = true
+
+        @Suppress("UNCHECKED_CAST")
+        val attributes = method.invoke(
+            repository,
+            "#EXTINF:-1 tvg-id=\"npo1.nl\" tvg-name=\\'NPO 1\\' group-title=\"Netherlands\" " +
+                "catchup-days=\"2\" http-user-agent=\"ARVIO-Test\",NPO 1"
+        ) as Map<String, String>
+
+        assertEquals("npo1.nl", attributes["tvg-id"])
+        assertEquals("NPO 1", attributes["tvg-name"])
+        assertEquals("Netherlands", attributes["group-title"])
+        assertEquals("2", attributes["catchup-days"])
+        assertEquals("ARVIO-Test", attributes["http-user-agent"])
+    }
+
+    @Test
+    fun optimizedStreamKeyRemainsCompatibleWithExistingChannelIds() {
+        val repository = repositoryForPrivateMethodTests()
+        val method = IptvRepository::class.java.getDeclaredMethod("stableStreamKey", String::class.java)
+        method.isAccessible = true
+
+        assertEquals(
+            "46-43519e1a30008258",
+            method.invoke(repository, "https://example.test/live/channel.ts?token=abc")
+        )
+    }
+
+    private fun repositoryForPrivateMethodTests(): IptvRepository {
+        val context = io.mockk.mockk<android.content.Context>(relaxed = true)
+        val okHttpClient = io.mockk.mockk<okhttp3.OkHttpClient>(relaxed = true)
+        val profileManager = io.mockk.mockk<com.arflix.tv.data.repository.ProfileManager>(relaxed = true)
+        val invalidationBus = io.mockk.mockk<com.arflix.tv.data.repository.CloudSyncInvalidationBus>(relaxed = true)
+        return IptvRepository(context, okHttpClient, profileManager, invalidationBus)
+    }
+
+    @Test
     fun testFetchAndParseEpgThrows304Exception() {
         val context = io.mockk.mockk<android.content.Context>(relaxed = true)
         val okHttpClient = io.mockk.mockk<okhttp3.OkHttpClient>()
@@ -183,16 +267,20 @@ class IptvRepositoryOptimizationTest {
         val call = io.mockk.mockk<okhttp3.Call>()
         val response = io.mockk.mockk<okhttp3.Response>()
         io.mockk.every { response.code } returns 304
+        io.mockk.every { response.header("Retry-After") } returns null
         io.mockk.every { response.close() } returns Unit
         io.mockk.every { call.execute() } returns response
         io.mockk.every { customClient.newCall(any()) } returns call
 
         val repository = IptvRepository(context, okHttpClient, profileManager, invalidationBus)
-        val method = IptvRepository::class.java.getDeclaredMethod("fetchAndParseEpg", String::class.java, List::class.java)
+        val method = IptvRepository::class.java.getDeclaredMethod(
+            "fetchAndParseEpg", String::class.java, List::class.java, List::class.java, Function0::class.java,
+        )
         method.isAccessible = true
 
         try {
-            method.invoke(repository, "http://example.com/epg.xml", emptyList<com.arflix.tv.data.model.IptvChannel>())
+            val noChannels = emptyList<com.arflix.tv.data.model.IptvChannel>()
+            method.invoke(repository, "http://example.com/epg.xml", noChannels, noChannels, {})
             fail("Expected EpgNotModifiedException to be thrown")
         } catch (e: java.lang.reflect.InvocationTargetException) {
             val cause = e.cause

@@ -1,0 +1,13 @@
+{
+  "Play {value0}": "{value0} പ്ലേ ചെയ്യുക",
+  "TVDB is disabled until a custom API key is provided": "സ്വന്തം API കീ നൽകുന്നതുവരെ TVDB പ്രവർത്തനരഹിതമായിരിക്കും",
+  "for GNOME, KDE, XFCE, etc.": "GNOME, KDE, XFCE എന്നിവയ്ക്കായി",
+  "once to register the": "രജിസ്റ്റർ ചെയ്യാൻ ഒരിക്കൽ",
+  "when you sign in": "നിങ്ങൾ സൈൻ ഇൻ ചെയ്യുമ്പോൾ",
+  "Collection": "ശേഖരം",
+  "Watching": "കാണുന്നു",
+  "Completed": "പൂർത്തിയായി",
+  "Dropped": "ഉപേക്ഷിച്ചു",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: Jellyfin-അനുയോജ്യമായ വിലാസം ഉപയോഗിക്കുക. ഐച്ഛിക പ്രൊഫൈൽ: username#ProfileName. സംരക്ഷിത പ്രൊഫൈൽ: password#PIN.",
+  "None of your enabled addons provide playback sources.": "നിങ്ങൾ പ്രവർത്തനക്ഷമമാക്കിയ ആഡ്ഓണുകളൊന്നും പ്ലേബാക്ക് ഉറവിടങ്ങൾ നൽകുന്നില്ല."
+}

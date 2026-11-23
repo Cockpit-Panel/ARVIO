@@ -1,0 +1,10 @@
+{
+  "Play {value0}": "{value0} lejátszása",
+  "Automatically tests launching VLC via vlc:// and reports if integration is working": "Automatikusan teszteli a VLC indítását a vlc:// protokollon keresztül, és jelzi, hogy működik-e az integráció",
+  "Collection": "Gyűjtemény",
+  "Watching": "Folyamatban",
+  "Completed": "Befejezett",
+  "Dropped": "Abbahagyott",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: használd a Jellyfin-kompatibilis címet. Opcionális profil: username#ProfileName. Védett profil: password#PIN.",
+  "None of your enabled addons provide playback sources.": "Egyik engedélyezett kiegészítőd sem biztosít lejátszási forrást."
+}

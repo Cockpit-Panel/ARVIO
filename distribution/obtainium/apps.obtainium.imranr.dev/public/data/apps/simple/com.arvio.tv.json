@@ -1,0 +1,15 @@
+{
+    "config": {
+        "id": "com.arvio.tv",
+        "url": "https://github.com/ProdigyV21/ARVIO",
+        "author": "ProdigyV21",
+        "name": "ARVIO"
+    },
+    "icon": "https://raw.githubusercontent.com/ProdigyV21/ARVIO/main/web/public/arvio-icon-512.png",
+    "categories": [
+        "multimedia"
+    ],
+    "description": {
+        "en": "A modern, open-source media hub for Android TV, phones, tablets, and the web."
+    }
+}

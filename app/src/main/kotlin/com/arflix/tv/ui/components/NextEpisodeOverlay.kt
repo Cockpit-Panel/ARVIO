@@ -62,6 +62,7 @@ import com.arflix.tv.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import androidx.compose.ui.res.stringResource
 import com.arflix.tv.R
+import com.arflix.tv.ui.theme.BackgroundElevated
 
 /**
  * Next episode overlay shown at the end of an episode
@@ -140,7 +141,6 @@ fun NextEpisodeOverlay(
             modifier = Modifier
                 .fillMaxSize()
                 .focusRequester(overlayFocusRequester)
-                .focusable()
                 .onPreviewKeyEvent { event ->
                     if (event.type == KeyEventType.KeyDown) {
                         when (event.key) {
@@ -166,7 +166,8 @@ fun NextEpisodeOverlay(
                             else -> false
                         }
                     } else false
-                },
+                }
+                .focusable(),
             contentAlignment = Alignment.BottomEnd
         ) {
             // Card positioned at bottom right
@@ -178,12 +179,12 @@ fun NextEpisodeOverlay(
                         brush = Brush.horizontalGradient(
                             colors = listOf(
                                 Color.Black.copy(alpha = 0.95f),
-                                Color(0xFF1A1A1A).copy(alpha = 0.98f)
+                                BackgroundElevated.copy(alpha = 0.98f)
                             )
                         ),
-                        shape = RoundedCornerShape(20.dp)
+                        shape = RoundedCornerShape(16.dp)
                     )
-                    .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(20.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(16.dp))
                     .padding(24.dp)
             ) {
                 Column {
@@ -205,7 +206,7 @@ fun NextEpisodeOverlay(
                         )
                         Spacer(modifier = Modifier.weight(1f))
                         Text(
-                            text = "in ${countdown}s",
+                            text = stringResource(R.string.component_next_in_seconds, countdown),
                             style = ArflixTypography.body,
                             color = TextSecondary
                         )
@@ -235,7 +236,7 @@ fun NextEpisodeOverlay(
                                 Box(
                                     modifier = Modifier
                                         .fillMaxSize()
-                                        .background(Color(0xFF222222)),
+                                        .background(BackgroundElevated),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
@@ -287,7 +288,7 @@ fun NextEpisodeOverlay(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "S$seasonNumber E$episodeNumber",
+                                text = stringResource(R.string.player_season_episode_short, seasonNumber, episodeNumber),
                                 style = ArflixTypography.badge,
                                 color = TextSecondary
                             )

@@ -8,11 +8,6 @@
           - 'build.gradle.kts'
           - 'settings.gradle.kts'
 
-"area: ios":
-  - changed-files:
-      - any-glob-to-any-file:
-          - 'iosApp/**'
-
 "area: web":
   - changed-files:
       - any-glob-to-any-file:

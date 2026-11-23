@@ -16,18 +16,29 @@ data class MediaItem(
     val year: String = "",
     val releaseDate: String? = null,
     val rating: String = "",
+    // Age certification, already labelled for display ("FSK 16", "R", "US · R").
+    // Null when TMDB has none for the content country or the US fallback.
+    val contentRating: String? = null,
     val duration: String = "",
     val imdbRating: String = "",
     val tmdbRating: String = "",
     val mediaType: MediaType = MediaType.MOVIE,
     val image: String = "",
     val backdrop: String? = null,
+    // Episode-specific landscape artwork for Continue Watching cards. Keeping
+    // it separate prevents episode stills from replacing series hero artwork.
+    val episodeStill: String? = null,
     val progress: Int = 0,
     val isWatched: Boolean = false,
     val traktId: Int? = null,
     val badge: String? = null,
     val genreIds: List<Int> = emptyList(),
     val originalLanguage: String? = null,
+    // The native TMDB name, kept next to the localized [title] because some
+    // providers list a title only under its original name. Null when TMDB has
+    // none, and null on items restored from an older JSON cache - every reader
+    // must treat it as "unknown", never as "same as the title".
+    val originalTitle: String? = null,
     val primaryNetworkLogo: String? = null,
     val isOngoing: Boolean = false,
     val totalEpisodes: Int? = null,
@@ -51,8 +62,9 @@ data class MediaItem(
     val sourceOrder: Int = Int.MAX_VALUE,
     // Placeholder card - shows skeleton loading animation
     val isPlaceholder: Boolean = false,
-    // Continue Watching: formatted time remaining (e.g., "23min left", "1hr 15min left")
-    val timeRemainingLabel: String? = null,
+    // Continue Watching: whole minutes left in the current movie/episode; null under a minute.
+    // The card words it in the user's language, long or short for its width.
+    val timeRemainingMinutes: Int? = null,
     // Continue Watching: true only when progress represents current movie/episode playback.
     val showPlaybackProgress: Boolean = true,
     // Native home-server identity. The TMDB id remains `id` when available;
@@ -62,10 +74,25 @@ data class MediaItem(
     val homeServerSourceRef: String? = null,
     val homeServerProvider: String? = null,
     val homeServerImdbId: String? = null,
-) : Serializable
+    // Native addon identity: an addon catalog item with no TMDB/IMDb id whose addon serves
+    // its own metadata (e.g. a broadcaster VOD addon). `id` is then a stable negative
+    // number; details, episodes and streams come from the addon by this id.
+    val addonNativeId: String? = null,
+    val addonNativeAddonId: String? = null,
+    // The addon's own type for that id ("Podcasts", "tv"); its /meta and /stream route by it.
+    val addonNativeType: String? = null,
+) : Serializable {
+    val isAddonNative: Boolean get() = !addonNativeId.isNullOrBlank()
+
+    /** True when the item can be opened: it has a TMDB id or is a native addon item. */
+    val hasOpenableId: Boolean get() = id > 0 || (id < 0 && isAddonNative)
+}
 
 enum class MediaType {
-    MOVIE, TV
+    @com.google.gson.annotations.SerializedName(value = "MOVIE", alternate = ["movie"])
+    MOVIE,
+    @com.google.gson.annotations.SerializedName(value = "TV", alternate = ["tv"])
+    TV
 }
 
 /**
@@ -77,7 +104,10 @@ data class NextEpisode(
     val seasonNumber: Int,
     val episodeNumber: Int,
     val name: String,
-    val overview: String = ""
+    val overview: String = "",
+    // Presentation numbers can differ from the canonical episode used for playback (anime).
+    val displaySeason: Int? = null,
+    val displayEpisode: Int? = null
 ) : Serializable
 
 /**
@@ -217,7 +247,39 @@ data class StreamSource(
     val rawLabel: String? = null,
     // Original Stremio title. Some addons use it for source/indexer details
     // that are intentionally separate from behaviorHints.filename.
-    val addonTitle: String? = null
+    val addonTitle: String? = null,
+    // Explicit source metadata only; discovery is deferred until a preview is requested.
+    val preview: StreamPreviewMetadata? = null,
+    // Ephemeral resolved YouTube tracks, never persisted as collection URLs.
+    val youTubeAudioUrl: String? = null,
+    val youTubeFallbackUrl: String? = null,
+    // The playlist or portal an IPTV VOD source came from; the URL that plays can't tell.
+    val iptvSourceId: String? = null
+) : Serializable
+
+enum class StreamPreviewKind { JELLYFIN, PLEX, EMBY, WEBVTT, IMAGE_HLS, BIF }
+
+/**
+ * Identifies existing source-owned images, never a request to generate them. Server/item/version
+ * and account scope must survive playback URL rotation. Generic tracks must be explicitly supplied;
+ * no addon storyboard convention is inferred. Headers are secrets, not cache-key material.
+ */
+@Immutable
+data class StreamPreviewMetadata(
+    val kind: StreamPreviewKind,
+    val serverId: String = "",
+    val accountId: String = "",
+    val itemId: String = "",
+    val mediaSourceId: String = "",
+    val mediaVersion: String = "",
+    val mediaETag: String = "",
+    val serverUrl: String? = null,
+    val manifestUrl: String? = null,
+    val userId: String = "",
+    val headers: Map<String, String> = emptyMap(),
+    val durationMs: Long = 0L,
+    // Original media time = player time + offset. Resume alone does not change this offset.
+    val timelineOffsetMs: Long = 0L
 ) : Serializable
 
 /**
@@ -260,6 +322,11 @@ data class Subtitle(
     val groupIndex: Int? = null,
     val trackIndex: Int? = null,
     val isForced: Boolean = false,
+    // True only when the CONTAINER marked the track forced (C.SELECTION_FLAG_FORCED).
+    // [isForced] is deliberately broader — it also trusts a "forced" name hint — so the two
+    // must stay separate: a genuinely flagged track outranks one that merely says "forced".
+    // Addon subtitles never carry the flag, so this is false for all of them.
+    val hasForcedFlag: Boolean = false,
     // True for image-based subtitle tracks (PGS/VOBSUB/DVB). These carry no text and
     // therefore cannot be used as an AI translation source.
     val isBitmap: Boolean = false,
@@ -300,7 +367,9 @@ data class AddonCatalog(
     val id: String,                                // catalog ID
     val name: String = "",
     val genres: List<String>? = null,
-    val extra: List<AddonCatalogExtra>? = null
+    val extra: List<AddonCatalogExtra>? = null,
+    val clientDelegate: String? = null,
+    val clientFilter: String? = null
 ) : Serializable
 
 data class AddonCatalogExtra(
@@ -332,7 +401,12 @@ data class Addon(
     val url: String? = null,
     val logo: String? = null,
     val manifest: AddonManifest? = null,           // Full manifest for advanced filtering
-    val transportUrl: String? = null               // Base URL for API calls (without manifest.json)
+    val transportUrl: String? = null,              // Base URL for API calls (without manifest.json)
+    // The addon's own settings page. Kept separately from the manifest because a configured
+    // addon usually stops advertising `configurable` (see AddonSetup.kt).
+    val configureUrl: String? = null,
+    val setupUpdatedAt: Long = 0L,
+    val metadataUpdatedAt: Long = 0L
 )
 
 enum class AddonType {

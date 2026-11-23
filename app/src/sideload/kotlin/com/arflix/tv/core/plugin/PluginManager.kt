@@ -673,10 +673,12 @@ class PluginManager @Inject constructor(
         tmdbId: String,
         mediaType: String,
         season: Int? = null,
-        episode: Int? = null
+        episode: Int? = null,
+        allowedProviderIds: Set<String>? = null
     ): Flow<Pair<ScraperInfo, List<LocalScraperResult>?>> = channelFlow {
         val enabledList = enabledScrapers.first()
             .filter { it.supportsType(mediaType) }
+            .filter { allowedProviderIds == null || "plugin_repo:${it.repositoryId?.takeIf(String::isNotBlank) ?: "default"}" in allowedProviderIds }
 
         if (enabledList.isEmpty() || !dataStore.pluginsEnabled.first()) {
             return@channelFlow

@@ -91,6 +91,12 @@ class LiveTvGuideSourcesTest {
 
     // ── Whether the full-guide backfill may run ───────────────────────────
 
+    @Test fun xtreamLoginHasAnAutomaticXmltvFeedEvenWhenShortApiIsEmpty() {
+        val entry = playlist().copy(m3uUrl = "https://example.test/get.php?username=u&password=p&type=m3u_plus")
+        assertThat(LiveTvGuideSources.hasXmltvSource(IptvConfig(playlists = listOf(entry)))).isTrue()
+        assertThat(LiveTvGuideSources.hasXmltvSource(IptvConfig(playlists = listOf(entry.copy(enabled = false))))).isFalse()
+    }
+
     @Test
     fun smallPlaylistsAlwaysBackfill() {
         // Below the large-list threshold the Xtream fan-out is affordable, so
@@ -122,6 +128,19 @@ class LiveTvGuideSourcesTest {
         assertThat(
             LiveTvGuideSources.allowsFullGuideBackfill(config, channelCount = 84_704)
         ).isFalse()
+    }
+
+    @Test
+    fun aGuideNamedInThePlaylistHeaderCountsAsXmltv() {
+        // `#EXTM3U url-tvg="..."` with nothing entered in settings.
+        val config = IptvConfig(playlists = listOf(playlist()))
+        val declared = listOf("https://example.test/epg.xml.gz")
+
+        assertThat(LiveTvGuideSources.hasXmltvSource(config, declared)).isTrue()
+        assertThat(LiveTvGuideSources.hasXmltvSource(config, listOf(" "))).isFalse()
+        assertThat(
+            LiveTvGuideSources.allowsFullGuideBackfill(config, channelCount = 84_704, playlistDeclaredGuides = declared)
+        ).isTrue()
     }
 
     @Test

@@ -9,13 +9,24 @@ import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import org.robolectric.annotation.ConscryptMode
 
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE, sdk = [28], qualifiers = "en-rUS")
+@ConscryptMode(ConscryptMode.Mode.OFF)
 class HomeProfilePreferencesTest {
 
     @Test
     fun `delayed cloud restore enables trailer autoplay without recreating Home`() = runTest {
         val profileId = MutableStateFlow("primary")
-        val preferences = MutableStateFlow<Preferences>(mutablePreferencesOf())
+        val preferences = MutableStateFlow<Preferences>(
+            mutablePreferencesOf(
+                booleanPreferencesKey("profile_primary_trailer_auto_play") to false
+            )
+        )
 
         observeHomeProfilePreferences(profileId, preferences).test {
             assertThat(awaitItem().trailerAutoPlay).isFalse()
@@ -25,6 +36,23 @@ class HomeProfilePreferencesTest {
             )
 
             assertThat(awaitItem().trailerAutoPlay).isTrue()
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `IPTV favorites Home preference updates without recreating Home`() = runTest {
+        val profileId = MutableStateFlow("primary")
+        val preferences = MutableStateFlow<Preferences>(mutablePreferencesOf())
+
+        observeHomeProfilePreferences(profileId, preferences).test {
+            assertThat(awaitItem().iptvFavoritesOnHome).isTrue()
+
+            preferences.value = mutablePreferencesOf(
+                booleanPreferencesKey("profile_primary_iptv_favorites_on_home") to false
+            )
+
+            assertThat(awaitItem().iptvFavoritesOnHome).isFalse()
             cancelAndIgnoreRemainingEvents()
         }
     }
@@ -59,14 +87,35 @@ class HomeProfilePreferencesTest {
     fun `missing settings preserve Home defaults`() {
         val settings = readHomeProfilePreferences(mutablePreferencesOf(), "primary")
 
-        assertThat(settings.trailerAutoPlay).isFalse()
+        assertThat(settings.trailerAutoPlay).isTrue()
         assertThat(settings.trailerSoundEnabled).isFalse()
-        assertThat(settings.trailerDelaySeconds).isEqualTo(2)
+        assertThat(settings.trailerDelaySeconds).isEqualTo(1)
         assertThat(settings.trailerInCards).isTrue()
+        assertThat(settings.netflixHomeStyle).isTrue()
         assertThat(settings.showBudget).isTrue()
+        assertThat(settings.iptvFavoritesOnHome).isTrue()
+        assertThat(settings.watchlistOnHome).isFalse()
         assertThat(settings.clockFormat).isEqualTo("24h")
         assertThat(settings.smoothScrolling).isFalse()
         assertThat(settings.contentLanguage).isEqualTo("en-US")
+    }
+
+    @Test
+    fun `watchlist placement observes toggles and profile switches`() = runTest {
+        val profileId = MutableStateFlow("primary")
+        val preferences = MutableStateFlow<Preferences>(mutablePreferencesOf())
+        observeHomeProfilePreferences(profileId, preferences).test {
+            assertThat(awaitItem().watchlistOnHome).isFalse()
+            preferences.value = mutablePreferencesOf(
+                booleanPreferencesKey("profile_primary_watchlist_on_home") to true
+            )
+            assertThat(awaitItem().watchlistOnHome).isTrue()
+            profileId.value = "secondary"
+            assertThat(awaitItem().watchlistOnHome).isFalse()
+            profileId.value = "primary"
+            assertThat(awaitItem().watchlistOnHome).isTrue()
+            cancelAndIgnoreRemainingEvents()
+        }
     }
 
     @Test

@@ -13,6 +13,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,6 +24,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bookmark
@@ -45,6 +51,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.testTag
+import androidx.annotation.StringRes
 import androidx.compose.foundation.focusable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.focus.FocusRequester
@@ -59,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.arflix.tv.R
+import com.arflix.tv.ui.theme.AccentGreen
 import com.arflix.tv.ui.theme.ArflixTypography
 import com.arflix.tv.ui.theme.BackgroundElevated
 import com.arflix.tv.ui.theme.Pink
@@ -71,7 +80,8 @@ import com.arflix.tv.util.LocalDeviceType
  */
 data class ContextAction(
     val id: String,
-    val label: String,
+    /** Label resource; the id above stays the stable English key for dispatching. */
+    @param:StringRes val labelRes: Int,
     val icon: ImageVector,
     val color: Color = TextPrimary
 )
@@ -80,15 +90,15 @@ data class ContextAction(
  * Predefined context actions
  */
 object ContextActions {
-    val play = ContextAction("play", "Play", Icons.Default.PlayArrow, Pink)
-    val selectSource = ContextAction("sources", "Select Source", Icons.Default.Info, TextPrimary)
-    val markWatched = ContextAction("mark_watched", "Mark as Watched", Icons.Default.Visibility, Color(0xFF22C55E))
-    val markUnwatched = ContextAction("mark_unwatched", "Mark as Unwatched", Icons.Default.VisibilityOff, TextSecondary)
-    val addWatchlist = ContextAction("add_watchlist", "Add to Watchlist", Icons.Default.BookmarkBorder, Pink)
-    val removeWatchlist = ContextAction("remove_watchlist", "Remove from Watchlist", Icons.Default.Bookmark, TextSecondary)
-    val viewDetails = ContextAction("view_details", "View Details", Icons.Default.Info, TextPrimary)
-    val markSeasonWatched = ContextAction("mark_season_watched", "Mark Season Watched", Icons.Default.Check, Color(0xFF22C55E))
-    val markSeasonUnwatched = ContextAction("mark_season_unwatched", "Mark Season Unwatched", Icons.Default.Clear, TextSecondary)
+    val play = ContextAction("play", R.string.play, Icons.Default.PlayArrow, Pink)
+    val selectSource = ContextAction("sources", R.string.stream_title_select_source, Icons.Default.Info, TextPrimary)
+    val markWatched = ContextAction("mark_watched", R.string.component_ctx_mark_watched, Icons.Default.Visibility, AccentGreen)
+    val markUnwatched = ContextAction("mark_unwatched", R.string.component_ctx_mark_unwatched, Icons.Default.VisibilityOff, TextSecondary)
+    val addWatchlist = ContextAction("add_watchlist", R.string.add_to_watchlist, Icons.Default.BookmarkBorder, Pink)
+    val removeWatchlist = ContextAction("remove_watchlist", R.string.remove_from_watchlist, Icons.Default.Bookmark, TextSecondary)
+    val viewDetails = ContextAction("view_details", R.string.component_ctx_view_details, Icons.Default.Info, TextPrimary)
+    val markSeasonWatched = ContextAction("mark_season_watched", R.string.component_ctx_mark_season_watched, Icons.Default.Check, AccentGreen)
+    val markSeasonUnwatched = ContextAction("mark_season_unwatched", R.string.component_ctx_mark_season_unwatched, Icons.Default.Clear, TextSecondary)
 }
 
 /**
@@ -113,7 +123,7 @@ fun ContextMenu(
         if (isVisible) {
             focusedIndex = 0 // Reset to first item
             if (!isMobile) {
-                focusRequester.requestFocus()
+                runCatching { focusRequester.requestFocus() }
             }
         }
     }
@@ -166,9 +176,9 @@ fun ContextMenu(
                     modifier = Modifier
                         .padding(top = 110.dp)
                         .width(360.dp)
-                        .background(BackgroundElevated, RoundedCornerShape(18.dp))
+                        .background(BackgroundElevated, RoundedCornerShape(8.dp))
                         .padding(20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    horizontalAlignment = Alignment.Start
                 ) {
                     // Title
                     Text(
@@ -206,46 +216,26 @@ fun ContextMenu(
                         actions.forEachIndexed { index, action ->
                             ContextMenuItem(
                                 action = action,
-                                isFocused = index == focusedIndex
+                                isFocused = index == focusedIndex,
+                                onClick = { onAction(action) }
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    // Close hint
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = null,
-                            tint = TextSecondary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = stringResource(R.string.context_press_back_cancel),
-                            style = ArflixTypography.caption,
-                            color = TextSecondary
-                        )
-                    }
                 }
             }
         }
     } else {
-        // --- Mobile layout: bottom-sheet style menu ---
+        // --- Touch layout: bounded sheet with safe insets, also on tablets. ---
         AnimatedVisibility(
             visible = isVisible,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxSize()
+                    .statusBarsPadding()
                     .background(Color.Black.copy(alpha = 0.5f))
                     .clickable(
                         indication = null,
@@ -266,11 +256,16 @@ fun ContextMenu(
                 ) {
                     Column(
                         modifier = Modifier
+                            .widthIn(max = 560.dp)
                             .fillMaxWidth()
+                            .heightIn(max = maxHeight)
+                            .testTag("mobile_context_menu")
                             .background(
                                 BackgroundElevated,
                                 RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
                             )
+                            .navigationBarsPadding()
+                            .verticalScroll(rememberScrollState())
                             .clickable(
                                 indication = null,
                                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
@@ -285,7 +280,7 @@ fun ContextMenu(
                                 .height(4.dp)
                                 .background(
                                     Color.White.copy(alpha = 0.2f),
-                                    RoundedCornerShape(2.dp)
+                                    RoundedCornerShape(8.dp)
                                 )
                         )
 
@@ -326,6 +321,7 @@ fun ContextMenu(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 48.dp)
+                                    .testTag("context_action_${action.id}")
                                     .clickable { onAction(action) }
                                     .padding(horizontal = 16.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -338,7 +334,7 @@ fun ContextMenu(
                                     modifier = Modifier.size(24.dp)
                                 )
                                 Text(
-                                    text = action.label,
+                                    text = stringResource(action.labelRes),
                                     style = ArflixTypography.body,
                                     color = TextPrimary
                                 )
@@ -365,55 +361,38 @@ fun ContextMenu(
 @Composable
 private fun ContextMenuItem(
     action: ContextAction,
-    isFocused: Boolean
+    isFocused: Boolean,
+    onClick: () -> Unit
 ) {
-    val bgColor = if (isFocused) Color.White.copy(alpha = 0.1f) else Color.Transparent
-    val borderColor = if (isFocused) Pink else Color.Transparent
+    val bgColor = if (isFocused) Color.White else Color.Transparent
+    val foreground = if (isFocused) Color.Black else TextPrimary
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(bgColor, RoundedCornerShape(12.dp))
-            .border(
-                width = if (isFocused) 2.dp else 0.dp,
-                color = borderColor,
-                shape = RoundedCornerShape(12.dp)
-            )
+            .heightIn(min = 48.dp)
+            .background(bgColor, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             imageVector = action.icon,
             contentDescription = null,
-            tint = if (isFocused) Pink else action.color,
+            tint = foreground,
             modifier = Modifier.size(24.dp)
         )
 
         Spacer(modifier = Modifier.width(16.dp))
 
         Text(
-            text = action.label,
+            text = stringResource(action.labelRes),
             style = ArflixTypography.body,
-            color = if (isFocused) TextPrimary else action.color
+            color = foreground
         )
 
         Spacer(modifier = Modifier.weight(1f))
 
-        if (isFocused) {
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .background(Pink, RoundedCornerShape(6.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Check,
-                    contentDescription = null,
-                    tint = Color.Black,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-        }
     }
 }
 
@@ -464,8 +443,8 @@ fun SeasonContextMenu(
 ) {
     ContextMenu(
         isVisible = isVisible,
-        title = "Season $seasonNumber",
-        subtitle = "Quick Actions",
+        title = stringResource(R.string.component_ctx_season_title, seasonNumber),
+        subtitle = stringResource(R.string.component_ctx_quick_actions),
         actions = listOf(
             ContextActions.markSeasonWatched,
             ContextActions.markSeasonUnwatched

@@ -2,8 +2,10 @@
 
 package com.arflix.tv.ui.screens.tv.live
 
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -26,21 +28,32 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FitScreen
+import androidx.compose.material.icons.outlined.PlayCircleOutline
+import androidx.compose.material.icons.outlined.List
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -57,6 +70,21 @@ internal enum class LiveTvMiniPlayerLayout {
     STANDARD,
     PORTRAIT_STACKED,
     LANDSCAPE_COMPACT,
+}
+
+internal enum class MiniPlayerVideoSizeMode {
+    STANDARD,
+    FULL_WIDTH_16_9,
+    LANDSCAPE_COMPACT,
+}
+
+internal fun miniPlayerVideoSizeMode(
+    compact: Boolean,
+    landscapeCompact: Boolean,
+): MiniPlayerVideoSizeMode = when {
+    landscapeCompact -> MiniPlayerVideoSizeMode.LANDSCAPE_COMPACT
+    compact -> MiniPlayerVideoSizeMode.FULL_WIDTH_16_9
+    else -> MiniPlayerVideoSizeMode.STANDARD
 }
 
 internal data class LandscapePhoneMiniPlayerSpec(
@@ -80,14 +108,22 @@ internal fun landscapePhoneMiniPlayerSpec(): LandscapePhoneMiniPlayerSpec =
 
 internal fun liveTvMiniPlayerLayout(
     isTouchDevice: Boolean,
-    smallestScreenWidthDp: Int,
-    screenWidthDp: Int,
-    screenHeightDp: Int,
+    availableWidthDp: Int,
+    availableHeightDp: Int,
 ): LiveTvMiniPlayerLayout = when {
-    !isTouchDevice || smallestScreenWidthDp >= 600 -> LiveTvMiniPlayerLayout.STANDARD
-    screenWidthDp > screenHeightDp -> LiveTvMiniPlayerLayout.LANDSCAPE_COMPACT
-    else -> LiveTvMiniPlayerLayout.PORTRAIT_STACKED
+    !isTouchDevice -> LiveTvMiniPlayerLayout.STANDARD
+    availableWidthDp > availableHeightDp && availableHeightDp < 600 ->
+        LiveTvMiniPlayerLayout.LANDSCAPE_COMPACT
+    availableWidthDp < 600 -> LiveTvMiniPlayerLayout.PORTRAIT_STACKED
+    else -> LiveTvMiniPlayerLayout.STANDARD
 }
+
+internal fun landscapeCompactGuideHeightDp(
+    availableHeightDp: Int,
+    screenHeaderHeightDp: Int = 60,
+    miniPlayerContainerPaddingDp: Int = 16,
+): Int = (availableHeightDp - screenHeaderHeightDp - miniPlayerContainerPaddingDp -
+    landscapePhoneMiniPlayerSpec().totalHeightDp).coerceAtLeast(0)
 
 
 @OptIn(ExperimentalTvMaterial3Api::class)
@@ -100,12 +136,36 @@ fun MiniPlayerRow(
     favoriteSet: Set<String>,
     onFavoriteToggle: (String) -> Unit,
     onFullscreenClick: (() -> Unit)? = null,
+    onProgrammeGuideClick: (() -> Unit)? = null,
     variantCount: Int = 1,
     onOpenVariants: (() -> Unit)? = null,
     compact: Boolean = false,
     landscapeCompact: Boolean = false,
+    playerActive: Boolean = true,
+    focusedProgramme: Pair<EnrichedChannel, IptvProgram>? = null,
+    onVideoBoundsPositioned: ((Rect) -> Unit)? = null,
     modifier: Modifier = Modifier,
+    focusedProgrammeProvider: (() -> Pair<EnrichedChannel, IptvProgram>?)? = null,
+    focusedChannelProvider: (() -> Pair<EnrichedChannel, IptvNowNext?>?)? = null,
+    videoOnly: Boolean = false,
 ) {
+    val drawerTranslation = LocalLiveDrawerTranslation.current
+    // Read rapidly changing programme focus here, not in the surrounding guide.
+    val displayedProgramme = focusedProgrammeProvider?.invoke() ?: focusedProgramme
+    // Browsing a channel without EPG still has useful metadata. Keep preview
+    // selection separate from the channel attached to the video player.
+    val focusedChannel = focusedChannelProvider?.invoke()
+    val infoChannel = displayedProgramme?.first ?: focusedChannel?.first ?: channel
+    val infoNowNext = if (focusedChannel != null) focusedChannel.second else nowNext
+    val infoVariantCount = if (infoChannel?.id == channel?.id) variantCount else 1
+    val onInfoVariants = onOpenVariants.takeIf { infoChannel?.id == channel?.id }
+    val drawerDirection = if (LocalLayoutDirection.current == LayoutDirection.Rtl) 1f else -1f
+    if (videoOnly) {
+        VideoCard(exoPlayer = exoPlayer, channel = channel, compact = true, playerActive = playerActive,
+            onFullscreenClick = onFullscreenClick, onVideoBoundsPositioned = onVideoBoundsPositioned,
+            modifier = modifier.fillMaxWidth())
+        return
+    }
     if (landscapeCompact) {
         val spec = landscapePhoneMiniPlayerSpec()
         Row(
@@ -119,16 +179,19 @@ fun MiniPlayerRow(
                 exoPlayer = exoPlayer,
                 channel = channel,
                 landscapeCompact = true,
+                playerActive = playerActive,
                 onFullscreenClick = onFullscreenClick,
+                onVideoBoundsPositioned = onVideoBoundsPositioned,
             )
             InfoColumn(
-                channel = channel,
+                focusedProgramme = displayedProgramme,
+                channel = infoChannel,
                 clockTickMillis = clockTickMillis,
-                nowNext = nowNext,
+                nowNext = infoNowNext,
                 isFavorite = channel?.id?.let { it in favoriteSet } == true,
                 onFavoriteToggle = onFavoriteToggle,
-                variantCount = variantCount,
-                onOpenVariants = onOpenVariants,
+                variantCount = infoVariantCount,
+                onOpenVariants = onInfoVariants,
                 landscapeCompact = true,
                 modifier = Modifier
                     .weight(1f)
@@ -146,17 +209,20 @@ fun MiniPlayerRow(
                 exoPlayer = exoPlayer,
                 channel = channel,
                 compact = true,
+                playerActive = playerActive,
                 onFullscreenClick = onFullscreenClick,
+                onVideoBoundsPositioned = onVideoBoundsPositioned,
                 modifier = Modifier.fillMaxWidth(),
             )
             InfoColumn(
-                channel = channel,
+                focusedProgramme = displayedProgramme,
+                channel = infoChannel,
                 clockTickMillis = clockTickMillis,
-                nowNext = nowNext,
+                nowNext = infoNowNext,
                 isFavorite = channel?.id?.let { it in favoriteSet } == true,
                 onFavoriteToggle = onFavoriteToggle,
-                variantCount = variantCount,
-                onOpenVariants = onOpenVariants,
+                variantCount = infoVariantCount,
+                onOpenVariants = onInfoVariants,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -164,25 +230,61 @@ fun MiniPlayerRow(
         Row(
             modifier = modifier
                 .fillMaxWidth()
-                .padding(start = 10.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+                .padding(start = 18.dp, end = 14.dp, top = 1.dp, bottom = 3.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Top,
         ) {
+            val programme = displayedProgramme?.second ?: infoNowNext?.now
+            GuideProgrammeSummary(infoChannel, programme,
+                Modifier.weight(1f).then(
+                    if (programme?.title.isNullOrBlank()) Modifier.heightIn(min = LiveDims.MiniPlayerHeight)
+                    else Modifier.height(LiveDims.MiniPlayerHeight)
+                ))
             VideoCard(
                 exoPlayer = exoPlayer,
                 channel = channel,
+                playerActive = playerActive,
                 onFullscreenClick = onFullscreenClick,
+                onVideoBoundsPositioned = onVideoBoundsPositioned,
+                modifier = Modifier.graphicsLayer { translationX = drawerDirection * drawerTranslation() },
             )
-            InfoColumn(
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun GuideProgrammeSummary(
+    channel: EnrichedChannel?, programme: IptvProgram?, modifier: Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.height(30.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            if (channel != null) ChannelLogo(
                 channel = channel,
-                clockTickMillis = clockTickMillis,
-                nowNext = nowNext,
-                isFavorite = channel?.id?.let { it in favoriteSet } == true,
-                onFavoriteToggle = onFavoriteToggle,
-                variantCount = variantCount,
-                onOpenVariants = onOpenVariants,
-                modifier = Modifier.weight(1f),
+                size = 60.dp,
+                modifier = Modifier.size(60.dp, 24.dp),
+                contentPadding = 0.dp,
+                showPlaceholder = false,
             )
+            Text(listOfNotNull(channel?.name, channel?.quality?.takeIf { it != Quality.UNKNOWN }?.label).joinToString(" · "),
+                color = LiveColors.FgDim, fontSize = 11.sp, lineHeight = 13.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+        Text(liveProgrammeTitle(programme?.title, channel?.name, stringResource(R.string.live_empty_no_programme)),
+            color = LiveColors.Fg, fontSize = 20.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold,
+            maxLines = if (programme?.title.isNullOrBlank()) Int.MAX_VALUE else 2,
+            overflow = TextOverflow.Ellipsis, modifier = Modifier.testTag("live-programme-title"))
+        Text(listOfNotNull(programme?.let(::formatTimeWindow),
+            channel?.genre?.name?.let(::formatGenreName), remainingLabel(programme).takeIf(String::isNotBlank)).joinToString("  ·  "),
+            color = LiveColors.FgDim, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // A wrapping channel fallback needs only its content height. A weighted
+        // description here would expand the preview and consume the guide below.
+        val description = programme?.description.orEmpty()
+        if (!programme?.title.isNullOrBlank() || description.isNotBlank()) {
+            Text(description, color = LiveColors.Fg, fontSize = 12.sp, lineHeight = 16.sp,
+                maxLines = 3, overflow = TextOverflow.Ellipsis,
+                modifier = if (programme?.title.isNullOrBlank()) Modifier else Modifier.weight(1f))
         }
     }
 }
@@ -194,23 +296,42 @@ private fun VideoCard(
     channel: EnrichedChannel?,
     compact: Boolean = false,
     landscapeCompact: Boolean = false,
+    playerActive: Boolean = true,
     onFullscreenClick: (() -> Unit)? = null,
+    onVideoBoundsPositioned: ((Rect) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val deviceType = LocalDeviceType.current
     val isTouchDevice = deviceType.isTouchDevice()
     val landscapeSpec = if (landscapeCompact) landscapePhoneMiniPlayerSpec() else null
+    val sizeMode = miniPlayerVideoSizeMode(compact, landscapeCompact)
+
+    val playerAlpha by animateFloatAsState(
+        targetValue = if (playerActive) 1f else 0f,
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "mini-player-fade",
+    )
 
     Box(
         modifier = modifier
             .then(
                 when {
-                    compact -> Modifier.aspectRatio(16f / 9f)
-                    landscapeSpec != null -> Modifier.size(
-                        landscapeSpec.videoWidthDp.dp,
+                    sizeMode == MiniPlayerVideoSizeMode.LANDSCAPE_COMPACT -> Modifier.size(
+                        requireNotNull(landscapeSpec).videoWidthDp.dp,
                         landscapeSpec.videoHeightDp.dp,
                     )
+                    sizeMode == MiniPlayerVideoSizeMode.FULL_WIDTH_16_9 ->
+                        Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                     else -> Modifier.size(LiveDims.MiniPlayerWidth, LiveDims.MiniPlayerHeight)
+                }
+            )
+            .then(
+                if (onVideoBoundsPositioned != null) {
+                    Modifier.onGloballyPositioned { coords ->
+                        onVideoBoundsPositioned(coords.boundsInRoot())
+                    }
+                } else {
+                    Modifier
                 }
             )
             .clickable(enabled = isTouchDevice && onFullscreenClick != null) {
@@ -236,26 +357,51 @@ private fun VideoCard(
                     .fillMaxSize()
                     .background(
                         Brush.radialGradient(
-                            colors = listOf(channel.brandBg, LiveColors.Bg),
+                            colors = listOf(LiveColors.Panel, LiveColors.Bg),
                         )
                     ),
             )
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).apply {
-                        this.player = exoPlayer
+                        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        if (playerActive) {
+                            this.player = exoPlayer
+                        }
                         useController = false
                         setKeepContentOnPlayerReset(true)
                     }
                 },
                 update = { view ->
-                    if (view.player !== exoPlayer) {
-                        view.player = exoPlayer
+                    if (playerActive) {
+                        if (view.player !== exoPlayer) {
+                            view.player = exoPlayer
+                        }
+                    } else {
+                        if (view.player != null) {
+                            view.player = null
+                        }
                     }
                 },
-                modifier = Modifier.fillMaxSize(),
+                onRelease = { view ->
+                    if (view.player === exoPlayer) {
+                        view.player = null
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = playerAlpha
+                    },
             )
-            LiveBug(modifier = Modifier.align(Alignment.TopEnd).padding(10.dp))
+            LiveBug(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(10.dp)
+                    .graphicsLayer {
+                        alpha = playerAlpha
+                    },
+            )
         }
 
         if (isTouchDevice && onFullscreenClick != null) {
@@ -297,7 +443,7 @@ private fun LiveBug(modifier: Modifier = Modifier) {
     )
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(Color(0xAA000000))
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -306,7 +452,7 @@ private fun LiveBug(modifier: Modifier = Modifier) {
         Box(
             modifier = Modifier
                 .size(8.dp)
-                .alpha(alpha)
+                .graphicsLayer { this.alpha = alpha }
                 .background(LiveColors.LiveRed, CircleShape),
         )
         Text(
@@ -319,6 +465,7 @@ private fun LiveBug(modifier: Modifier = Modifier) {
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun InfoColumn(
+    focusedProgramme: Pair<EnrichedChannel, IptvProgram>? = null,
     channel: EnrichedChannel?,
     clockTickMillis: Long,
     nowNext: IptvNowNext?,
@@ -334,6 +481,19 @@ private fun InfoColumn(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(if (landscapeCompact) 5.dp else 8.dp),
     ) {
+        if (focusedProgramme != null) {
+            val (focusedChannel, programme) = focusedProgramme
+            Text(focusedChannel.source.name, style = LiveType.SectionTag.copy(color = LiveColors.FgDim))
+            Text("${formatClock(programme.startUtcMillis)} - ${formatClock(programme.endUtcMillis)}", style = LiveType.TimeMono.copy(color = LiveColors.FgDim))
+            Text(liveProgrammeTitle(programme.title, focusedChannel.name, stringResource(R.string.live_empty_no_programme)),
+                style = LiveType.CellTitle.copy(color = LiveColors.Fg),
+                maxLines = if (programme.title.isBlank()) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag("live-programme-title"))
+            programme.description?.takeIf { it.isNotBlank() }?.let {
+                Text(it, style = LiveType.BodySynopsis.copy(color = LiveColors.FgDim), maxLines = if (landscapeCompact) 1 else 3, overflow = TextOverflow.Ellipsis)
+            }
+            return@Column
+        }
         ChannelIdentityRow(channel = channel, variantCount = variantCount, onOpenVariants = onOpenVariants)
         NowCard(
             channel = channel,
@@ -361,14 +521,7 @@ private fun ChannelIdentityRow(
         if (channel != null) {
             ChannelLogo(channel = channel, size = 30.dp)
             Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = stringResource(R.string.live_label_ch, channel.number),
-                        style = LiveType.SectionTag.copy(color = LiveColors.FgMute),
-                    )
+                if (channel.genre.name.isNotBlank()) {
                     Text(
                         text = formatGenreName(channel.genre.name),
                         style = LiveType.SectionTag.copy(color = LiveColors.FgMute),
@@ -381,19 +534,19 @@ private fun ChannelIdentityRow(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                    QualityBadge(channel.quality)
+                    if (channel.quality == Quality.K4) {
+                        QualityBadge(channel.quality)
+                    }
                     if (variantCount > 1) {
                         SourceBadge(variantCount, onOpenVariants)
                     }
-                    channel.country?.takeIf { it != channel.lang }?.let { LangBadge(it) }
-                    LangBadge(channel.lang)
                 }
             }
         } else {
             Box(
                 modifier = Modifier
                     .size(48.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(12.dp))
                     .background(LiveColors.Panel),
             )
             Text(
@@ -409,21 +562,22 @@ private fun ChannelIdentityRow(
 private fun SourceBadge(count: Int, onOpenVariants: (() -> Unit)?) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(LiveColors.Panel)
             .then(if (onOpenVariants != null) Modifier.clickable { onOpenVariants() } else Modifier)
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
-        Text(stringResource(R.string.live_label_sources, count), style = LiveType.Badge.copy(color = LiveColors.Accent))
+        Text(stringResource(R.string.live_label_sources, count), style = LiveType.Badge.copy(color = liveAccent()))
     }
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun QualityBadge(q: Quality) {
+    if (q == Quality.UNKNOWN) return
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(LiveColors.Panel)
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
@@ -436,7 +590,7 @@ private fun QualityBadge(q: Quality) {
 private fun LangBadge(text: String) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(LiveColors.Panel)
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
@@ -457,10 +611,8 @@ private fun NowCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(LiveDims.CardRadius))
-            .background(LiveColors.PanelRaised)
             .padding(
-                horizontal = if (landscapeCompact) 8.dp else 10.dp,
+                horizontal = 0.dp,
                 vertical = if (landscapeCompact) 5.dp else 8.dp,
             ),
         verticalArrangement = Arrangement.spacedBy(if (landscapeCompact) 2.dp else 4.dp),
@@ -469,7 +621,7 @@ private fun NowCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(stringResource(R.string.live_badge_now), style = LiveType.SectionTag.copy(color = LiveColors.Accent))
+            Text(stringResource(R.string.live_badge_now), style = LiveType.SectionTag.copy(color = liveAccent()))
             Text(
                 text = formatTimeWindow(now),
                 style = LiveType.TimeMono.copy(color = LiveColors.Fg),
@@ -479,15 +631,16 @@ private fun NowCard(
             if (remaining.isNotBlank()) {
                 Text(
                     text = remaining,
-                    style = LiveType.TimeMono.copy(color = LiveColors.Accent),
+                    style = LiveType.TimeMono.copy(color = liveAccent()),
                 )
             }
         }
         Text(
-            text = now?.title ?: channel?.name ?: stringResource(R.string.live_empty_no_programme),
+            text = liveProgrammeTitle(now?.title, channel?.name, stringResource(R.string.live_empty_no_programme)),
             style = LiveType.ProgramTitle.copy(color = LiveColors.Fg),
-            maxLines = if (landscapeCompact) 1 else 2,
+            maxLines = if (now?.title.isNullOrBlank()) Int.MAX_VALUE else if (landscapeCompact) 1 else 2,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.testTag("live-programme-title"),
         )
         val description = now?.description
         if (landscapeSpec?.showDescription != false && !description.isNullOrBlank()) {
@@ -503,7 +656,7 @@ private fun NowCard(
             LinearProgressIndicator(
                 progress = { progress },
                 modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
-                color = LiveColors.Accent,
+                color = liveAccent(),
                 trackColor = LiveColors.Panel,
             )
         }

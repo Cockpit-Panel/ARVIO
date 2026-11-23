@@ -1,0 +1,10 @@
+{
+  "Play {value0}": "{value0} چلائیں",
+  "Custom v3 API key for TMDB requests": "TMDB درخواستوں کے لیے اپنی v3 API کلید",
+  "Collection": "مجموعہ",
+  "Watching": "دیکھ رہے ہیں",
+  "Completed": "مکمل",
+  "Dropped": "چھوڑ دیا",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: Jellyfin سے مطابقت رکھنے والا پتہ استعمال کریں. اختیاری پروفائل: username#ProfileName. محفوظ پروفائل: password#PIN.",
+  "None of your enabled addons provide playback sources.": "آپ کے فعال کردہ ایڈ آنز میں سے کوئی بھی پلے بیک کے ذرائع فراہم نہیں کرتا۔"
+}

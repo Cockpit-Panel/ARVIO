@@ -1,0 +1,10 @@
+{
+  "Play {value0}": "Esita {value0}",
+  "Scan a QR code with the Telegram app on your phone to sign in.": "Sisselogimiseks skanni telefonis Telegrami rakendusega QR-kood.",
+  "Collection": "Kogu",
+  "Watching": "Vaatamisel",
+  "Completed": "Lõpetatud",
+  "Dropped": "Pooleli jäetud",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: kasuta Jellyfiniga ühilduvat aadressi. Valikuline profiil: username#ProfileName. Kaitstud profiil: password#PIN.",
+  "None of your enabled addons provide playback sources.": "Ükski teie lubatud lisandmoodul ei paku taasesitusallikaid."
+}

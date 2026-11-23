@@ -1,10 +1,13 @@
 "use client";
+import { useTranslation } from "@/lib/i18n";
+
 
 import { Bookmark, Check, EyeOff, Info, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useApp } from "@/lib/store";
+import { useAppPick } from "@/lib/store";
 
 export function MediaContextMenu() {
+  const translateUi = useTranslation();
   const {
     activeContextMenu,
     closeContextMenu,
@@ -15,7 +18,7 @@ export function MediaContextMenu() {
     watchlist,
     isWatched,
     continueWatching
-  } = useApp();
+  } = useAppPick("activeContextMenu", "closeContextMenu", "openDetails", "toggleWatchlist", "toggleWatched", "removeFromContinueWatching", "watchlist", "isWatched", "continueWatching");
 
   const [mounted, setMounted] = useState(false);
 
@@ -138,13 +141,13 @@ export function MediaContextMenu() {
               }}
             >
               <span className="context-menu-icon">{act.icon}</span>
-              <span className="context-menu-label">{act.label}</span>
+              <span className="context-menu-label">{translateUi(act.label)}</span>
             </button>
           ))}
         </div>
 
         <div className="context-menu-footer-hint">
-          <span>Press ESC to close</span>
+          <span>{translateUi("Press ESC to close")}</span>
         </div>
       </div>
     </div>

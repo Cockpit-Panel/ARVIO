@@ -34,6 +34,7 @@ import androidx.tv.material3.Text
 import com.arflix.tv.R
 import com.arflix.tv.data.model.StreamSource
 import com.arflix.tv.ui.theme.ArflixTypography
+import com.arflix.tv.ui.theme.ErrorRed
 import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.SuccessGreen
 import com.arflix.tv.ui.theme.TextPrimary
@@ -73,26 +74,29 @@ fun SourceInfoOverlay(
                 Column(
                     horizontalAlignment = Alignment.End
                 ) {
-                    // Quality badge
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.HighQuality,
-                            contentDescription = null,
-                            tint = getQualityColor(source.quality),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = source.quality.uppercase(),
-                            style = ArflixTypography.label,
-                            color = getQualityColor(source.quality)
-                        )
-                    }
+                    // Quality badge - only when the source actually names one,
+                    // otherwise the icon would sit next to an empty line.
+                    if (source.quality.isNotBlank()) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.HighQuality,
+                                contentDescription = null,
+                                tint = getQualityColor(source.quality),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = source.quality.uppercase(),
+                                style = ArflixTypography.label,
+                                color = getQualityColor(source.quality)
+                            )
+                        }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
 
                     // Source indicator
                     Row(
@@ -172,7 +176,7 @@ fun PlayerInfoBar(
         if (isLive) {
             Row(
                 modifier = Modifier
-                    .background(Color(0xFFEF4444), RoundedCornerShape(4.dp))
+                    .background(ErrorRed, RoundedCornerShape(8.dp))
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {

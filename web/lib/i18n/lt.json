@@ -1,0 +1,9 @@
+{
+  "Play {value0}": "Leisti {value0}",
+  "Collection": "Kolekcija",
+  "Watching": "Žiūrima",
+  "Completed": "Baigta",
+  "Dropped": "Mesta",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: naudokite su Jellyfin suderinamą adresą. Pasirenkamas profilis: username#ProfileName. Apsaugotas profilis: password#PIN.",
+  "None of your enabled addons provide playback sources.": "Nė vienas iš jūsų įjungtų priedų nepateikia atkūrimo šaltinių."
+}

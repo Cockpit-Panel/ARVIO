@@ -1,61 +1,140 @@
 # ARVIO Web
 
-Browser-native ARVIO app for iPad, desktop, and TV browsers. This app lives beside the Android app and mirrors the same product surface without touching Android-only code.
+ARVIO's browser media hub for Windows, macOS, Linux, iPhone, iPad and TV browsers.
+The webapp source is included in this repository. **Self-host it on your own
+computer or server with Node.js or Docker Compose and your own API credentials.**
+Media and access to third-party services are not included.
 
-## What It Reuses
+## Quick Start: Node.js
 
-- ARVIO Netlify auth and account sync (`auth-login`, `auth-refresh`, `account-sync-pull`, `account-sync-push`).
-- Android's TMDB and Trakt proxy model through Next API routes.
-- Stremio-style addon manifest and stream response contracts.
-- IPTV M3U playlist parsing, channel groups, favorites, and browser HLS playback.
-- ARVIO visual language: dark full-screen shell, left TV navigation, hero, rails, details drawer, source selector, player overlay, Live TV, addons, settings.
+Install Node.js 22.19+ (22 LTS recommended) and Git, then:
 
-## Environment
-
-Copy `.env.example` to `.env.local` and fill:
-
-```bash
-NEXT_PUBLIC_NETLIFY_BACKEND_URL=https://auth.arvio.tv/.netlify/functions
-NEXT_PUBLIC_ARVIO_APP_ANON_KEY=
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-NEXT_PUBLIC_TRAKT_CLIENT_ID=
-TMDB_API_KEY=
-TRAKT_CLIENT_SECRET=
+```sh
+git clone https://github.com/ProdigyV21/ARVIO.git
+cd ARVIO/web
+npm ci
+npm run setup:selfhost
 ```
 
-When `NEXT_PUBLIC_ARVIO_APP_ANON_KEY` is configured, `/api/tmdb/*`, `/api/trakt/*`, cloud login, and account sync use the same Netlify backend as Android. `NEXT_PUBLIC_SUPABASE_ANON_KEY` is kept as a fallback for older deployments; new deployments should provide the app anon key explicitly.
+Edit `.env.local` and set your **TMDB API v3 key** as `TMDB_API_KEY`.
+Trakt, Simkl and Telegram are optional. Then:
 
-## Run
-
-```bash
-npm install
-npm run dev
-```
-
-Production check:
-
-```bash
+```sh
+npm run check:selfhost
 npm run build
-npm run start
+npm run start -- --hostname 127.0.0.1
 ```
 
-## Netlify Git Deploy
+Open **http://localhost:3000**, choose/create a local profile and add your sources
+in Settings. There is no ARVIO sign-in, trial or subscription step. The setup
+command never overwrites an existing `.env.local`. For development, use
+`npm run dev -- --hostname 127.0.0.1` instead of build/start.
 
-The source for `web.arvio.tv` is this `web/` directory. Do not connect Netlify to a repository that only contains generated `_next/` output.
+## Docker Compose
 
-Recommended Netlify settings for the `arvio-web` site:
+Install Docker with Compose. From `ARVIO/web`, create `.env.local` using
+`npm run setup:selfhost`, or copy `.env.selfhost.example` to `.env.local`
+if Node is not installed on the host. Add your TMDB key, then run:
 
-```text
-Repository: ProdigyV21/ARVIO
-Branch: main
-Base directory: web
-Build command: npm run build
-Publish directory: .next
+```sh
+docker compose --env-file .env.local up -d --build
+docker compose --env-file .env.local ps
 ```
 
-The matching config is tracked in `web/netlify.toml`. If Netlify is linked from the repository root, set the site base directory to `web`; otherwise Netlify will build the Android/landing workspace instead of the browser app.
+Open **http://localhost:3000**. This builds the same webapp as the Node setup,
+runs as a non-root user, and binds only to loopback by default. Your TMDB key
+and OAuth secrets are runtime variables, not Docker build arguments. Optional
+public tracker/Telegram application credentials and your resolver URL are read
+at runtime too: the image does not embed the maintainer's credentials. Source
+builds remain supported; a prebuilt image is not required.
 
-## Browser Limits
+Update from the repository root:
 
-The browser player can play direct HTTP/HLS URLs. Addon streams that only return torrents, info hashes, or Android-player-only formats still need a web resolver/transcode path before they can play in a browser.
+```sh
+git pull --ff-only
+cd web
+docker compose --env-file .env.local up -d --build
+```
+
+For Node deployments, update the checkout, run `npm ci` and `npm run build`,
+then restart the server. Neither method updates itself automatically.
+See [the full self-hosting guide](docs/SELF-HOSTING.md) before exposing a server
+on your network or the internet.
+
+## Personal API Credentials
+
+| Integration | Where to configure | Required? |
+| --- | --- | --- |
+| TMDB | `TMDB_API_KEY` in `.env.local`; use the v3 API key, not the bearer token | For built-in movie/show metadata |
+| Trakt | `TRAKT_CLIENT_ID` and `TRAKT_CLIENT_SECRET`, then connect in Settings | Optional |
+| Simkl | `SIMKL_V2_CLIENT_ID`, then connect in Settings; retain V1 ID/secret only for existing V1 connections | Optional; V2 PIN login needs no secret |
+| MDBList | Enter your own key in Settings > Accounts | Optional |
+| Telegram | `NEXT_PUBLIC_TELEGRAM_API_ID` and `NEXT_PUBLIC_TELEGRAM_API_HASH`, then connect your account | Optional |
+| Plex / Emby / Jellyfin | Connect your server in Settings | Optional |
+| Addons / live TV / debrid | Configure your own providers in Settings or their addon configuration | Optional |
+
+Credential links, secure deployment, browser limitations, backup considerations
+and troubleshooting are in [SELF-HOSTING.md](docs/SELF-HOSTING.md).
+
+## What Is Independent?
+
+With `NEXT_PUBLIC_SELF_HOSTED=true`, profiles/settings/history stay in that
+browser, TMDB/Trakt/Simkl API routes use your credentials directly, and ARVIO
+Cloud, membership requests and hosted-service analytics are disabled. A
+separately configured resolver remains optional. Built-in catalogs and your
+configured integrations still contact their respective third-party services.
+
+**Local storage is not cross-device cloud sync.** Trakt and Simkl can sync their
+own watched/watchlist data when connected, but they do not sync ARVIO profiles,
+IPTV settings, addons or the complete app state. Clearing browser site data
+removes local data. The Docker filesystem is not a backup of browser profiles.
+
+SIMKL V2 access/refresh tokens are the exception to browser-local storage: they
+stay encrypted on the server, linked to a profile-specific HttpOnly cookie.
+Compose persists these sessions in the `simkl-sessions` volume across container
+rebuilds. For Node installations, preserve `.data/simkl-sessions` or set the
+server-only `SIMKL_SESSION_DIR` to a private, writable persistent directory.
+Back up this directory securely; clearing site cookies requires reconnecting SIMKL.
+
+## Maintainers: Official Hosted Service
+
+Production `web.arvio.tv` uses the same source with self-hosted mode disabled
+and its existing Cloud and access-control configuration. Do not apply the self-hosted
+environment example to the official site.
+
+The deployment workflow is `../.github/workflows/deploy-web.yml`, with
+`web/` as the working directory. `netlify.toml` uses `npm run build`,
+publishes `.next`, and uses Netlify's Next.js runtime. A static file host alone
+is insufficient: `/api/*` routes require a Node/Next-compatible server.
+
+## Verification
+
+```sh
+npm test
+npx tsc --noEmit
+npm run build
+```
+
+### Shared default catalogs
+
+`lib/defaultCatalogs.json` is exported from Android's `buildPreinstalledDefaults`:
+10 standard catalogs and 43 folders in Featured, Services, Genres, Franchises and
+Decades. `WebDefaultCatalogParityTest` checks titles, sources, artwork and ordering.
+After changing Android defaults, regenerate the snapshot from the repository root:
+
+```powershell
+$env:ARVIO_EXPORT_WEB_DEFAULTS = '1'
+./gradlew.bat :app:testSideloadDebugUnitTest --tests '*WebDefaultCatalogParityTest' --rerun-tasks
+Remove-Item Env:ARVIO_EXPORT_WEB_DEFAULTS
+```
+
+Fresh profiles get these defaults. The complete, recognizable old web default
+block migrates once, preserving hidden items and surrounding custom lists.
+Removed, reordered, renamed or replaced defaults are not reset automatically.
+The default-collections toggle syncs Android's disable marker and leaves imported
+collections alone. `node scripts/check-default-collections-ui.cjs` checks the real
+collection components on desktop, tablet and mobile in Edge with offline fixtures.
+
+Browser playback depends on the source, CORS, codecs, device and browser.
+Self-hosting does not automatically make every Dolby Vision, DRM or torrent
+source browser-playable, and this setup does not run a media transcoding server.

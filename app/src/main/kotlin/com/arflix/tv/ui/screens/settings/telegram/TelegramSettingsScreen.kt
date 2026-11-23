@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -63,17 +64,17 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.arflix.tv.R
 import com.arflix.tv.data.telegram.TelegramAuthState
+import com.arflix.tv.data.telegram.TelegramConfig
 import com.arflix.tv.ui.components.LoadingIndicator
 import com.arflix.tv.ui.theme.ArflixTypography
 import com.arflix.tv.ui.theme.BackgroundElevated
+import com.arflix.tv.ui.theme.ErrorRed
 import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.SuccessGreen
 import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
 import com.arflix.tv.ui.theme.appBackgroundDark
 import androidx.compose.foundation.layout.PaddingValues
-import com.arflix.tv.ui.motion.rememberArvioPredictiveBack
-import com.arflix.tv.ui.motion.arvioBackSurface
 import com.arflix.tv.util.LocalDeviceType
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
@@ -87,16 +88,18 @@ fun TelegramSettingsScreen(
 ) {
     val authState by viewModel.authState.collectAsState()
     val cacheSizeBytes by viewModel.cacheSizeBytes.collectAsState()
+    val searchOnClickOnly by viewModel.searchOnClickOnly.collectAsState()
     var showDisconnectConfirm by remember { mutableStateOf(false) }
     val isMobile = LocalDeviceType.current.isTouchDevice()
-    val backMotion = rememberArvioPredictiveBack(enabled = isMobile && showHeader && !showDisconnectConfirm) {
-        onBack()
+    if (showDisconnectConfirm) {
+        BackHandler { showDisconnectConfirm = false }
+    } else if (showHeader) {
+        BackHandler { onBack() }
     }
 
     val rootModifier = if (showHeader) {
         Modifier
             .fillMaxSize()
-            .arvioBackSurface(backMotion)
             .background(appBackgroundDark())
     } else {
         Modifier.fillMaxSize()
@@ -156,8 +159,10 @@ fun TelegramSettingsScreen(
                 is TelegramAuthState.Ready -> ConnectedContent(
                     firstName = state.firstName,
                     cacheSizeBytes = cacheSizeBytes,
+                    searchOnClickOnly = searchOnClickOnly,
                     onDisconnect = { showDisconnectConfirm = true },
-                    onClearCache = { viewModel.clearCache() }
+                    onClearCache = { viewModel.clearCache() },
+                    onToggleSearchOnClickOnly = { viewModel.setSearchOnClickOnly(!searchOnClickOnly) }
                 )
                 is TelegramAuthState.Error -> ErrorContent(
                     message = state.message,
@@ -204,8 +209,8 @@ private fun IdleContent(onConnect: () -> Unit) {
         Box(
             modifier = Modifier
                 .fillMaxWidth(0.72f)
-                .background(Color.White.copy(alpha = 0.04f), RoundedCornerShape(10.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(10.dp))
+                .background(Color.White.copy(alpha = 0.04f), RoundedCornerShape(12.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             Text(
@@ -216,7 +221,25 @@ private fun IdleContent(onConnect: () -> Unit) {
             )
         }
         Spacer(modifier = Modifier.height(24.dp))
-        ActionButton(label = stringResource(R.string.connect).uppercase(), onClick = onConnect)
+        if (!TelegramConfig.isConfigured) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.72f)
+                    .background(ErrorRed.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                    .border(1.dp, ErrorRed.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.telegram_not_configured),
+                    style = ArflixTypography.caption.copy(fontSize = 12.sp),
+                    color = ErrorRed,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        } else {
+            ActionButton(label = stringResource(R.string.connect).uppercase(), onClick = onConnect)
+        }
     }
 }
 
@@ -383,8 +406,8 @@ private fun CodeContent(codeLength: Int, onSubmit: (String) -> Unit) {
         Spacer(modifier = Modifier.height(40.dp))
         Row(
             modifier = Modifier
-                .background(SuccessGreen.copy(alpha = 0.08f), RoundedCornerShape(10.dp))
-                .border(1.dp, SuccessGreen.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+                .background(SuccessGreen.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                .border(1.dp, SuccessGreen.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
@@ -474,8 +497,10 @@ private fun PasswordContent(onSubmit: (String) -> Unit) {
 private fun ConnectedContent(
     firstName: String,
     cacheSizeBytes: Long,
+    searchOnClickOnly: Boolean,
     onDisconnect: () -> Unit,
-    onClearCache: () -> Unit
+    onClearCache: () -> Unit,
+    onToggleSearchOnClickOnly: () -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -558,6 +583,47 @@ private fun ConnectedContent(
                 )
             }
         }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        var searchModeFocused by remember { mutableStateOf(false) }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggleSearchOnClickOnly() }
+                .onFocusChanged { searchModeFocused = it.isFocused }
+                .background(
+                    if (searchModeFocused) Pink.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.04f),
+                    RoundedCornerShape(12.dp)
+                )
+                .border(
+                    width = if (searchModeFocused) 2.dp else 1.dp,
+                    color = if (searchModeFocused) Pink else Color.White.copy(alpha = 0.08f),
+                    shape = RoundedCornerShape(12.dp)
+                )
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.telegram_search_on_click_title),
+                    style = ArflixTypography.cardTitle.copy(fontSize = 14.sp),
+                    color = if (searchModeFocused) Pink else TextPrimary
+                )
+                Text(
+                    text = stringResource(R.string.telegram_search_on_click_desc),
+                    style = ArflixTypography.caption.copy(fontSize = 13.sp),
+                    color = TextSecondary
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = stringResource(if (searchOnClickOnly) R.string.on else R.string.off),
+                style = ArflixTypography.label.copy(fontSize = 11.sp),
+                color = if (searchOnClickOnly) SuccessGreen else TextSecondary
+            )
+        }
     }
 }
 
@@ -584,8 +650,8 @@ private fun ErrorContent(message: String, onRetry: () -> Unit) {
 private fun ActionButton(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .background(Pink.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
-            .border(1.dp, Pink.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+            .background(Pink.copy(alpha = 0.15f), CircleShape)
+            .border(1.dp, Pink.copy(alpha = 0.4f), CircleShape)
             .clickable { onClick() }
             .padding(horizontal = 24.dp, vertical = 12.dp),
         contentAlignment = Alignment.Center

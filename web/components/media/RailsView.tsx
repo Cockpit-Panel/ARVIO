@@ -1,4 +1,6 @@
 "use client";
+import { useTranslation } from "@/lib/i18n";
+
 
 import type { Category, MediaItem } from "@/lib/types";
 import { MediaRail } from "./MediaRail";
@@ -10,10 +12,11 @@ export function RailsView({ title, eyebrow, categories, onOpen, posterMode = fal
   onOpen: (item: MediaItem) => void;
   posterMode?: boolean;
 }) {
+  const translateUi = useTranslation();
   return (
     <div className="screen has-section-heading">
       <section className="section-heading">
-        <p className="eyebrow">{eyebrow ?? "Browse"}</p>
+        <p className="eyebrow">{eyebrow ?? translateUi("Browse")}</p>
         <h2>{title}</h2>
       </section>
       {categories.map((category) => <MediaRail key={category.id} category={category} onOpen={onOpen} posterMode={posterMode} />)}

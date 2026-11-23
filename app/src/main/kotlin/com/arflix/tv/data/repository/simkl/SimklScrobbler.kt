@@ -8,7 +8,6 @@ import com.arflix.tv.data.api.SimklScrobbleBody
 import com.arflix.tv.data.api.SimklShowRef
 import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.util.AppLogger
-import com.arflix.tv.util.Constants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,27 +28,30 @@ class SimklScrobbler @Inject constructor(
 
     private data class Command(
         val action: Action,
-        val authHeader: String,
+        val accountIdentity: String,
         val body: SimklScrobbleBody,
-        val tmdbId: Int
+        val mediaType: MediaType,
+        val tmdbId: Int,
+        val season: Int? = null,
+        val episode: Int? = null
     )
 
     private companion object {
         const val WRITE_LOCK_MS = 20_500L
     }
 
-    private val clientId: String get() = Constants.SIMKL_CLIENT_ID
-    private val queueScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val clientId: String get() = authManager.effectiveClientId
+    internal var queueScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val queueMutex = Mutex()
     private var hasWritten = false
     private var lastWriteAt = 0L
-    private var pendingCommand: Command? = null
-    private var pendingJob: Job? = null
+    private val commandQueue = ArrayDeque<Command>()
+    private var workerJob: Job? = null
     internal var elapsedRealtimeMs: () -> Long = { android.os.SystemClock.elapsedRealtime() }
 
     private fun normalizeProgress(progress: Float): Float {
-        // If progress is in 0.0 - 1.0 range, scale to 0.0 - 100.0
-        return if (progress in 0.0f..1.0f) progress * 100f else progress.coerceIn(0f, 100f)
+        // Enforce consistent 0.0 - 100.0 scale without multiplier heuristic
+        return progress.coerceIn(0f, 100f)
     }
 
     suspend fun scrobbleStart(
@@ -61,10 +63,9 @@ class SimklScrobbler @Inject constructor(
         isAnime: Boolean = false
     ) {
         val token = authManager.getAccessToken() ?: return
-        val authHeader = "Bearer $token"
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode, isAnime)
 
-        submit(Command(Action.START, authHeader, body, tmdbId))
+        submit(Command(Action.START, authManager.cacheIdentity(token), body, mediaType, tmdbId, season, episode))
     }
 
     suspend fun scrobblePause(
@@ -76,10 +77,9 @@ class SimklScrobbler @Inject constructor(
         isAnime: Boolean = false
     ) {
         val token = authManager.getAccessToken() ?: return
-        val authHeader = "Bearer $token"
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode, isAnime)
 
-        submit(Command(Action.PAUSE, authHeader, body, tmdbId))
+        submit(Command(Action.PAUSE, authManager.cacheIdentity(token), body, mediaType, tmdbId, season, episode))
     }
 
     suspend fun scrobbleStop(
@@ -91,51 +91,93 @@ class SimklScrobbler @Inject constructor(
         isAnime: Boolean = false
     ) {
         val token = authManager.getAccessToken() ?: return
-        val authHeader = "Bearer $token"
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode, isAnime)
 
-        submit(Command(Action.STOP, authHeader, body, tmdbId))
+        submit(Command(Action.STOP, authManager.cacheIdentity(token), body, mediaType, tmdbId, season, episode))
+    }
+
+    private fun isSameMedia(a: Command, b: Command): Boolean {
+        if (a.accountIdentity != b.accountIdentity || a.mediaType != b.mediaType || a.tmdbId != b.tmdbId) return false
+        return if (a.mediaType == MediaType.TV) {
+            a.season == b.season && a.episode == b.episode
+        } else {
+            true
+        }
     }
 
     private suspend fun submit(command: Command) {
         var immediate: Command? = null
         queueMutex.withLock {
+            val now = elapsedRealtimeMs()
             val remaining = if (hasWritten) {
-                WRITE_LOCK_MS - (elapsedRealtimeMs() - lastWriteAt)
+                WRITE_LOCK_MS - (now - lastWriteAt)
             } else {
                 0L
             }
-            if (remaining <= 0L && pendingJob == null) {
+            if (remaining <= 0L && commandQueue.isEmpty() && workerJob == null) {
                 hasWritten = true
-                lastWriteAt = elapsedRealtimeMs()
+                lastWriteAt = now
                 immediate = command
             } else {
-                pendingCommand = command
-                if (pendingJob == null) {
-                    pendingJob = queueScope.launch {
-                        delay(remaining.coerceAtLeast(1L))
-                        val pending = queueMutex.withLock {
-                            pendingJob = null
-                            hasWritten = true
-                            lastWriteAt = elapsedRealtimeMs()
-                            pendingCommand.also { pendingCommand = null }
-                        }
-                        pending?.let { execute(it) }
-                    }
+                val tail = commandQueue.lastOrNull()
+                if (tail != null && isSameMedia(tail, command) && tail.action != Action.STOP && command.action != Action.STOP) {
+                    commandQueue.removeLast()
+                    commandQueue.addLast(command)
+                } else {
+                    commandQueue.addLast(command)
                 }
+                ensureWorkerLocked()
             }
         }
         immediate?.let { execute(it) }
     }
 
+    private fun ensureWorkerLocked() {
+        if (workerJob?.isActive == true) return
+        workerJob = queueScope.launch {
+            while (true) {
+                var waitTime = 0L
+                val nextCommand: Command? = queueMutex.withLock {
+                    if (commandQueue.isEmpty()) {
+                        workerJob = null
+                        return@launch
+                    }
+                    val now = elapsedRealtimeMs()
+                    val remaining = if (hasWritten) {
+                        WRITE_LOCK_MS - (now - lastWriteAt)
+                    } else {
+                        0L
+                    }
+                    if (remaining > 0L) {
+                        waitTime = remaining
+                        null
+                    } else {
+                        hasWritten = true
+                        lastWriteAt = now
+                        commandQueue.removeFirst()
+                    }
+                }
+
+                if (nextCommand != null) {
+                    execute(nextCommand)
+                } else if (waitTime > 0L) {
+                    delay(waitTime)
+                }
+            }
+        }
+    }
+
     private suspend fun execute(command: Command) {
         try {
             val activeToken = authManager.getAccessToken() ?: return
-            if (command.authHeader != "Bearer $activeToken") return
+            // V2 access tokens rotate. Keep queued events for the same connection,
+            // but never send them after an account/profile connection has changed.
+            if (command.accountIdentity != authManager.cacheIdentity(activeToken)) return
+            val authHeader = "Bearer $activeToken"
             val response = when (command.action) {
-                Action.START -> simklApi.scrobbleStart(command.authHeader, clientId, command.body)
-                Action.PAUSE -> simklApi.scrobblePause(command.authHeader, clientId, command.body)
-                Action.STOP -> simklApi.scrobbleStop(command.authHeader, clientId, command.body)
+                Action.START -> simklApi.scrobbleStart(authHeader, clientId, command.body)
+                Action.PAUSE -> simklApi.scrobblePause(authHeader, clientId, command.body)
+                Action.STOP -> simklApi.scrobbleStop(authHeader, clientId, command.body)
             }
             if (!response.isSuccessful) {
                 AppLogger.e(
@@ -166,10 +208,12 @@ class SimklScrobbler @Inject constructor(
                 progress = normProgress
             )
         } else {
-            val series = SimklShowRef(ids = SimklIds(tmdb = tmdbId))
+            val series = SimklShowRef(
+                ids = SimklIds(tmdb = tmdbId),
+                useTvdbAnimeSeasons = if (isAnime) true else null
+            )
             SimklScrobbleBody(
-                show = series.takeUnless { isAnime },
-                anime = series.takeIf { isAnime },
+                show = series,
                 episode = if (season != null && episode != null) {
                     SimklEpisodeRef(season = season, number = episode)
                 } else null,

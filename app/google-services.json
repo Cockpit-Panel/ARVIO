@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "970677063444",
+    "project_id": "arvio-15c5a",
+    "storage_bucket": "arvio-15c5a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:970677063444:android:681fdda874ad4cecec7c01",
+        "android_client_info": {
+          "package_name": "com.arvio.tv"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD0Qhba7t-4XXrunPETeLbnh7QSSGhRIsU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:970677063444:android:5e98426cf2709f19ec7c01",
+        "android_client_info": {
+          "package_name": "com.arvio.tv.beta"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD0Qhba7t-4XXrunPETeLbnh7QSSGhRIsU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

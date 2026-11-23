@@ -1,4 +1,9 @@
 import java.util.Properties
+import java.net.URI
+import java.security.MessageDigest
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import com.google.firebase.crashlytics.buildtools.gradle.CrashlyticsExtension
 
 plugins {
     id("com.android.application")
@@ -13,13 +18,47 @@ plugins {
     id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin")
     id("io.gitlab.arturbosch.detekt")
     kotlin("plugin.serialization")
-    // Firebase Crashlytics - uncomment after adding google-services.json
-    // id("com.google.gms.google-services")
-    // id("com.google.firebase.crashlytics")
+    id("com.google.gms.google-services")
+    id("com.google.firebase.crashlytics")
+}
+
+// On-device speech recognition for sync by hearing (sherpa-onnx, Apache-2.0). The AAR is ~50 MB, so it is downloaded once into libs/ (git-ignored)
+// and verified instead of committed.
+val sherpaOnnxVersion = "1.13.8"
+val sherpaOnnxSha256 = "633c24321e06b1fe79feafa03ea16cbc0f8a286641e2da3559bac91bdb13bd96"
+val sherpaOnnxAar = layout.projectDirectory.file("libs/sherpa-onnx-$sherpaOnnxVersion.aar")
+val downloadSherpaOnnx = tasks.register("downloadSherpaOnnx") {
+    val aar = sherpaOnnxAar.asFile
+    inputs.property("version", sherpaOnnxVersion)
+    inputs.property("sha256", sherpaOnnxSha256)
+    outputs.file(aar)
+    fun sha256(file: File): String = MessageDigest.getInstance("SHA-256")
+        .digest(file.readBytes()).joinToString("") { byte -> "%02x".format(byte) }
+    outputs.upToDateWhen { aar.isFile && sha256(aar) == sherpaOnnxSha256 }
+    doLast {
+        if (aar.isFile && sha256(aar) == sherpaOnnxSha256) return@doLast
+        val url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v$sherpaOnnxVersion/sherpa-onnx-$sherpaOnnxVersion.aar"
+        logger.lifecycle("Downloading $url")
+        aar.parentFile.mkdirs()
+        val partial = File(aar.path + ".part")
+        try {
+            URI(url).toURL().openConnection().apply {
+                connectTimeout = 30_000
+                readTimeout = 60_000
+            }.getInputStream().use { input -> partial.outputStream().use { output -> input.copyTo(output) } }
+            check(sha256(partial) == sherpaOnnxSha256) { "Checksum mismatch for $url" }
+            Files.move(partial.toPath(), aar.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            partial.delete()
+        }
+    }
 }
 
 val discordSdkAar = layout.projectDirectory.file("libs/discord_partner_sdk.aar").asFile
 val hasDiscordSdk = discordSdkAar.isFile
+val includeX86Abis = providers.gradleProperty("includeX86Abis")
+    .orNull
+    ?.toBooleanStrictOrNull() == true
 
 android {
     namespace = "com.arflix.tv"
@@ -34,11 +73,17 @@ android {
         // Fire TV devices can be as low as Android 7.1 (API 25) or lower depending on model/OS.
         minSdk = 23
         targetSdk = 36
-        versionCode = 310
-        versionName = "1.9.995"
+        versionCode = 323
+        versionName = "2.4"
         buildConfigField("String", "GITHUB_OWNER", "\"ProdigyV21\"")
         buildConfigField("String", "GITHUB_REPO", "\"ARVIO\"")
         buildConfigField("Boolean", "FEATURE_PLUGINS_ENABLED", "false")
+        buildConfigField("Boolean", "PARTNER_MANAGEMENT_ENABLED", (providers.gradleProperty("partnerManagement").orNull == "true").toString())
+        // Use the same resolution for generated values and release validation.
+        buildConfigField("String", "TELEGRAM_API_ID", "\"${escapeBuildConfigString(localSecretValue("TELEGRAM_API_ID"))}\"")
+        buildConfigField("String", "TELEGRAM_API_HASH", "\"${escapeBuildConfigString(localSecretValue("TELEGRAM_API_HASH"))}\"")
+        // Public endpoint override for isolated preview testing; never a provider API key.
+        buildConfigField("String", "SPORTS_METADATA_URL", "\"${escapeBuildConfigString(localSecretValue("SPORTS_METADATA_URL"))}\"")
         // Emergency Supabase cost guard. Keep high-volume public metadata and
         // idle realtime polling off Supabase unless explicitly re-enabled.
         buildConfigField("Boolean", "ENABLE_TMDB_EDGE_PROXY", "false")
@@ -52,15 +97,22 @@ android {
         buildConfigField(
             "String",
             "DISCORD_APPLICATION_ID",
-            "\"${escapeBuildConfigString(localSecretValue("DISCORD_CLIENT_ID").ifBlank { "1501197333826637835" })}\""
+            "\"${escapeBuildConfigString(localSecretValue("DISCORD_CLIENT_ID"))}\""
         )
+        // Cockpit: no ARVIO cloud account backend.
         buildConfigField("String", "NETLIFY_BACKEND_URL", "\"https://auth.arvio.tv/.netlify/functions\"")
         buildConfigField("String", "APP_ANON_KEY", "\"\"")
 
 
-        // Support both 32-bit and 64-bit devices (required for Google Play since 2019)
+        // Keep release downloads ARM-universal by default. Developers can add x86
+        // emulator support with -PincludeX86Abis=true without changing this file.
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            abiFilters += buildList {
+                addAll(listOf("armeabi-v7a", "arm64-v8a"))
+                if (includeX86Abis) {
+                    addAll(listOf("x86", "x86_64"))
+                }
+            }
         }
 
         if (hasDiscordSdk) {
@@ -83,13 +135,22 @@ android {
     productFlavors {
         create("play") {
             dimension = "distribution"
+            // Automatic Play protection requires Android 7.0 or newer.
+            minSdk = 24
             buildConfigField("Boolean", "SELF_UPDATE_ENABLED", "false")
             buildConfigField("Boolean", "FEATURE_PLUGINS_ENABLED", "false")
+            // The initial Sync by Hearing rollout is limited to sideload builds.
+            buildConfigField("Boolean", "AUDIO_SYNC_AVAILABLE", "false")
+            // Searching YouTube from Search is a sideload-only feature (YouTube API policies).
+            buildConfigField("Boolean", "YOUTUBE_SEARCH_AVAILABLE", "false")
         }
         create("sideload") {
             dimension = "distribution"
             buildConfigField("Boolean", "SELF_UPDATE_ENABLED", "true")
+            // Cockpit: plugins disabled.
             buildConfigField("Boolean", "FEATURE_PLUGINS_ENABLED", "false")
+            buildConfigField("Boolean", "AUDIO_SYNC_AVAILABLE", "true")
+            buildConfigField("Boolean", "YOUTUBE_SEARCH_AVAILABLE", "true")
         }
     }
 
@@ -113,11 +174,12 @@ android {
         }
     }
 
+
     buildTypes {
         release {
-            // R8 currently crashes on this codebase's Kotlin metadata during
-            // release minification. Keep release builds unminified so final
-            // Cockpit APKs can be produced reliably.
+            // Cockpit: R8 has crashed on this codebase's Kotlin metadata during
+            // release minification. Keep release builds unminified so Cockpit
+            // APKs can be produced reliably.
             isMinifyEnabled = false
             isShrinkResources = false
             // Use release signing if configured, otherwise fall back to debug
@@ -139,6 +201,9 @@ android {
 
             // Build config fields for release
             buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true")
+            configure<CrashlyticsExtension> {
+                nativeSymbolUploadEnabled = true
+            }
         }
 
         debug {
@@ -151,10 +216,19 @@ android {
             buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "false")
         }
 
-        // Staging build type: release-grade optimizations but signed with the
+        // Isolated telemetry verification; test controls never enter a release APK.
+        create("diagnostics") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".beta"
+            versionNameSuffix = "-diagnostics"
+            matchingFallbacks += "debug"
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true")
+        }
+
+        // Cockpit staging build: release-grade optimizations signed with the
         // debug keystore so the APK installs as an update over an existing
         // debug build (preserves profile/IPTV/DataStore). NO applicationId
-        // suffix — it MUST resolve to the same package as debug/release.
+        // suffix: it MUST resolve to the same package as debug/release.
         create("staging") {
             initWith(getByName("release"))
             versionNameSuffix = "-rc"
@@ -172,10 +246,22 @@ android {
         isCoreLibraryDesugaringEnabled = true
     }
 
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
+
     sourceSets {
         getByName("main") {
             java.srcDir("src/main/tdlib-java")
+            // Vendored media3 1.9.0 Matroska extractor with Dolby Vision P7 sample hooks
+            // (see dvmkv/package-info.java for the re-vendoring procedure on media3 bumps).
             java.srcDir("src/main/dvmkv-java")
+            // Vendored media3 1.9.0 TS extractor that keeps every DVB subtitle stream in HLS
+            // (see iptvts/package-info.java for the re-vendoring procedure on media3 bumps).
+            java.srcDir("src/main/iptvts-java")
+            res.srcDir("src/main/res-player")
         }
     }
 
@@ -183,15 +269,6 @@ android {
         compose = true
         buildConfig = true
         prefab = hasDiscordSdk
-    }
-
-    if (hasDiscordSdk) {
-        externalNativeBuild {
-            cmake {
-                path = file("src/main/cpp/CMakeLists.txt")
-                version = "3.22.1"
-            }
-        }
     }
 
     packaging {
@@ -206,6 +283,17 @@ android {
         }
         jniLibs {
             useLegacyPackaging = false  // Required for 16KB page size support
+            // sherpa-onnx's JNI library only needs libonnxruntime; its C/C++ API libraries are unused.
+            excludes += setOf("lib/*/libsherpa-onnx-c-api.so", "lib/*/libsherpa-onnx-cxx-api.so")
+        }
+    }
+
+    if (hasDiscordSdk) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
     }
 
@@ -244,17 +332,20 @@ ksp {
     configurations.all {
         resolutionStrategy {
             force("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
-            force("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
-            force("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+            force("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+            force("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.2")
+            force("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
         }
     }
 
     dependencies {
+    // Discord Partner SDK is licensed separately and intentionally not committed.
     if (hasDiscordSdk) {
         implementation(files(discordSdkAar))
     } else {
         logger.warn("Discord Partner SDK AAR not found. Discord Rich Presence will be unavailable.")
     }
+
     // Gson explicit pin to keep `JsonParser`/AST extension API stable with current sources.
     implementation("com.google.code.gson:gson:2.10.1")
 
@@ -264,6 +355,8 @@ ksp {
 
     // Core library desugaring for Java 8+ APIs
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+
+    // Nullness annotations used by the vendored media3 Matroska extractor (src/main/dvmkv-java).
     compileOnly("org.checkerframework:checker-qual:3.43.0")
 
     // Core Android
@@ -285,9 +378,10 @@ ksp {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material3:material3:1.3.2")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.animation:animation")
+    implementation("dev.chrisbanes.haze:haze:0.7.3")
 
     // Compose for TV - Core TV components
     // tv-foundation stays alpha (no beta/stable releases exist); tv-material bumped to stable
@@ -295,14 +389,14 @@ ksp {
     implementation("androidx.tv:tv-material:1.0.0")
 
     // Navigation
-    implementation("androidx.navigation:navigation-compose:2.7.6")
+    implementation("androidx.navigation:navigation-compose:2.8.9")
 
     // Hilt for DI — 2.57 (last stable for AGP 8.x). 2.59's Gradle plugin demands
     // AGP 9 + Gradle 9.1 and is broken there (dagger#5099). androidx.hilt is held at
     // stable 1.2.0 below so hilt-work doesn't drag dagger back up to 2.59.
     implementation("com.google.dagger:hilt-android:2.57")
     ksp("com.google.dagger:hilt-compiler:2.57")
-    implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
 
     // Leanback (TV compliance, browse fragments if needed)
     implementation("androidx.leanback:leanback:1.1.0-rc02")
@@ -314,14 +408,22 @@ ksp {
     implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
     implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
     implementation("androidx.media3:media3-datasource-okhttp:$media3Version")
+    implementation("androidx.media3:media3-effect:$media3Version") {
+        exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-guava")
+    }
+    implementation("androidx.media3:media3-inspector:$media3Version") {
+        // Inspector's optional Kotlin Future adapter pulls Coroutines 1.9 into this app, while
+        // ARVIO's Ktor stack is intentionally pinned to 1.7.3. FrameExtractor is Java/Guava-based
+        // and does not need that adapter.
+        exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-guava")
+    }
     implementation("androidx.media3:media3-ui:$media3Version")
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
     // FFmpeg extension for software decoding of DTS/TrueHD/Atmos/HEVC/DV.
-    // Keep this only in the sideload build. The Play Store build must comply
-    // with 16 KB memory page support, and the current prebuilt native library
-    // (libffmpegJNI.so) is the likely source of the Play Console warning.
-    add("sideloadImplementation", "org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
+    // This version's ARM64 ELF load segments are 16 KB aligned. Both distributions need
+    // software audio decoding on TVs without a compatible hardware decoder/output route.
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
 
     // Networking - Retrofit + OkHttp
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
@@ -329,6 +431,10 @@ ksp {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+    // Cloudstream/NiceHttp require OkHttp 5; its Android initializer is flavor-specific.
+    add("sideloadImplementation", "com.squareup.okhttp3:okhttp:5.3.2")
+    add("sideloadImplementation", "com.squareup.okhttp3:logging-interceptor:5.3.2")
+    add("sideloadImplementation", "com.squareup.okhttp3:okhttp-dnsoverhttps:5.3.2")
     implementation("com.squareup.moshi:moshi:1.15.1")
     implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
 
@@ -336,23 +442,27 @@ ksp {
     implementation("org.jsoup:jsoup:1.17.2")
 
     // Coroutines
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     // Image loading - Coil
     implementation("io.coil-kt:coil-compose:2.5.0")
     implementation("io.coil-kt:coil-gif:2.5.0")
     implementation("io.coil-kt:coil-svg:2.5.0")
+    implementation("androidx.palette:palette-ktx:1.0.0")
     implementation("com.google.zxing:core:3.5.3")
 
     // Supabase (optional - for cloud sync)
     implementation("io.github.jan-tennert.supabase:postgrest-kt:2.0.4")
     implementation("io.github.jan-tennert.supabase:gotrue-kt:2.0.4")
-    implementation("io.ktor:ktor-client-android:2.3.7")
+    // Ktor 2.3.12+ removes an internal-coroutines ABI dependency that crashes
+    // the Telegram proxy with the coroutines version required by Firebase Sessions.
+    implementation(platform("io.ktor:ktor-bom:2.3.13"))
+    implementation("io.ktor:ktor-client-android:2.3.13")
     // Ktor server modules used by Telegram streaming proxy
-    implementation("io.ktor:ktor-server-core:2.3.7")
-    implementation("io.ktor:ktor-server-cio:2.3.7")
-    implementation("io.ktor:ktor-server-call-logging:2.3.7")
-    implementation("io.ktor:ktor-server-host-common:2.3.7")
+    implementation("io.ktor:ktor-server-core:2.3.13")
+    implementation("io.ktor:ktor-server-cio:2.3.13")
+    implementation("io.ktor:ktor-server-call-logging:2.3.13")
+    implementation("io.ktor:ktor-server-host-common:2.3.13")
 
     // DataStore for preferences
     implementation("androidx.datastore:datastore-preferences:1.0.0")
@@ -381,14 +491,18 @@ ksp {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     // Firebase Crashlytics - optional, works when google-services.json is present
-    implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
-    implementation("com.google.firebase:firebase-crashlytics-ktx")
-
-    // Sentry crash reporting. Runtime initialization is gated by BuildConfig.ENABLE_CRASH_REPORTING
-    // and SENTRY_DSN from secrets.properties/secrets.defaults.properties.
-    implementation("io.sentry:sentry-android:8.40.0")
+    // BoM 35 raises minSdk to 24; retain support for existing API 23 sideload devices.
+    implementation(platform("com.google.firebase:firebase-bom:34.14.1"))
+    implementation("com.google.firebase:firebase-crashlytics")
+    implementation("com.google.firebase:firebase-crashlytics-ndk")
+    implementation("com.google.firebase:firebase-analytics")
 
     baselineProfile(project(":benchmark"))
+
+    // YouTube player for the Home billboard trailer (official IFrame API wrapper)
+    implementation("com.pierfrancescosoffritti.androidyoutubeplayer:core:13.0.0") {
+        exclude(group = "androidx.lifecycle")
+    }
 
     // NanoHTTPD – lightweight HTTP server for QR-based AI key setup
     implementation("org.nanohttpd:nanohttpd:2.3.1")
@@ -398,7 +512,8 @@ ksp {
     add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.17.0")
     add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.17.0")
     add("sideloadImplementation", "com.github.Blatzar:NiceHttp:0.4.11")
-    add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.5.3")
+    // The 2.5.3 ARM64 binary has a 4 KB RELRO boundary inside a writable segment.
+    add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.6.3")
     add("sideloadImplementation", "com.github.recloudstream.cloudstream:library-android:v4.7.0") {
         exclude(group = "org.mozilla", module = "rhino")
     }
@@ -408,7 +523,9 @@ ksp {
 
     // Unit Testing
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    add("testSideloadImplementation", "com.squareup.okhttp3:mockwebserver:5.3.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("io.mockk:mockk:1.13.8")
     testImplementation("app.cash.turbine:turbine:1.0.0")  // Flow testing
     testImplementation("com.google.truth:truth:1.1.5")    // Better assertions
@@ -423,7 +540,8 @@ ksp {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.2.0")
     androidTestImplementation("io.mockk:mockk-android:1.13.8")
-    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:5.3.2")
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
 }
 
 secrets {
@@ -435,17 +553,28 @@ secrets {
 
     // Ignore missing keys to allow builds without secrets file
     ignoreList.add("sdk.*")
+    ignoreList.add("APP_ANON_KEY")
+    ignoreList.add("SIMKL_CLIENT_SECRET")
+    ignoreList.add("SENTRY_DSN")
+    ignoreList.add("TELEGRAM_API_ID")
+    ignoreList.add("TELEGRAM_API_HASH")
 }
 
 fun localSecretValue(name: String): String {
     val secretsFile = rootProject.file("secrets.properties")
     if (secretsFile.exists()) {
         val properties = Properties()
-        secretsFile.inputStream().use { properties.load(it) }
+        secretsFile.readText(Charsets.UTF_8).removePrefix("\uFEFF").reader().use { properties.load(it) }
         properties.getProperty(name)?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
     }
     providers.gradleProperty(name).orNull?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
     providers.environmentVariable(name).orNull?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
+    val defaultsFile = rootProject.file("secrets.defaults.properties")
+    if (defaultsFile.exists()) {
+        val properties = Properties()
+        defaultsFile.readText(Charsets.UTF_8).removePrefix("\uFEFF").reader().use { properties.load(it) }
+        properties.getProperty(name)?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
+    }
     return ""
 }
 
@@ -453,6 +582,9 @@ fun escapeBuildConfigString(value: String): String =
     value
         .replace("\\", "\\\\")
         .replace("\"", "\\\"")
+
+// Cockpit: upstream validateReleaseCloudSecrets removed; Cockpit builds ship without
+// ARVIO cloud, Trakt or Telegram release secrets.
 
 detekt {
     // Configuration file
@@ -487,6 +619,9 @@ kotlin {
 }
 
 dependencies {
+    // Sync by hearing: on-device speech recognition (see sherpaOnnxAar above).
+    // Sideload only: the Play build has no sync by hearing (see AUDIO_SYNC_AVAILABLE).
+    "sideloadImplementation"(files(sherpaOnnxAar).builtBy(downloadSherpaOnnx))
     ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
     annotationProcessor("org.jetbrains.kotlin:kotlin-metadata-jvm:2.3.0")
 
@@ -495,7 +630,6 @@ dependencies {
     add("sideloadImplementation", "com.fasterxml.jackson.core:jackson-databind:2.17.0")
     add("sideloadImplementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.17.0")
     add("sideloadImplementation", "com.github.Blatzar:NiceHttp:0.4.11")
-    add("sideloadImplementation", "org.conscrypt:conscrypt-android:2.5.3")
     add("sideloadImplementation", "com.github.recloudstream.cloudstream:library-android:v4.7.0") {
         exclude(group = "org.mozilla", module = "rhino")
     }

@@ -26,7 +26,7 @@ class ContinueWatchingRowReducerTest {
             subtitle = "Continue from 22:00",
             mediaType = MediaType.MOVIE,
             progress = 42,
-            timeRemainingLabel = "48min left"
+            timeRemainingMinutes = 48
         )
 
         val result = ContinueWatchingRowReducer.upsert(
@@ -36,14 +36,14 @@ class ContinueWatchingRowReducerTest {
 
         assertEquals(42, result.progress)
         assertEquals("Continue from 22:00", result.subtitle)
-        assertEquals("48min left", result.timeRemainingLabel)
+        assertEquals(48, result.timeRemainingMinutes)
         assertEquals("poster", result.image)
         assertEquals("8.1", result.imdbRating)
     }
 
     @Test
     fun `next episode update replaces the previous episode for the same show`() {
-        val existing = tvItem(20, season = 1, episode = 4)
+        val existing = tvItem(20, season = 1, episode = 4).copy(episodeStill = "episode-4")
         val next = tvItem(20, season = 1, episode = 5)
 
         val categories = ContinueWatchingRowReducer.upsert(
@@ -53,6 +53,20 @@ class ContinueWatchingRowReducerTest {
 
         assertEquals(1, categories.first().items.size)
         assertEquals(5, categories.first().items.single().nextEpisode?.episodeNumber)
+        assertNull(categories.first().items.single().episodeStill)
+    }
+
+    @Test
+    fun `progress update for the same episode preserves its still`() {
+        val existing = tvItem(20, season = 1, episode = 4).copy(episodeStill = "episode-4")
+        val progressUpdate = tvItem(20, season = 1, episode = 4).copy(progress = 45)
+
+        val categories = ContinueWatchingRowReducer.upsert(
+            listOf(Category("continue_watching", "Continue Watching", listOf(existing))),
+            progressUpdate
+        )
+
+        assertEquals("episode-4", categories.first().items.single().episodeStill)
     }
 
     @Test

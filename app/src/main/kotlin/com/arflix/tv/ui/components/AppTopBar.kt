@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -46,7 +47,7 @@ import com.arflix.tv.ui.theme.AnimationConstants
 import com.arflix.tv.ui.theme.ArflixTypography
 import androidx.compose.ui.res.stringResource
 import com.arflix.tv.R
-import com.arflix.tv.util.settingsDataStore
+import com.arflix.tv.data.repository.effectiveSettingsDataStore as settingsDataStore
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -62,7 +63,8 @@ val AppTopBarHorizontalPadding = 28.dp
 
 // Navigation items that appear CENTERED in the top bar (Search, Home, Watchlist, TV).
 // Settings is NOT in this list — it's rendered as a standalone gear icon on the right.
-private val NAV_ITEMS = SidebarItem.entries.filter { it != SidebarItem.SETTINGS }
+private val NAV_ITEMS: List<SidebarItem>
+    get() = visibleNavigationItems().filter { it != SidebarItem.SETTINGS }
 
 fun topBarMaxIndex(hasProfile: Boolean): Int {
     // Profile (0 if shown) + nav items + settings gear (last index)
@@ -81,8 +83,10 @@ fun topBarSelectedIndex(selectedItem: SidebarItem, hasProfile: Boolean): Int {
 }
 
 fun topBarFocusedItem(focusedIndex: Int, hasProfile: Boolean): SidebarItem? {
+    if (focusedIndex < 0) return null
     if (hasProfile && focusedIndex == 0) return null // profile avatar focused
-    val itemIndex = if (hasProfile) focusedIndex - 1 else focusedIndex
+    val safeIndex = focusedIndex.coerceAtMost(topBarMaxIndex(hasProfile))
+    val itemIndex = if (hasProfile) safeIndex - 1 else safeIndex
     // If it's the settings gear (last index after nav items)
     if (itemIndex == NAV_ITEMS.size) return SidebarItem.SETTINGS
     return NAV_ITEMS.getOrNull(itemIndex)
@@ -101,20 +105,20 @@ fun AppTopBar(
     hasUpdateBadge: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    // Always show the profile avatar when a profile exists — it's clickable
-    // and opens the profile switcher. The name text was removed per the mockup
-    // (avatar-only, no label).
     val showProfile = profile != null
     val hasProfile = showProfile
     val currentTime = rememberTopBarTime(clockFormat)
-    val selectedIndex = remember(selectedItem, hasProfile) { topBarSelectedIndex(selectedItem, hasProfile) }
+    val navItems = NAV_ITEMS
+    val selectedIndex = topBarSelectedIndex(selectedItem, hasProfile)
+    val safeFocusedIndex = focusedIndex.coerceAtMost(topBarMaxIndex(hasProfile))
     // Settings gear is always the last focusable index
     val settingsIndex = topBarMaxIndex(hasProfile)
-    val settingsFocused = isFocused && focusedIndex == settingsIndex
+    val settingsFocused = isFocused && safeFocusedIndex == settingsIndex
     val settingsSelected = selectedItem == SidebarItem.SETTINGS
 
     Box(
         modifier = modifier
+            .testTag("app-topbar")
             .fillMaxWidth()
             .height(AppTopBarContentTopInset)
             .background(
@@ -138,7 +142,7 @@ fun AppTopBar(
             if (showProfile && profile != null) {
                 TopBarProfileAvatar(
                     profile = profile,
-                    isFocused = isFocused && focusedIndex == 0
+                    isFocused = isFocused && safeFocusedIndex == 0
                 )
                 Spacer(modifier = Modifier.width(16.dp))
             }
@@ -153,12 +157,12 @@ fun AppTopBar(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    NAV_ITEMS.forEachIndexed { index, item ->
+                    navItems.forEachIndexed { index, item ->
                         val itemFocusIndex = if (hasProfile) index + 1 else index
                         TopBarNavChip(
                             item = item,
-                            isFocused = isFocused && focusedIndex == itemFocusIndex,
-                            isSelected = selectedIndex == itemFocusIndex
+                            isFocused = isFocused && safeFocusedIndex == itemFocusIndex,
+                            isSelected = selectedIndex == itemFocusIndex,
                         )
                     }
                 }
@@ -167,7 +171,7 @@ fun AppTopBar(
             // ── RIGHT: Settings gear + clock ──
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                horizontalArrangement = Arrangement.spacedBy(14.dp, Alignment.End)
             ) {
                 // Settings gear icon (no text label)
                 TopBarSettingsGear(
@@ -192,7 +196,7 @@ fun AppTopBar(
 private fun TopBarNavChip(
     item: SidebarItem,
     isFocused: Boolean,
-    isSelected: Boolean
+    isSelected: Boolean,
 ) {
     val accent = resolveAccentColor(fallback = Color.White)
 
@@ -202,7 +206,7 @@ private fun TopBarNavChip(
             isSelected -> Color.White.copy(alpha = 0.1f)
             else -> Color.Transparent
         },
-        animationSpec = tween(AnimationConstants.DURATION_FAST),
+        animationSpec = tween(if (isFocused) AnimationConstants.DURATION_FAST else 0),
         label = "topbar_chip_bg"
     )
     val iconColor by animateColorAsState(
@@ -211,7 +215,7 @@ private fun TopBarNavChip(
             isSelected -> accent  // selected icon gets accent
             else -> Color.White.copy(alpha = 0.62f)
         },
-        animationSpec = tween(AnimationConstants.DURATION_FAST),
+        animationSpec = tween(if (isFocused) AnimationConstants.DURATION_FAST else 0),
         label = "topbar_icon_color"
     )
     val textColor by animateColorAsState(
@@ -220,12 +224,12 @@ private fun TopBarNavChip(
             isSelected -> accent  // selected text gets accent
             else -> Color.White.copy(alpha = 0.68f)
         },
-        animationSpec = tween(AnimationConstants.DURATION_FAST),
+        animationSpec = tween(if (isFocused) AnimationConstants.DURATION_FAST else 0),
         label = "topbar_text_color"
     )
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.05f else 1f,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f),
+        animationSpec = tween(if (isFocused) 100 else 0),
         label = "topbar_scale"
     )
     val label = if (item == SidebarItem.TV) {
@@ -236,6 +240,7 @@ private fun TopBarNavChip(
 
     Row(
         modifier = Modifier
+            .testTag("topbar-item-${item.name}")
             .clip(RoundedCornerShape(16.dp))
             .background(containerColor)
             .graphicsLayer {
@@ -255,7 +260,8 @@ private fun TopBarNavChip(
         Text(
             text = label,
             fontSize = 14.sp,
-            fontWeight = if (isFocused || isSelected) FontWeight.SemiBold else FontWeight.Medium,
+            // Keep label metrics stable when selection/focus moves between pages.
+            fontWeight = FontWeight.SemiBold,
             color = textColor,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
@@ -281,7 +287,7 @@ private fun TopBarSettingsGear(
             isSelected -> accent  // selected settings gear gets accent
             else -> Color.White.copy(alpha = 0.5f)
         },
-        animationSpec = tween(AnimationConstants.DURATION_FAST),
+        animationSpec = tween(if (isFocused) AnimationConstants.DURATION_FAST else 0),
         label = "topbar_settings_color"
     )
     val containerColor by animateColorAsState(
@@ -290,17 +296,18 @@ private fun TopBarSettingsGear(
             isSelected -> Color.White.copy(alpha = 0.1f)
             else -> Color.Transparent
         },
-        animationSpec = tween(AnimationConstants.DURATION_FAST),
+        animationSpec = tween(if (isFocused) AnimationConstants.DURATION_FAST else 0),
         label = "topbar_settings_bg"
     )
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.08f else 1f,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f),
+        animationSpec = tween(if (isFocused) 100 else 0),
         label = "topbar_settings_scale"
     )
 
     Box(
         modifier = Modifier
+            .testTag("topbar-item-SETTINGS")
             .size(36.dp)
             .clip(CircleShape)
             .background(containerColor)
@@ -343,17 +350,18 @@ private fun TopBarProfileAvatar(
 ) {
     val containerColor by animateColorAsState(
         targetValue = if (isFocused) Color.White.copy(alpha = 0.2f) else Color.Transparent,
-        animationSpec = tween(AnimationConstants.DURATION_FAST),
+        animationSpec = tween(if (isFocused) AnimationConstants.DURATION_FAST else 0),
         label = "topbar_profile_bg"
     )
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.08f else 1f,
-        animationSpec = spring(dampingRatio = 0.75f, stiffness = 400f),
+        animationSpec = tween(if (isFocused) 100 else 0),
         label = "topbar_profile_scale"
     )
 
     Box(
         modifier = Modifier
+            .testTag("topbar-profile")
             .size(40.dp)
             .clip(CircleShape)
             .background(containerColor)

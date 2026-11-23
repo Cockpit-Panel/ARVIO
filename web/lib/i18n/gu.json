@@ -1,0 +1,13 @@
+{
+  "Play {value0}": "{value0} ચલાવો",
+  "Cloud-saved for Android": "Android માટે Cloudમાં સાચવ્યું",
+  "Custom v3 API key for TMDB requests": "TMDB વિનંતીઓ માટે પોતાની v3 API કી",
+  "TVDB is disabled until a custom API key is provided": "પોતાની API કી આપવામાં ન આવે ત્યાં સુધી TVDB બંધ છે",
+  "for GNOME, KDE, XFCE, etc.": "GNOME, KDE, XFCE વગેરે માટે",
+  "Collection": "સંગ્રહ",
+  "Watching": "જોઈ રહ્યા છો",
+  "Completed": "પૂર્ણ",
+  "Dropped": "છોડી દીધેલ",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: Jellyfin સાથે સુસંગત સરનામું વાપરો. વૈકલ્પિક પ્રોફાઇલ: username#ProfileName. સુરક્ષિત પ્રોફાઇલ: password#PIN.",
+  "None of your enabled addons provide playback sources.": "તમારા સક્ષમ કરેલા કોઈપણ ઍડઑન પ્લેબેક સ્ત્રોતો પ્રદાન કરતા નથી."
+}

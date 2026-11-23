@@ -1,6 +1,8 @@
 package com.arflix.tv.ui.screens.details
 
+import com.arflix.tv.data.model.isDirectStreamUrl
 import com.arflix.tv.data.model.StreamSource
+import com.arflix.tv.data.model.AutoplayLimits
 import java.util.Locale
 
 // Autoplay starts the best quality/size source it can find within ~2s. It keeps
@@ -15,6 +17,7 @@ private const val TOP_TIER_QUALITY_SCORE = 4
 
 private object AutoPlayRegexes {
     val fourKRegex = Regex("""\b4[kK]\b""")
+    val eightKRegex = Regex("""\b8[kK]\b""")
     val sizeRegex = Regex("""(?i)(\d+(?:[\.,]\d+)?)\s*(TB|GB|MB|KB|B|GiB|MiB|KiB)?""")
 }
 
@@ -36,6 +39,7 @@ internal fun qualityScoreForAutoPlay(stream: StreamSource): Int {
         }
     }
     return when {
+        combined.contains("4320p", ignoreCase = true) || AutoPlayRegexes.eightKRegex.containsMatchIn(combined) -> 5
         combined.contains("2160p", ignoreCase = true) || AutoPlayRegexes.fourKRegex.containsMatchIn(combined) -> 4
         combined.contains("1080p", ignoreCase = true) -> 3
         combined.contains("720p", ignoreCase = true) -> 2
@@ -44,13 +48,28 @@ internal fun qualityScoreForAutoPlay(stream: StreamSource): Int {
     }
 }
 
+internal fun matchesAutoplayLimits(stream: StreamSource, minimumQuality: Int, limits: AutoplayLimits): Boolean {
+    // Never picked on its own: playing it only shows the addon's "downloading" video.
+    if (isAwaitingDebridDownload(stream)) return false
+    val quality = qualityScoreForAutoPlay(stream)
+    if (quality < minimumQuality) return false
+    if (limits.qualityScore != Int.MAX_VALUE && (quality == 0 || quality > limits.qualityScore)) return false
+    if (limits.sizeBytes > 0L) {
+        // Use the larger known value so rounded display sizes cannot bypass a cap.
+        val size = maxOf(autoPlaySizeBytes(stream), stream.behaviorHints?.videoSize ?: 0L)
+        if (size <= 0L || size > limits.sizeBytes) return false
+    }
+    return true
+}
+
 internal fun bestAutoPlayStream(
     streams: List<StreamSource>,
-    minQualityScore: Int
+    minQualityScore: Int,
+    limits: AutoplayLimits = AutoplayLimits()
 ): StreamSource? {
     return streams
         .asSequence()
-        .filter { stream -> qualityScoreForAutoPlay(stream) >= minQualityScore }
+        .filter { stream -> matchesAutoplayLimits(stream, minQualityScore, limits) }
         .sortedWith(
             // Best quality, then biggest size — that is the user's "best" definition.
             // `notWebReady` HTTP sources (e.g. direct MKV rips) are fully playable on the
@@ -74,7 +93,7 @@ internal fun bestAutoPlayStream(
 internal fun autoPlaySizeBytes(stream: StreamSource): Long {
     val raw = stream.size.trim()
     if (raw.isBlank()) return 0L
-    val match = AutoPlayRegexes.sizeRegex.find(raw) ?: return 0L
+    val match = AutoPlayRegexes.sizeRegex.matchEntire(raw) ?: return 0L
     val value = match.groupValues[1].replace(',', '.').toDoubleOrNull() ?: return 0L
     val unit = match.groupValues.getOrNull(2)?.uppercase(Locale.US).orEmpty()
     val multiplier = when (unit) {
@@ -98,9 +117,20 @@ internal fun minQualityThreshold(value: String): Int {
 
 internal fun isAutoPlayableStream(stream: StreamSource): Boolean {
     val url = stream.url?.trim().orEmpty()
-    if (!url.startsWith("http", ignoreCase = true)) return false
+    // A Stalker VOD source carries a placeholder that only turns into an http
+    // URL when playback starts. It is autoplayable all the same - resolving it
+    // any earlier would cost the portal a link per candidate.
+    if (!isDirectStreamUrl(url)) return false
     return !isPendingDebridStream(stream)
 }
+
+/**
+ * A debrid file the service has not downloaded yet. AIOStreams marks it with ⏳ in the source name
+ * ("[RD⏳]", "TB ⏳"); playing it starts the download and shows a short "downloading" video
+ * instead of the film. The user can still pick it by hand to start that download.
+ */
+internal fun isAwaitingDebridDownload(stream: StreamSource): Boolean =
+    (stream.rawLabel ?: stream.source).contains("⏳")
 
 internal fun isPendingDebridStream(stream: StreamSource): Boolean {
     val text = listOfNotNull(stream.source, stream.addonName, stream.quality, stream.url, stream.description)

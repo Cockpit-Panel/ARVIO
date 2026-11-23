@@ -1,0 +1,46 @@
+# Merged contributions since v1.9.997
+
+Original PR authors are credited below. This list includes contributions merged through other branches; the release notes describe the final behavior.
+
+- [#673](https://github.com/ProdigyV21/ARVIO/pull/673) — Feature/increase subtitle offset — @AndreOliveira23
+- [#676](https://github.com/ProdigyV21/ARVIO/pull/676) — fix(tv): handle back navigation and restore focus in stream selector and source menu — @Himanth-reddy
+- [#677](https://github.com/ProdigyV21/ARVIO/pull/677) — fix(iptv): download the Stalker channel list once per configuration change — @ReichiMD
+- [#678](https://github.com/ProdigyV21/ARVIO/pull/678) — feat(tv): refine guide workspace and Sports event cards — @ProdigyV21
+- [#680](https://github.com/ProdigyV21/ARVIO/pull/680) — fix(web): restore TV favorites/recent sync and refine guide UI — @ProdigyV21
+- [#681](https://github.com/ProdigyV21/ARVIO/pull/681) — fix(web): keep navigation available during docked live playback — @ProdigyV21
+- [#682](https://github.com/ProdigyV21/ARVIO/pull/682) — fix(web): TV logos, sports source clarity and Cloud build configuration — @ProdigyV21
+- [#683](https://github.com/ProdigyV21/ARVIO/pull/683) — fix(web): prevent cloud hydration switching the selected profile — @ProdigyV21
+- [#684](https://github.com/ProdigyV21/ARVIO/pull/684) — fix(web): protect mini-player controls and profile settings during startup — @ProdigyV21
+- [#685](https://github.com/ProdigyV21/ARVIO/pull/685) — feat(stalker): add VOD movie source resolution — @ReichiMD
+- [#686](https://github.com/ProdigyV21/ARVIO/pull/686) — feat(tv): restore fullscreen zapping and give the remote a TiviMate-style key plan — @ReichiMD
+- [#687](https://github.com/ProdigyV21/ARVIO/pull/687) — Feature: Live TV Sources/Quality Selector (Grouped by tvg-id) — @Aaronnn17
+- [#688](https://github.com/ProdigyV21/ARVIO/pull/688) — feat(player): faster subtitle auto-match with AI text verification — @silentbil
+- [#689](https://github.com/ProdigyV21/ARVIO/pull/689) — feat(stalker): add VOD series and episode source resolution — @ReichiMD
+- [#691](https://github.com/ProdigyV21/ARVIO/pull/691) — Increase IPTV playlist limit from 3 to 5 — @Saelon600
+- [#692](https://github.com/ProdigyV21/ARVIO/pull/692) — Fix Continue Watching episode state and EPG Watch Live — @Saelon600
+- [#693](https://github.com/ProdigyV21/ARVIO/pull/693) — Update to the strings.xml file in Spanish — @Aaronnn17
+- [#694](https://github.com/ProdigyV21/ARVIO/pull/694) — fix(simkl): remediate API review blockers and sync/scrobble edge cases — @Himanth-reddy
+- [#695](https://github.com/ProdigyV21/ARVIO/pull/695) — feat(search): filter the discover screen and page it as one endless grid — @ReichiMD
+- [#696](https://github.com/ProdigyV21/ARVIO/pull/696) — feat(search): add the discover filter row and its panels — @ReichiMD
+- [#697](https://github.com/ProdigyV21/ARVIO/pull/697) — feat(home): "View all" grid for home rows — @silentbil
+- [#698](https://github.com/ProdigyV21/ARVIO/pull/698) — fix(tv): give the settings screen the same D-pad repeat gate as the rest of the app — @ReichiMD
+- [#699](https://github.com/ProdigyV21/ARVIO/pull/699) — feat(live-tv): modernize mobile Live TV experience with Group Home and streamlined layouts — @Himanth-reddy
+- [#700](https://github.com/ProdigyV21/ARVIO/pull/700) — feat(tv): hold-and-move reordering for IPTV category groups — @ReichiMD
+- [#702](https://github.com/ProdigyV21/ARVIO/pull/702) — feat(iptv): reorder IPTV categories by touch on phones — @ReichiMD
+- [#704](https://github.com/ProdigyV21/ARVIO/pull/704) — fix: Redesign the “Other Sources” list to match the player — @Aaronnn17
+- [#705](https://github.com/ProdigyV21/ARVIO/pull/705) — fix(search): stop the search screen trapping the focus in typing mode — @ReichiMD
+- [#706](https://github.com/ProdigyV21/ARVIO/pull/706) — feat(stalker): let each portal opt out of live TV, movie and series imports — @ReichiMD
+- [#708](https://github.com/ProdigyV21/ARVIO/pull/708) — feat(search): add a reset chip to the end of the discover filter row — @ReichiMD
+- [#709](https://github.com/ProdigyV21/ARVIO/pull/709) — feat(search): filter the discover grid by a title's original language — @ReichiMD
+- [#710](https://github.com/ProdigyV21/ARVIO/pull/710) — fix(search): filter the discover grid by the date the card shows — @ReichiMD
+- [#711](https://github.com/ProdigyV21/ARVIO/pull/711) — i18n(de): add missing German values for 39 untranslated strings — @ReichiMD
+- [#712](https://github.com/ProdigyV21/ARVIO/pull/712) — i18n(live-tv): move hardcoded sports guide and group home strings into resources — @ReichiMD
+- [#713](https://github.com/ProdigyV21/ARVIO/pull/713) — feat(player): native YouTube trailer playback with clean UI and TV re… — @Himanth-reddy
+- [#714](https://github.com/ProdigyV21/ARVIO/pull/714) — i18n(live/crash): localize global live TV category names and the crash screen fallback — @ReichiMD
+- [#717](https://github.com/ProdigyV21/ARVIO/pull/717) — refactor(core): consolidate and harden exception handling and regex usage — @Himanth-reddy
+- [#718](https://github.com/ProdigyV21/ARVIO/pull/718) — feat(mobile): interactive scroll-away bottom bar with blur and subscreen isolation — @Himanth-reddy
+- [#719](https://github.com/ProdigyV21/ARVIO/pull/719) — feat: 2 new features for “other sources” — @Aaronnn17
+- [#720](https://github.com/ProdigyV21/ARVIO/pull/720) — fix(trailer): move our trailer UI off the YouTube player (supersedes #713) — @ReichiMD
+- [#721](https://github.com/ProdigyV21/ARVIO/pull/721) — feat: Real-Time Stream Technical Info Badge for Live TV (FPS, Resolution, Bitrate) — @Aaronnn17
+- [#722](https://github.com/ProdigyV21/ARVIO/pull/722) — perf(app) & fix(tv): startup hygiene, dynamic EPG loading, category guide windowing and highlighter tracking — @Himanth-reddy
+- [#725](https://github.com/ProdigyV21/ARVIO/pull/725) — fix(mobile): UI enhancements, IPTV navigation, profile PIN overhaul, and bottom bar state preservation — @Himanth-reddy

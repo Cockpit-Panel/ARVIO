@@ -1,19 +1,23 @@
 package com.arflix.tv.data.repository
 
 import android.content.Context
+import com.arflix.tv.R
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.CatalogPackManifest
 import com.arflix.tv.data.model.CatalogPackItem
 import com.arflix.tv.data.model.CatalogSourceType
 import com.arflix.tv.data.model.CatalogValidationResult
 import com.arflix.tv.data.api.TraktApi
+import com.arflix.tv.testing.IsolatedSettingsStoreRule
 import io.mockk.*
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.Rule
 
 class CatalogPackTest {
+    @get:Rule val settingsStore = IsolatedSettingsStoreRule()
 
     @Test
     fun `fetchCatalogPackManifest rejects duplicate catalog URLs`() = runBlocking {
@@ -44,14 +48,15 @@ class CatalogPackTest {
             }
         """.trimIndent()
 
-        coEvery { repository["fetchUrl"](any<String>()) } returns duplicateManifestJson
+        coEvery { repository["fetchUrl"](any<String>(), any<Boolean>()) } returns duplicateManifestJson
 
         val result = repository.fetchCatalogPackManifest("https://example.com/pack.json")
         assertTrue(result.isFailure)
         val exception = result.exceptionOrNull()
         assertNotNull(exception)
-        assertTrue(exception is IllegalArgumentException)
-        assertTrue(exception!!.message!!.contains("duplicate catalog URL"))
+        assertTrue(exception is CatalogException)
+        assertEquals(R.string.catalog_pack_duplicate_url, (exception as CatalogException).messageRes)
+        assertEquals(listOf("https://mdblist.com/lists/snoak/trending-movies"), exception.formatArgs)
     }
 
     @Test
@@ -66,8 +71,9 @@ class CatalogPackTest {
 
         val addedCatalogs = mutableListOf<CatalogConfig>()
         coEvery { repository.getCatalogs() } returns emptyList()
-        coEvery { repository["saveCatalogs"](any<List<CatalogConfig>>()) } answers {
+        coEvery { repository["saveCatalogs"](any<List<CatalogConfig>>(), any<androidx.datastore.preferences.core.Preferences>(), any<String>()) } answers {
             addedCatalogs.addAll(firstArg<List<CatalogConfig>>())
+            true
         }
 
         coEvery { repository.validateCatalogUrl(any()) } returns CatalogValidationResult(
@@ -113,7 +119,7 @@ class CatalogPackTest {
         val repository = spyk(CatalogRepository(context, profileManager, traktApi, okHttpClient, invalidationBus))
 
         coEvery { repository.getCatalogs() } returns emptyList()
-        coEvery { repository["saveCatalogs"](any<List<CatalogConfig>>()) } returns Unit
+        coEvery { repository["saveCatalogs"](any<List<CatalogConfig>>(), any<androidx.datastore.preferences.core.Preferences>(), any<String>()) } returns true
 
         coEvery { repository.validateCatalogUrl(any()) } returns CatalogValidationResult(
             isValid = true,
@@ -135,7 +141,7 @@ class CatalogPackTest {
         val result = repository.addCatalogPack("https://example.com/pack.json", manifest)
         assertTrue(result.isSuccess)
 
-        coVerify(exactly = 0) { repository["fetchUrl"](any<String>()) }
+        coVerify(exactly = 0) { repository["fetchUrl"](any<String>(), any<Boolean>()) }
     }
 
     @Test
@@ -155,7 +161,7 @@ class CatalogPackTest {
               "catalogs": [{"name": "C1", "url": "https://example.com/c1"}]
             }
         """.trimIndent()
-        coEvery { repository["fetchUrl"](any<String>()) } returns missingIdJson
+        coEvery { repository["fetchUrl"](any<String>(), any<Boolean>()) } returns missingIdJson
         val res1 = repository.fetchCatalogPackManifest("https://example.com/pack.json")
         assertTrue(res1.isFailure)
 
@@ -167,7 +173,7 @@ class CatalogPackTest {
               "catalogs": []
             }
         """.trimIndent()
-        coEvery { repository["fetchUrl"](any<String>()) } returns emptyCatalogsJson
+        coEvery { repository["fetchUrl"](any<String>(), any<Boolean>()) } returns emptyCatalogsJson
         val res2 = repository.fetchCatalogPackManifest("https://example.com/pack.json")
         assertTrue(res2.isFailure)
     }

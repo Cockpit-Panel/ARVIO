@@ -1,6 +1,9 @@
+import { repairIptvPlaylistIds } from "./iptvPlaylistIdentity";
+import { loadStalkerChannels, loadStalkerGuide } from "./stalker";
 import { proxiedUrl, textRequest } from "./http";
 import { loadStored, saveStored } from "./storage";
-import type { IptvChannel, IptvNowNext, IptvPlaylistEntry, IptvProgram, IptvSnapshot } from "./types";
+import { channelPlaylistId, legacyStalkerPortal } from "./stalkerPortals";
+import type { IptvChannel, IptvNowNext, IptvPlaylistEntry, IptvProgram, IptvSnapshot, StalkerPortalEntry } from "./types";
 
 const IPTV_KEY = "arvio.web.iptv.playlists";
 const IPTV_TEXT_CACHE = "arvio.web.iptv.text.v1";
@@ -8,12 +11,157 @@ const IPTV_TEXT_CACHE_META = "arvio.web.iptv.textMeta.v1";
 const PLAYLIST_TTL_MS = 6 * 60 * 60 * 1000;
 const EPG_TTL_MS = 3 * 60 * 60 * 1000;
 const LARGE_IPTV_LIST_CHANNEL_COUNT = 10_000;
-const MAX_IPTV_PLAYLISTS = 3;
 const DEFAULT_IPTV_USER_AGENT = "VLC/3.0.20 LibVLC/3.0.20";
 
-type IptvLoadOptions = {
-  userAgent?: string;
+type ProviderBudget = {
+  starts: number[];
+  active: number;
+  nextStart: number;
+  blockedUntil: number;
+  blockedMessage?: string;
 };
+const providerBudgets = new Map<string, ProviderBudget>();
+const proxyPreferences = new Map<string, number>();
+const apiInFlight = new Map<string, Promise<unknown>>();
+const guideApiCache = new Map<string, { data: unknown; expires: number }>();
+
+class ProviderPauseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProviderPauseError";
+  }
+}
+
+function providerHostKey(providerUrl: string): string {
+  const url = new URL(providerUrl);
+  return url.hostname + (url.port && !["80", "443"].includes(url.port) ? `:${url.port}` : "");
+}
+
+function providerBudgetFor(providerUrl: string): ProviderBudget {
+  const key = providerHostKey(providerUrl);
+  let budget = providerBudgets.get(key);
+  if (!budget) {
+    budget = { starts: [], active: 0, nextStart: 0, blockedUntil: 0 };
+    providerBudgets.set(key, budget);
+  }
+  return budget;
+}
+
+function isRateOrServerStatus(status: number) {
+  return [429, 503, 513].includes(status) || (status >= 500 && status <= 599);
+}
+
+function shouldStopFallback(error: unknown) {
+  if (error instanceof ProviderPauseError) return true;
+  const status = Number((error as { status?: number })?.status);
+  return status === 451 || isRateOrServerStatus(status);
+}
+
+function preserveAuthStatusInError(error: unknown, status: number) {
+  if (![401, 403].includes(status) || !(error instanceof Error)) return error;
+  if (/\b(401|403)\b|unauthori[sz]ed|forbidden|expired|auth/i.test(error.message)) return error;
+  return Object.assign(new Error(`${error.message} (HTTP ${status})`), {
+    status,
+    retryAfter: (error as { retryAfter?: string | null }).retryAfter ?? null
+  });
+}
+
+// Shared by every visible row and fallback. Media segments do not use this path.
+async function providerTextRequest(
+  providerUrl: string,
+  requestUrl: string,
+  options: { deferAuthCooldown?: boolean } = {}
+): Promise<string> {
+  const budget = providerBudgetFor(providerUrl);
+  const queuedAt = Date.now();
+  while (true) {
+    const now = Date.now();
+    budget.starts = budget.starts.filter((at) => now - at < 60_000);
+    if (now < budget.blockedUntil) {
+      throw new ProviderPauseError(budget.blockedMessage || "IPTV provider requests are temporarily paused. Please wait before refreshing.");
+    }
+    if (budget.starts.length >= 30 || now - queuedAt >= 5_000) {
+      throw new ProviderPauseError("IPTV provider requests are temporarily paused. Please wait before refreshing.");
+    }
+    if (budget.active < 2 && now >= budget.nextStart) break;
+    await new Promise((resolve) => setTimeout(resolve, budget.active >= 2 ? 50
+      : Math.max(1, Math.min(100, budget.nextStart - now))));
+  }
+  budget.starts.push(Date.now());
+  budget.nextStart = Date.now() + 500;
+  budget.active++;
+  try { return await textRequest(requestUrl, { cache: "no-store" }); }
+  catch (error) {
+    const status = Number((error as { status?: number })?.status);
+    const skipAuthCooldown = Boolean(options.deferAuthCooldown && [401, 403].includes(status));
+    const cooldown = skipAuthCooldown ? 0
+      : [401, 403, 451].includes(status) ? 900_000
+      : [429, 503, 513].includes(status) ? 300_000 : status >= 500 && status <= 599 ? 60_000 : 0;
+    if (cooldown) {
+      const header = (error as { retryAfter?: string | null })?.retryAfter;
+      const requested = header ? (/^\d+$/.test(header) ? Number(header) * 1000 : Date.parse(header) - Date.now()) : 0;
+      budget.blockedUntil = Math.max(budget.blockedUntil, Date.now() + Math.max(cooldown,
+        Number.isFinite(requested) ? Math.min(86_400_000, requested) : 0));
+      budget.blockedMessage = [401, 403, 451].includes(status)
+        ? `IPTV provider refused access (HTTP ${status}). Please check your login or wait before refreshing.`
+        : undefined;
+    }
+    throw preserveAuthStatusInError(error, status);
+  } finally { budget.active--; }
+}
+
+type IptvLoadOptions = {
+  /** Portals that fill Live TV (see liveTvStalkerPortals); each one is its own playlist id. */
+  stalkerPortals?: StalkerPortalEntry[];
+  /** Single portal (older callers); used as Portal 1 when `stalkerPortals` is not given. */
+  stalkerUrl?: string;
+  stalkerMac?: string;
+  userAgent?: string;
+  /** Ask the portals again instead of reusing a channel list loaded in the last few minutes. */
+  freshPortals?: boolean;
+};
+
+/** A portal's channel list is reused for this long, so editing one portal does not reload the others. */
+const STALKER_LIST_TTL_MS = 5 * 60 * 1000;
+const stalkerLists = new Map<string, { expires: number; task: Promise<IptvChannel[]> }>();
+
+function loadPortalChannels(portal: StalkerPortalEntry, fresh = false): Promise<IptvChannel[]> {
+  const key = JSON.stringify([portal.id, portal.portalUrl, portal.macAddress]);
+  const cached = stalkerLists.get(key);
+  // A load still running (expires = Infinity) is always shared, even by a fresh request.
+  if (cached && (cached.expires === Infinity || (!fresh && cached.expires > Date.now()))) return cached.task;
+  const entry = { expires: Infinity, task: loadStalkerChannels(portal.portalUrl, portal.macAddress, portal.id) };
+  stalkerLists.set(key, entry);
+  entry.task.then(() => { entry.expires = Date.now() + STALKER_LIST_TTL_MS; },
+    () => { if (stalkerLists.get(key) === entry) stalkerLists.delete(key); });
+  while (stalkerLists.size > 8) stalkerLists.delete(stalkerLists.keys().next().value!);
+  return entry.task;
+}
+
+/**
+ * Every portal's channels, one portal at a time: a portal answers in dozens
+ * of paged requests, so loading several at once would multiply the load on
+ * the proxy and on providers that share a host.
+ */
+async function loadPortals(portals: StalkerPortalEntry[], fresh: boolean, errors: NonNullable<IptvSnapshot["playlistErrors"]>, warnings: string[]) {
+  const sets: IptvChannel[][] = [];
+  for (const portal of portals) {
+    try { sets.push(await loadPortalChannels(portal, fresh)); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : "Could not load IPTV portal";
+      const name = portal.name || "Stalker portal";
+      warnings.push(`${name}: ${message}`);
+      errors.push({ playlistId: portal.id, name, message });
+    }
+  }
+  return sets;
+}
+
+function portalsOf(options: IptvLoadOptions): StalkerPortalEntry[] {
+  if (options.stalkerPortals) return options.stalkerPortals;
+  const legacy = legacyStalkerPortal(options.stalkerUrl, options.stalkerMac);
+  return legacy ? [legacy] : [];
+}
 
 type TextValidator = (text: string) => boolean;
 
@@ -28,7 +176,7 @@ export function xtreamInfoFromUrl(url: string): XtreamInfo | null {
   return xtreamInfoFromPlaylist(normalizeIptvInput(url));
 }
 
-export { buildXtreamPlayerApiUrl, playlistProxyHeaders, fetchXtreamJson };
+export { buildXtreamPlayerApiUrl, playlistProxyHeaders, fetchXtreamJson, fetchXtreamAccountUsage };
 
 type XtreamCategory = {
   category_id?: string | number;
@@ -54,6 +202,22 @@ export function savePlaylists(playlists: IptvPlaylistEntry[]) {
   saveStored(IPTV_KEY, playlists);
 }
 
+/**
+ * Try one playlist (or a Stalker portal) before saving it: the channel count,
+ * or the loader's error. Uses the same loading path and cache as Live TV.
+ */
+export async function testIptvPlaylist(playlist: IptvPlaylistEntry | null, options: IptvLoadOptions = {}): Promise<{ ok: true; channels: number } | { ok: false; message: string }> {
+  try {
+    const snapshot = await loadIptvSnapshot(playlist ? [{ ...playlist, enabled: true }] : [], [], [], [], [], { freshPortals: true, ...options });
+    const error = snapshot.playlistErrors?.[0];
+    if (error) return { ok: false, message: error.message };
+    const channels = (snapshot.allChannels ?? snapshot.channels).length;
+    return channels ? { ok: true, channels } : { ok: false, message: "Playlist response did not contain any channels." };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Could not load playlist" };
+  }
+}
+
 export async function loadIptvChannels(playlists: IptvPlaylistEntry[]) {
   return (await loadIptvSnapshot(playlists)).channels;
 }
@@ -67,46 +231,75 @@ export async function loadIptvSnapshot(
   options: IptvLoadOptions = {}
 ): Promise<IptvSnapshot> {
   const normalizedPlaylists = normalizeIptvPlaylists(playlists);
-  const enabled = normalizedPlaylists.filter((playlist) => playlist.enabled && playlist.m3uUrl.trim());
+  const enabled = normalizedPlaylists.filter((playlist) => playlist.enabled && playlist.importLiveTv !== false && playlist.m3uUrl.trim());
   const playlistWarnings: string[] = [];
+  const playlistErrors: NonNullable<IptvSnapshot["playlistErrors"]> = [];
+  const hostChains = new Map<string, Promise<unknown>>();
+  const runForHost = <T>(playlistUrl: string, task: () => Promise<T>): Promise<T> => {
+    let key = playlistUrl;
+    try { key = providerHostKey(playlistUrl); } catch { /* Non-URL inputs keep their own chain. */ }
+    const previous = hostChains.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(task);
+    hostChains.set(key, current);
+    return current;
+  };
   const channelSets = await Promise.all(
-    enabled.map(async (playlist) => {
+    enabled.map((playlist) => runForHost(playlist.m3uUrl, async () => {
       try {
         // Xtream playlists load API-first: the JSON API is faster than a huge
         // M3U text, provides category names + EPG channel ids, and yields HLS
         // (.m3u8) stream URLs the browser can actually play.
-        if (xtreamInfoFromPlaylist(playlist.m3uUrl)) {
-          const xtreamChannels = await fetchXtreamChannels(playlist, options).catch(() => []);
-          if (xtreamChannels.length) return xtreamChannels;
+        const isXtream = Boolean(xtreamInfoFromPlaylist(playlist.m3uUrl));
+        let xtreamError: unknown = null;
+        if (isXtream) {
+          try {
+            const xtreamChannels = await fetchXtreamChannels(playlist, options);
+            if (xtreamChannels.length) return xtreamChannels;
+          } catch (error) {
+            xtreamError = error;
+          }
+        }
+        if (xtreamError && shouldStopAfterXtreamError(xtreamError)) {
+          throw xtreamError;
         }
         try {
           const text = await fetchPlaylistText(playlist.m3uUrl, options);
           const channels = parseM3u(text, playlist.id);
           if (channels.length) return channels;
         } catch (m3uError) {
-          const xtreamChannels = await fetchXtreamChannels(playlist, options).catch(() => []);
+          const xtreamChannels = isXtream ? [] : await fetchXtreamChannels(playlist, options).catch(() => []);
           if (xtreamChannels.length) return xtreamChannels;
+          if (xtreamError && m3uError instanceof Error && /temporarily paused/i.test(m3uError.message)) {
+            throw xtreamError;
+          }
           throw m3uError;
         }
 
-        const xtreamChannels = await fetchXtreamChannels(playlist, options).catch(() => []);
+        const xtreamChannels = isXtream ? [] : await fetchXtreamChannels(playlist, options).catch(() => []);
         if (xtreamChannels.length) return xtreamChannels;
         throw new Error("Playlist response did not contain any channels.");
       } catch (error) {
-        playlistWarnings.push(`${playlist.name || playlist.m3uUrl}: ${error instanceof Error ? error.message : "Could not load playlist"}`);
+        const message = error instanceof Error ? error.message : "Could not load playlist";
+        playlistWarnings.push(`${playlist.name || playlist.m3uUrl}: ${message}`);
+        playlistErrors.push({ playlistId: playlist.id, name: playlist.name || playlist.m3uUrl, message });
         return [] as IptvChannel[];
       }
-    })
+    }))
   );
-  const channels = channelSets.flat();
+  // Portals after the playlists, as the single portal always was.
+  channelSets.push(...await loadPortals(portalsOf(options), Boolean(options.freshPortals), playlistErrors, playlistWarnings));
+  const catchupDisabled = new Set(enabled.filter(p => p.enableCatchup === false).map(p => p.id));
+  const allChannels = channelSets.flat().map(channel => catchupDisabled.has(channel.id.split(':')[0])
+    ? { ...channel, catchupDays: undefined, catchupType: undefined, catchupSource: undefined, catchupAvailable: false } : channel);
+  const channels = accessibleChannels(allChannels, hiddenGroups);
   // Xtream channels get now/next on demand from the panel's JSON EPG (fast,
   // per-channel); only non-Xtream channels need the upfront XMLTV pass.
   const xtreamPlaylistIds = new Set(enabled.filter((playlist) => xtreamInfoFromPlaylist(playlist.m3uUrl)).map((playlist) => playlist.id));
   const xmltvChannels = channels.filter((channel) => !xtreamPlaylistIds.has(channel.id.split(":")[0] ?? ""));
   const skipInitialEpg = xmltvChannels.length > LARGE_IPTV_LIST_CHANNEL_COUNT;
-  const nowNext = skipInitialEpg || !xmltvChannels.length
-    ? {}
-    : await loadNowNext(enabled, xmltvChannels).catch(() => ({} as Record<string, IptvNowNext>));
+  // Channels must not wait for a potentially huge XMLTV response. The visible
+  // window requests its guide independently after the snapshot is painted.
+  const nowNext = {};
   const epgWarning = skipInitialEpg
     ? `Guide loads on demand for this ${channels.length.toLocaleString()} channel playlist, so Live TV opens fast without parsing the full EPG upfront.`
     : undefined;
@@ -114,12 +307,13 @@ export async function loadIptvSnapshot(
   const grouped = channels.reduce<Record<string, IptvChannel[]>>((acc, channel) => {
     const group = channel.group || "Uncategorized";
     if (hidden.has(group) || hidden.has(groupKey(channel))) return acc;
-    acc[group] = [...(acc[group] ?? []), channel];
+    (acc[group] ??= []).push(channel);
     return acc;
   }, {});
   const orderedGroups = orderGroups(grouped, groupOrder, channels);
   return {
     channels,
+    allChannels,
     grouped: Object.fromEntries(orderedGroups.map((group) => [group, grouped[group]])),
     nowNext,
     favoriteChannels,
@@ -127,6 +321,7 @@ export async function loadIptvSnapshot(
     hiddenGroups,
     groupOrder,
     playlistWarnings,
+    playlistErrors,
     epgWarning,
     loadedAt: Date.now()
   };
@@ -135,8 +330,8 @@ export async function loadIptvSnapshot(
 export async function loadIptvGuideForChannels(playlists: IptvPlaylistEntry[], channels: IptvChannel[]) {
   if (!channels.length) return {} as Record<string, IptvNowNext>;
   const normalizedPlaylists = normalizeIptvPlaylists(playlists);
-  const enabled = normalizedPlaylists.filter((playlist) => playlist.enabled && playlist.m3uUrl.trim());
-  if (!enabled.length) return {} as Record<string, IptvNowNext>;
+  const enabled = normalizedPlaylists.filter((playlist) => playlist.enabled && playlist.importLiveTv !== false && playlist.enableEpg !== false && playlist.m3uUrl.trim());
+  if (!enabled.length) return loadStalkerGuide(channels);
 
   // Xtream channels get their guide from the panel's own per-channel EPG API —
   // instant JSON now/next without downloading a multi-megabyte XMLTV file.
@@ -146,17 +341,19 @@ export async function loadIptvGuideForChannels(playlists: IptvPlaylistEntry[], c
   const xmltvChannels: IptvChannel[] = [];
   for (const channel of channels) {
     const playlist = byPlaylist.get(channel.id.split(":")[0] ?? "");
+    if (!playlist) continue;
     const info = playlist ? xtreamInfoFromPlaylist(playlist.m3uUrl) : null;
     const streamId = info ? xtreamStreamIdFromUrl(channel.streamUrl) : null;
     if (info && streamId) xtreamChannels.push({ info, channel, streamId });
     else xmltvChannels.push(channel);
   }
 
-  const [xtreamGuide, xmltvGuide] = await Promise.all([
+  const [xtreamGuide, xmltvGuide, stalkerGuide] = await Promise.all([
     loadXtreamGuide(xtreamChannels),
-    xmltvChannels.length ? loadNowNext(enabled, xmltvChannels).catch(() => ({} as Record<string, IptvNowNext>)) : Promise.resolve({} as Record<string, IptvNowNext>)
+    xmltvChannels.length ? loadNowNext(enabled, xmltvChannels).catch(() => ({} as Record<string, IptvNowNext>)) : Promise.resolve({} as Record<string, IptvNowNext>),
+    loadStalkerGuide(channels)
   ]);
-  return { ...xmltvGuide, ...xtreamGuide };
+  return { ...xmltvGuide, ...xtreamGuide, ...stalkerGuide };
 }
 
 function xtreamStreamIdFromUrl(url: string) {
@@ -222,7 +419,7 @@ export type CatchupProgram = IptvProgram & { hasArchive: boolean };
 
 function xtreamInfoForChannel(playlists: IptvPlaylistEntry[], channel: IptvChannel) {
   const playlistId = channel.id.split(":")[0] ?? "";
-  const playlist = normalizeIptvPlaylists(playlists).find((entry) => entry.id === playlistId);
+  const playlist = normalizeIptvPlaylists(playlists).find((entry) => entry.id === playlistId && entry.enabled && entry.importLiveTv !== false && entry.enableEpg !== false && entry.enableCatchup !== false);
   return playlist ? xtreamInfoFromPlaylist(playlist.m3uUrl) : null;
 }
 
@@ -299,16 +496,40 @@ function playlistTextUrl(url: string, headers?: Record<string, string>) {
   return target.toString();
 }
 
+function proxyPreferenceKey(url: string, headers: Record<string, string>) {
+  const endpoint = new URL(url);
+  // API actions share routing, but not with other endpoints, accounts or headers.
+  if (/\/player_api\.php$/i.test(endpoint.pathname)) {
+    endpoint.searchParams.delete("action");
+    endpoint.searchParams.delete("stream_id");
+  }
+  endpoint.searchParams.sort();
+  return JSON.stringify([endpoint.toString(), Object.entries(headers).sort(([a], [b]) => a.localeCompare(b))]);
+}
+
+function rememberProxyPreference(key: string) {
+  proxyPreferences.delete(key);
+  proxyPreferences.set(key, Date.now() + 900_000);
+  while (proxyPreferences.size > 128) proxyPreferences.delete(proxyPreferences.keys().next().value!);
+}
+
+function shouldStopAfterXtreamError(error: unknown) {
+  const status = Number((error as { status?: number })?.status);
+  return [401, 403].includes(status) || shouldStopFallback(error);
+}
+
 async function fetchPlaylistText(url: string, options: IptvLoadOptions = {}) {
   return cachedRemoteText(
     `playlist:${url}`,
     PLAYLIST_TTL_MS,
     async () => {
       const headers = playlistProxyHeaders(options.userAgent);
-      const candidates: Array<{ label: string; load: () => Promise<string> }> = [
-        { label: "direct", load: () => textRequest(url, { cache: "no-store" }) },
-        { label: "proxy", load: () => textRequest(playlistTextUrl(url), { cache: "no-store" }) },
-        { label: "proxy with media headers", load: () => textRequest(playlistTextUrl(url, headers), { cache: "no-store" }) }
+      const preferenceKey = proxyPreferenceKey(url, headers);
+      const preferProxy = Date.now() < (proxyPreferences.get(preferenceKey) ?? 0);
+      const candidates: Array<{ label: string; isDirect?: boolean; load: () => Promise<string> }> = [
+        ...(preferProxy ? [] : [{ label: "direct", isDirect: true, load: () => providerTextRequest(url, url, { deferAuthCooldown: true }) }]),
+        { label: "proxy", load: () => providerTextRequest(url, playlistTextUrl(url), { deferAuthCooldown: true }) },
+        { label: "proxy with media headers", load: () => providerTextRequest(url, playlistTextUrl(url, headers)) }
       ];
       const errors: string[] = [];
 
@@ -316,9 +537,15 @@ async function fetchPlaylistText(url: string, options: IptvLoadOptions = {}) {
         try {
           const text = await candidate.load();
           assertPlaylistText(text);
+          if (!candidate.isDirect && !preferProxy) {
+            rememberProxyPreference(preferenceKey);
+          }
           return text;
         } catch (error) {
           errors.push(`${candidate.label}: ${error instanceof Error ? error.message : "failed"}`);
+          if (shouldStopFallback(error)) {
+            break;
+          }
         }
       }
 
@@ -329,10 +556,14 @@ async function fetchPlaylistText(url: string, options: IptvLoadOptions = {}) {
 }
 
 export function normalizeIptvPlaylists(playlists: IptvPlaylistEntry[]) {
-  return playlists
+  return repairIptvPlaylistIds(playlists
     .map((playlist, index) => normalizeIptvPlaylist(playlist, index))
-    .filter((playlist): playlist is IptvPlaylistEntry => Boolean(playlist))
-    .slice(0, MAX_IPTV_PLAYLISTS);
+    .filter((playlist): playlist is IptvPlaylistEntry => Boolean(playlist)));
+}
+
+export function accessibleChannels(channels: IptvChannel[], hiddenGroups: string[]) {
+  const hidden = new Set(hiddenGroups);
+  return channels.filter((channel) => !hidden.has(channel.group || "Uncategorized") && !hidden.has(groupKey(channel)));
 }
 
 export function normalizeIptvPlaylist(playlist: IptvPlaylistEntry, index = 0): IptvPlaylistEntry | null {
@@ -345,7 +576,12 @@ export function normalizeIptvPlaylist(playlist: IptvPlaylistEntry, index = 0): I
     m3uUrl,
     epgUrl: epgUrls[0] ?? "",
     epgUrls,
-    enabled: playlist.enabled !== false
+    enabled: playlist.enabled !== false,
+    ...(playlist.importLiveTv !== undefined ? { importLiveTv: playlist.importLiveTv } : {}),
+    ...(playlist.importVod !== undefined ? { importVod: playlist.importVod } : {}),
+    ...(playlist.importSeries !== undefined ? { importSeries: playlist.importSeries } : {}),
+    ...(playlist.enableEpg !== undefined ? { enableEpg: playlist.enableEpg } : {}),
+    ...(playlist.enableCatchup !== undefined ? { enableCatchup: playlist.enableCatchup } : {})
   };
 }
 
@@ -377,9 +613,9 @@ export function normalizeEpgInputs(raw: string): string[] {
   return [trimmed];
 }
 
+/** `playlistId|group`, the key Android uses for hidden, ordered, favourite and renamed categories. */
 export function groupKey(channel: Pick<IptvChannel, "id" | "group">) {
-  const playlistId = channel.id.split(":")[0] || "default";
-  return `${playlistId}|${(channel.group || "Uncategorized").trim() || "Uncategorized"}`;
+  return `${channelPlaylistId(channel.id)}|${channel.group?.trim() || "Ungrouped"}`;
 }
 
 function parseUrl(value: string) {
@@ -517,7 +753,9 @@ async function fetchXtreamChannels(playlist: IptvPlaylistEntry, options: IptvLoa
     const streamId = String(stream.stream_id ?? "").trim();
     if (!streamId) return [];
     const streamUrl = buildXtreamStreamUrl(info, streamId);
-    const id = `${playlist.id}:${buildChannelId(streamUrl, stream.epg_channel_id)}`;
+    // Match Android's provider identity; the browser uses HLS while Android
+    // may use TS, so hashing the playback URL creates different favorites.
+    const id = `${playlist.id}:xtream:${streamId}`;
     if (seen.has(id)) return [];
     seen.add(id);
     const group = groupById.get(String(stream.category_id ?? "")) || "Uncategorized";
@@ -546,11 +784,75 @@ function buildXtreamStreamUrl(info: XtreamInfo, streamId: string) {
 }
 
 async function fetchXtreamJson<T>(url: string, headers: Record<string, string>) {
-  try {
-    return await jsonFromText<T>(await textRequest(url, { cache: "no-store" }));
-  } catch {
-    return jsonFromText<T>(await textRequest(playlistTextUrl(url, headers), { cache: "no-store" }));
+  const key = `${url}|${JSON.stringify(headers)}`;
+  const cached = guideApiCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.data as T;
+  const existing = apiInFlight.get(key);
+  if (existing) return existing as Promise<T>;
+  const task = (async () => {
+    const load = () => xtreamApiText(url, headers);
+    const action = new URL(url).searchParams.get("action");
+    const guide = action === "get_short_epg" || action === "get_simple_data_table";
+    const text = guide ? await load() : await cachedRemoteText(`api:${key}`, PLAYLIST_TTL_MS, load);
+    const data = jsonFromText<T>(text);
+    if (guide) {
+      const empty = !(data as { epg_listings?: unknown[] })?.epg_listings?.length;
+      guideApiCache.set(key, { data, expires: Date.now() + (empty ? 600_000 : 120_000) });
+      while (guideApiCache.size > 128) guideApiCache.delete(guideApiCache.keys().next().value!);
+    }
+    return data;
+  })();
+  apiInFlight.set(key, task);
+  try { return await task; } finally { if (apiInFlight.get(key) === task) apiInFlight.delete(key); }
+}
+
+async function requestWithProxyFallback(
+  url: string,
+  headers: Record<string, string>,
+  validate?: (text: string) => void
+): Promise<string> {
+  const preferenceKey = proxyPreferenceKey(url, headers);
+  const preferProxy = Date.now() < (proxyPreferences.get(preferenceKey) ?? 0);
+  if (!preferProxy) {
+    try {
+      const text = await providerTextRequest(url, url, { deferAuthCooldown: true });
+      validate?.(text);
+      return text;
+    } catch (error) {
+      if (shouldStopFallback(error)) throw error;
+    }
   }
+  const text = await providerTextRequest(url, playlistTextUrl(url, headers));
+  validate?.(text);
+  if (!preferProxy) rememberProxyPreference(preferenceKey);
+  return text;
+}
+
+/** player_api.php text, directly and then through the app proxy (panels without CORS), both behind the provider request guard. */
+async function xtreamApiText(url: string, headers: Record<string, string>) {
+  return requestWithProxyFallback(url, headers, (text) => {
+    jsonFromText(text);
+  });
+}
+
+/**
+ * The line's connection count from player_api.php user_info, which opens no
+ * stream. Never cached (the numbers change by the second); asks made at the
+ * same time share one request. Null when the panel does not say.
+ */
+async function fetchXtreamAccountUsage(info: XtreamInfo, headers: Record<string, string>): Promise<{ active: number; max: number } | null> {
+  const url = buildXtreamPlayerApiUrl(info.baseUrl, info.username, info.password);
+  const key = `usage|${url}`;
+  const existing = apiInFlight.get(key);
+  if (existing) return existing as Promise<{ active: number; max: number } | null>;
+  const task = (async () => {
+    const user = jsonFromText<{ user_info?: { active_cons?: unknown; max_connections?: unknown } }>(await xtreamApiText(url, headers))?.user_info;
+    const active = Number(user?.active_cons);
+    const max = Number(user?.max_connections);
+    return user && Number.isFinite(active) && Number.isFinite(max) ? { active, max } : null;
+  })();
+  apiInFlight.set(key, task);
+  try { return await task; } finally { if (apiInFlight.get(key) === task) apiInFlight.delete(key); }
 }
 
 function jsonFromText<T>(text: string) {
@@ -587,7 +889,7 @@ function orderGroups(grouped: Record<string, IptvChannel[]>, groupOrder: string[
     const bKey = firstChannelByGroup[b] ? groupKey(firstChannelByGroup[b]) : b;
     const ai = orderMap.get(aKey) ?? orderMap.get(a) ?? Number.MAX_SAFE_INTEGER;
     const bi = orderMap.get(bKey) ?? orderMap.get(b) ?? Number.MAX_SAFE_INTEGER;
-    return ai === bi ? a.localeCompare(b) : ai - bi;
+    return ai === bi ? 0 : ai - bi;
   });
 }
 
@@ -596,29 +898,53 @@ export function parseM3u(text: string, playlistId = "default") {
   const channels: IptvChannel[] = [];
   const seen = new Set<string>();
   let pending: Record<string, string> | null = null;
+  let requestHeaders: Record<string, string> = Object.create(null);
 
-  for (const line of lines) {
-    if (line.startsWith("#EXTINF")) {
-      const title = line.split(",").slice(1).join(",").trim();
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (/^#EXTINF:/i.test(line)) {
+      // Header values can contain commas; only an unquoted comma starts the title.
+      const [, metadata = line, title = ""] = line.match(/^#EXTINF:((?:[^"',]|"[^"]*"|'[^']*')*),(.*)$/i) ?? [];
       pending = {
-        name: attr(line, "tvg-name") || title || "Unknown Channel",
-        group: attr(line, "group-title") || "Uncategorized",
-        logo: attr(line, "tvg-logo"),
-        tvgId: attr(line, "tvg-id"),
-        number: firstAttr(line, ["tvg-chno", "tvg-ch-number", "channel-number", "ch-number", "number"]),
-        catchupDays: attr(line, "catchup-days") || attr(line, "timeshift"),
-        catchupType: attr(line, "catchup"),
-        catchupSource: attr(line, "catchup-source"),
-        language: firstAttr(line, ["tvg-language", "tvg-lang", "language", "lang"]),
-        country: firstAttr(line, ["tvg-country", "country"]),
-        qualityLabel: firstAttr(line, ["quality", "tvg-quality", "resolution"])
+        name: attr(metadata, "tvg-name") || title.trim() || "Unknown Channel",
+        // Android: a blank group-title counts as missing.
+        group: attr(metadata, "group-title").trim() ? attr(metadata, "group-title") : "Uncategorized",
+        logo: attr(metadata, "tvg-logo"),
+        tvgId: attr(metadata, "tvg-id"),
+        number: firstAttr(metadata, ["tvg-chno", "tvg-ch-number", "channel-number", "ch-number", "number"]),
+        catchupDays: attr(metadata, "catchup-days") || attr(metadata, "timeshift"),
+        catchupType: attr(metadata, "catchup"),
+        catchupSource: attr(metadata, "catchup-source"),
+        language: firstAttr(metadata, ["tvg-language", "tvg-lang", "language", "lang"]),
+        country: firstAttr(metadata, ["tvg-country", "country"]),
+        qualityLabel: firstAttr(metadata, ["quality", "tvg-quality", "resolution"])
       };
-    } else if (pending && line.trim() && !line.startsWith("#")) {
+      requestHeaders = Object.create(null);
+      for (const match of metadata.matchAll(/(?:^|\s)([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g)) {
+        const name = m3uHeaderName(match[1]);
+        if (name) setM3uHeader(requestHeaders, name, match[2] ?? match[3] ?? match[4] ?? "");
+      }
+    } else if (pending && /^#EXTVLCOPT:/i.test(line)) {
+      const option = line.match(/^#EXTVLCOPT:\s*([^=]+)=(.*)$/i);
+      const name = option && m3uHeaderName(option[1]);
+      if (name && option) setM3uHeader(requestHeaders, name, option[2].trim().replace(/^(["'])(.*)\1$/, "$2"));
+    } else if (pending && line && !line.startsWith("#")) {
       if (isDividerChannelName(pending.name)) {
         pending = null;
         continue;
       }
-      const streamUrl = line.trim();
+      const pipe = line.indexOf("|");
+      const streamUrl = (pipe < 0 ? line : line.slice(0, pipe)).trim();
+      // URL headers override entry options, without decoding/re-serializing a signed stream URL.
+      if (pipe >= 0) {
+        for (const [name, value] of new URLSearchParams(line.slice(pipe + 1).replace(/\|/g, "&"))) {
+          setM3uHeader(requestHeaders, name, value);
+        }
+      }
+      if (!streamUrl) {
+        pending = null;
+        continue;
+      }
       const id = `${playlistId}:${buildChannelId(streamUrl, pending.tvgId)}`;
       if (seen.has(id)) {
         pending = null;
@@ -638,13 +964,54 @@ export function parseM3u(text: string, playlistId = "default") {
         language: pending.language,
         country: pending.country,
         qualityLabel: pending.qualityLabel || inferQualityLabel(pending.name, pending.group),
-        streamUrl
+        streamUrl,
+        ...(Object.keys(requestHeaders).length ? { requestHeaders: { ...requestHeaders } } : {})
       });
       pending = null;
     }
   }
 
   return channels;
+}
+
+export function migrateXtreamFavoriteIds(favorites: string[], channels: IptvChannel[]): string[] {
+  const legacyPrefixes = new Set(favorites.filter((id) => id.includes(":m3u:"))
+    .map((id) => id.slice(0, id.lastIndexOf(":") + 1)));
+  if (!legacyPrefixes.size) return favorites;
+  const favoriteSet = new Set(favorites);
+  const replacements = new Map<string, string>();
+  for (const channel of channels) {
+    const match = channel.id.match(/^(.+):xtream:\d+$/);
+    if (!match) continue;
+    const epg = normalizeChannelKey(channel.tvgId ?? "");
+    const prefix = `${match[1]}:m3u:${epg ? `${epg}:` : ""}`;
+    if (!legacyPrefixes.has(prefix)) continue;
+    // Recognize the previous web HLS hash and Android's M3U/TS hash without
+    // guessing by name (HD/SD variants and other playlists must stay distinct).
+    for (const url of [channel.streamUrl, channel.streamUrl.replace(/\.m3u8(?=[?#]|$)/i, ".ts")]) {
+      const legacy = `${match[1]}:${buildChannelId(url, channel.tvgId)}`;
+      if (favoriteSet.has(legacy)) replacements.set(legacy, channel.id);
+    }
+  }
+  if (!replacements.size) return favorites;
+  return [...new Set(favorites.map((id) => replacements.get(id) ?? id))];
+}
+
+function m3uHeaderName(name: string): string | undefined {
+  switch (name.trim().toLowerCase()) {
+    case "http-user-agent": case "user-agent": case "useragent": return "User-Agent";
+    case "http-referrer": case "http-referer": case "referrer": case "referer": return "Referer";
+    case "http-origin": case "origin": return "Origin";
+    default: return undefined;
+  }
+}
+
+function setM3uHeader(headers: Record<string, string>, rawName: string, rawValue: string) {
+  const name = m3uHeaderName(rawName) ?? rawName.trim();
+  const value = rawValue.trim();
+  if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(name) || !value || /[^\t\x20-\x7e]/.test(rawValue)) return;
+  const existing = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
+  headers[existing ?? name] = value;
 }
 
 export function isDividerChannelName(name?: string) {
@@ -657,37 +1024,62 @@ export function isDividerChannelName(name?: string) {
 }
 
 async function loadNowNext(playlists: IptvPlaylistEntry[], channels: IptvChannel[]) {
-  const urls = playlists.flatMap((playlist) => [playlist.epgUrl, ...(playlist.epgUrls ?? [])]).filter((url): url is string => Boolean(url?.trim()));
-  if (!urls.length || !channels.length) return {};
+  if (!channels.length) return {};
   const programsById: Record<string, IptvProgram[]> = {};
-  const channelLookup = new Map(channels.flatMap((channel) => [
-    [channel.tvgId?.toLowerCase(), channel.id],
-    [channel.name.toLowerCase(), channel.id]
-  ].filter((pair): pair is [string, string] => Boolean(pair[0]))));
-
-  const xmlTexts = await Promise.all(urls.slice(0, 3).map((url) => fetchEpgText(url).catch(() => "")));
-  for (const xml of xmlTexts) {
-    for (const program of parseXmltv(xml)) {
-      const channelId = channelLookup.get(program.channel.toLowerCase());
-      if (!channelId) continue;
-      programsById[channelId] = [...(programsById[channelId] ?? []), program.program];
+  for (const playlist of playlists) {
+    const lookup = new Map<string, Set<string>>();
+    for (const channel of channels) {
+      if (!channel.id.startsWith(`${playlist.id}:`)) continue;
+      for (const key of [channel.tvgId, channel.name]) {
+        if (!key?.trim()) continue;
+        const normalized = key.trim().toLowerCase();
+        if (!lookup.has(normalized)) lookup.set(normalized, new Set());
+        lookup.get(normalized)!.add(channel.id);
+      }
+    }
+    if (!lookup.size) continue;
+    const urls = [...new Set([playlist.epgUrl, ...(playlist.epgUrls ?? [])].filter((url): url is string => Boolean(url?.trim())))];
+    for (const url of urls) {
+      const programs = await cachedXmltvPrograms(url).catch(() => []);
+      const matchedThisSource = new Set<string>();
+      for (const { channel, program } of programs) {
+        for (const id of lookup.get(channel.trim().toLowerCase()) ?? []) {
+          // Earlier configured sources own the channel when they contain data.
+          if (programsById[id] && !matchedThisSource.has(id)) continue;
+          matchedThisSource.add(id);
+          (programsById[id] ??= []).push(program);
+        }
+      }
     }
   }
 
   const now = Date.now();
   return Object.fromEntries(Object.entries(programsById).map(([channelId, programs]) => {
-    const sorted = programs.sort((a, b) => a.startUtcMillis - b.startUtcMillis);
+    const sorted = [...new Map(programs.map((p) => [p.startUtcMillis, p])).values()].sort((a, b) => a.startUtcMillis - b.startUtcMillis);
     const live = sorted.find((program) => now >= program.startUtcMillis && now < program.endUtcMillis);
     const future = sorted.filter((program) => program.startUtcMillis > now);
-    const recent = sorted.filter((program) => program.endUtcMillis <= now).slice(-12);
+    const recent = sorted.filter((program) => program.endUtcMillis <= now && program.endUtcMillis >= now - 48 * 3600_000);
     return [channelId, {
       now: live,
       next: future[0],
       later: future[1],
-      upcoming: future.slice(0, 8),
+      upcoming: future.filter((program) => program.startUtcMillis < now + 48 * 3600_000),
       recent
     } satisfies IptvNowNext];
   }));
+}
+
+const parsedGuides = new Map<string, { at: number; promise: Promise<ReturnType<typeof parseXmltv>> }>();
+function cachedXmltvPrograms(url: string) {
+  const cached = parsedGuides.get(url);
+  if (cached && Date.now() - cached.at < EPG_TTL_MS) return cached.promise;
+  const promise = fetchEpgText(url).then(parseXmltv).catch((error) => {
+    parsedGuides.delete(url);
+    throw error;
+  });
+  if (parsedGuides.size >= 4) parsedGuides.delete(parsedGuides.keys().next().value!);
+  parsedGuides.set(url, { at: Date.now(), promise });
+  return promise;
 }
 
 function parseXmltv(xml: string) {
@@ -706,12 +1098,74 @@ function parseXmltv(xml: string) {
       program: {
         title: decodeXml(textTag(body, "title") || "Untitled"),
         description: decodeXml(textTag(body, "desc") || ""),
+        artworkUrl: safeGuideImage(decodeXml(attr(body.match(/<icon\b([^>]*)\/?\s*>/i)?.[1] ?? "", "src"))),
+        category: decodeXml(textTag(body, "category") || "").slice(0, 200) || undefined,
         startUtcMillis: start,
         endUtcMillis: stop
       }
     });
   }
   return results;
+}
+
+function safeGuideImage(value: string): string | undefined {
+  try { return value.length <= 2048 && ["https:", "http:"].includes(new URL(value).protocol) ? value : undefined; } catch { return undefined; }
+}
+
+const identityLoads = new Map<string, { expires: number; task: Promise<IptvChannel[]> }>();
+
+/** A single cached metadata request, never a stream probe or a request per channel. */
+export async function loadIptvChannelIdentities(playlists: IptvPlaylistEntry[], channels: IptvChannel[], options: IptvLoadOptions = {}) {
+  const replacements = new Map<string, IptvChannel>();
+  for (const playlist of normalizeIptvPlaylists(playlists).filter(p => p.enabled)) {
+    const scoped = channels.filter(c => c.id.startsWith(`${playlist.id}:xtream:`));
+    if (!scoped.length) continue;
+    const url = new URL(playlist.m3uUrl);
+    url.searchParams.set("output", "ts");
+    const key = `${playlist.id}:${url}`;
+    let cached = identityLoads.get(key);
+    if (!cached || cached.expires < Date.now()) {
+      const task = fetchPlaylistText(url.toString(), options)
+        .then(text => attachM3uChannelIdentities(scoped, text, playlist.id));
+      cached = { expires: Date.now() + PLAYLIST_TTL_MS, task };
+      identityLoads.set(key, cached);
+      // A provider failure must not become a render/retry loop.
+      void task.catch(() => { if (identityLoads.get(key) === cached) cached!.expires = Date.now() + 300_000; });
+      if (identityLoads.size > 12) identityLoads.delete(identityLoads.keys().next().value!);
+    }
+    try { for (const channel of await cached.task) replacements.set(channel.id, channel); }
+    catch { /* Keep API channels available when the optional identity bridge fails. */ }
+  }
+  return channels.map(channel => {
+    const identity = replacements.get(channel.id);
+    return identity?.cloudId ? { ...channel, cloudId: identity.cloudId, syncAliases: identity.syncAliases } : channel;
+  });
+}
+
+export async function attachM3uChannelIdentities(channels: IptvChannel[], text: string, playlistId: string) {
+  const byId = new Map(channels.map(c => [c.id, c]));
+  const replacements = new Map<string, IptvChannel>();
+  let epgId: string | undefined;
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0 && i % 500 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+    const line = lines[i].trim();
+    if (line.startsWith("#EXTINF:")) { epgId = attr(line, "tvg-id"); continue; }
+    if (!line || line.startsWith("#")) continue;
+    const path = parseUrl(line)?.pathname;
+    const streamId = path?.match(/\/(\d+)(?:\.[a-z0-9]+)?$/i)?.[1];
+    const id = `${playlistId}:xtream:${streamId}`;
+    const channel = byId.get(id);
+    if (channel) {
+      const cloudId = `${playlistId}:${buildChannelId(line, epgId)}`;
+      const hlsAlias = `${playlistId}:${buildChannelId(line.replace(/\.ts(?=\?|$)/i, ".m3u8"), epgId)}`;
+      const previous = replacements.get(id);
+      replacements.set(id, { ...channel, cloudId: previous?.cloudId ?? cloudId,
+        syncAliases: [...new Set([...(previous?.syncAliases ?? []), cloudId, hlsAlias])] });
+    }
+    epgId = undefined;
+  }
+  return channels.map(channel => replacements.get(channel.id) ?? channel);
 }
 
 function parseXmltvTime(value: string) {
@@ -748,13 +1202,7 @@ async function fetchEpgText(url: string) {
   return cachedRemoteText(
     `epg:${url}`,
     EPG_TTL_MS,
-    async () => {
-      try {
-        return await textRequest(url, { cache: "no-store" });
-      } catch {
-        return textRequest(proxiedUrl(url), { cache: "no-store" });
-      }
-    },
+    () => requestWithProxyFallback(url, playlistProxyHeaders()),
     isXmltvText
   );
 }
@@ -892,9 +1340,107 @@ function rol(value: number, bits: number) {
  */
 export function iptvPlaylistSignature(playlists: IptvPlaylistEntry[]): string {
   return playlists
-    .map((playlist) => `${playlist.id}:${playlist.enabled}:${playlist.m3uUrl}:${playlist.epgUrl ?? ""}:${playlist.epgUrls?.join("|") ?? ""}`)
+    .map((playlist) => `${playlist.id}:${playlist.enabled}:${playlist.m3uUrl}:${playlist.epgUrl ?? ""}:${playlist.epgUrls?.join("|") ?? ""}:${playlist.importLiveTv !== false}:${playlist.importVod !== false}:${playlist.importSeries !== false}:${playlist.enableEpg !== false}:${playlist.enableCatchup !== false}`)
     .join("||");
 }
 
 /** How long an in-memory channel snapshot stays good before a rebuild. */
 export const IPTV_SNAPSHOT_TTL_MS = 6 * 60 * 60 * 1000;
+
+export type XtreamVodCatalogSeed = {
+  id: number;
+  imdbId?: string;
+  title: string;
+  mediaType: "movie" | "tv";
+  year?: string;
+  categoryId?: string;
+  addedAt: number;
+};
+
+type RawXtreamVodEntry = {
+  stream_id?: number | string;
+  series_id?: number | string;
+  name?: string;
+  title?: string;
+  tmdb?: number | string;
+  tmdb_id?: number | string;
+  imdb?: string;
+  imdb_id?: string;
+  year?: string;
+  category_id?: string | number;
+  added?: string | number;
+  last_modified?: string | number;
+};
+
+const vodCatalogMemoryCache = new Map<string, { expiresAt: number; items: XtreamVodCatalogSeed[] }>();
+
+async function fetchXtreamVodEntriesForPlaylist(playlist: IptvPlaylistEntry, type: "movie" | "tv"): Promise<XtreamVodCatalogSeed[]> {
+  if (!playlist.enabled) return [];
+  if (type === "movie" && playlist.importVod === false) return [];
+  if (type === "tv" && playlist.importSeries === false) return [];
+  const info = xtreamInfoFromPlaylist(playlist.m3uUrl);
+  if (!info) return [];
+  const action = type === "movie" ? "get_vod_streams" : "get_series";
+  const url = buildXtreamPlayerApiUrl(info.baseUrl, info.username, info.password, action);
+  const raw = await fetchXtreamJson<RawXtreamVodEntry[]>(url, playlistProxyHeaders()).catch(() => []);
+  if (!Array.isArray(raw)) return [];
+  const seeds: XtreamVodCatalogSeed[] = [];
+  for (const entry of raw) {
+    const title = String(entry.name ?? entry.title ?? "").trim();
+    if (!title) continue;
+    const tmdb = Number(entry.tmdb ?? entry.tmdb_id ?? 0);
+    const id = Number.isSafeInteger(tmdb) && tmdb > 0 ? tmdb : 0;
+    const imdbRaw = String(entry.imdb ?? entry.imdb_id ?? "").trim();
+    const imdbId = /^tt\d+$/i.test(imdbRaw) ? imdbRaw : undefined;
+    const fallbackId = Number(entry.stream_id ?? entry.series_id ?? 0) || 0;
+    const addedAt = Number(entry.added ?? entry.last_modified ?? 0) || fallbackId;
+    seeds.push({
+      id,
+      imdbId,
+      title,
+      mediaType: type,
+      year: entry.year ? String(entry.year).trim() : undefined,
+      categoryId: entry.category_id != null ? String(entry.category_id) : undefined,
+      addedAt
+    });
+  }
+  return seeds;
+}
+
+export async function loadXtreamVodCatalogSeeds(
+  playlists: IptvPlaylistEntry[],
+  mediaType: "movie" | "tv" | null,
+  categoryFilter?: string
+): Promise<XtreamVodCatalogSeed[]> {
+  const sig = `${iptvPlaylistSignature(playlists)}:${mediaType ?? "all"}`;
+  const cached = vodCatalogMemoryCache.get(sig);
+  let all: XtreamVodCatalogSeed[];
+  if (cached && cached.expiresAt > Date.now()) {
+    all = cached.items;
+  } else {
+    const active = playlists.filter((p) => p.enabled);
+    const jobs: Array<Promise<XtreamVodCatalogSeed[]>> = [];
+    for (const p of active) {
+      if (mediaType !== "tv") jobs.push(fetchXtreamVodEntriesForPlaylist(p, "movie"));
+      if (mediaType !== "movie") jobs.push(fetchXtreamVodEntriesForPlaylist(p, "tv"));
+    }
+    const lists = await Promise.all(jobs);
+    all = lists.flat().sort((a, b) => b.addedAt - a.addedAt);
+    vodCatalogMemoryCache.set(sig, { expiresAt: Date.now() + 10 * 60_000, items: all });
+  }
+  if (!categoryFilter?.trim()) return all;
+  const catNorm = categoryFilter.trim().toLowerCase();
+  return all.filter((seed) => seed.categoryId?.toLowerCase() === catNorm);
+}
+
+export async function hasXtreamVodMatch(
+  playlists: IptvPlaylistEntry[],
+  item: { id: number; mediaType: "movie" | "tv"; title: string; imdbId?: string }
+): Promise<boolean> {
+  const seeds = await loadXtreamVodCatalogSeeds(playlists, item.mediaType);
+  if (!seeds.length) return false;
+  if (item.id > 0 && seeds.some((s) => s.id === item.id)) return true;
+  if (item.imdbId && seeds.some((s) => s.imdbId?.toLowerCase() === item.imdbId!.toLowerCase())) return true;
+  const targetTitle = item.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return Boolean(targetTitle) && seeds.some((s) => s.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() === targetTitle);
+}

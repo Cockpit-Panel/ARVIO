@@ -5,8 +5,8 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,9 +15,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -26,11 +28,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import com.arflix.tv.R
@@ -38,11 +44,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import com.arflix.tv.ui.theme.ArflixTypography
 import com.arflix.tv.ui.theme.BackgroundElevated
-import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.SuccessGreen
 import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
-import com.arflix.tv.ui.skin.resolveAccentColor
 
 /** Display-only localization of stored setting values (Off/Any/Medium/White...).
  *  The stored/compared value stays English; only the shown label is translated.
@@ -91,7 +95,7 @@ internal fun localizeSettingValue(value: String?): String {
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 fun SettingsRow(
-    icon: ImageVector,
+    icon: ImageVector? = null,
     title: String,
     subtitle: String = "",
     value: String?,
@@ -100,41 +104,39 @@ fun SettingsRow(
     modifier: Modifier = Modifier
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val focusRingColor = resolveAccentColor(fallback = Pink)
+    val foreground = TextPrimary
+    val secondary = if (isFocused) Color.White.copy(alpha = 0.8f) else TextSecondary
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .graphicsLayer()
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
                 onClick = onClick
             )
             .background(
-                if (isFocused) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.05f),
-                RoundedCornerShape(12.dp)
+                Color.White.copy(alpha = 0.05f),
+                RoundedCornerShape(8.dp)
             )
-            .border(
-                width = if (isFocused) 2.dp else 0.dp,
-                color = if (isFocused) focusRingColor else Color.Transparent,
-                shape = RoundedCornerShape(12.dp)
-            )
+            .settingsFocusOutline(isFocused)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-            Icon(
+            if (icon != null) Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = TextSecondary,
+                tint = secondary,
                 modifier = Modifier.size(19.dp)
             )
-            Spacer(modifier = Modifier.width(12.dp))
+            if (icon != null) Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
                     style = ArflixTypography.cardTitle.copy(fontSize = 16.sp),
-                    color = TextPrimary,
+                    color = foreground,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -142,7 +144,7 @@ fun SettingsRow(
                     Text(
                         text = subtitle,
                         style = ArflixTypography.caption.copy(fontSize = 13.sp, lineHeight = 17.sp),
-                        color = TextSecondary,
+                        color = secondary,
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -153,20 +155,19 @@ fun SettingsRow(
 
         val safeValue = value.orEmpty()
         if (safeValue.isNotBlank()) {
-            Box(
-                modifier = Modifier
-                    .background(Pink.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
-                    .border(1.dp, Pink.copy(alpha = 0.3f), RoundedCornerShape(999.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                contentAlignment = Alignment.Center
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    text = localizeSettingValue(safeValue).uppercase(),
-                    style = ArflixTypography.label.copy(fontSize = 11.sp, letterSpacing = 0.5.sp),
-                    color = Pink,
-                    maxLines = 1,
+                    text = localizeSettingValue(safeValue),
+                    style = ArflixTypography.body.copy(fontSize = 14.sp),
+                    color = secondary,
+                    modifier = Modifier.widthIn(max = 220.dp),
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = secondary, modifier = Modifier.size(20.dp))
             }
         }
     }
@@ -183,24 +184,26 @@ fun SettingsToggleRow(
     modifier: Modifier = Modifier
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val focusRingColor = resolveAccentColor(fallback = Pink)
+    val foreground = TextPrimary
+    val secondary = if (isFocused) Color.White.copy(alpha = 0.8f) else TextSecondary
+    val toggleDescription = stringResource(if (isEnabled) R.string.on else R.string.off)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(
+            .graphicsLayer()
+            .toggleable(
+                value = isEnabled,
+                role = Role.Switch,
                 interactionSource = interactionSource,
                 indication = null,
-                onClick = { onToggle(!isEnabled) }
+                onValueChange = onToggle
             )
+            .semantics { stateDescription = toggleDescription }
             .background(
-                if (isFocused) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.05f),
-                RoundedCornerShape(12.dp)
+                Color.White.copy(alpha = 0.05f),
+                RoundedCornerShape(8.dp)
             )
-            .border(
-                width = if (isFocused) 2.dp else 0.dp,
-                color = if (isFocused) focusRingColor else Color.Transparent,
-                shape = RoundedCornerShape(12.dp)
-            )
+            .settingsFocusOutline(isFocused)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
@@ -209,7 +212,7 @@ fun SettingsToggleRow(
             Text(
                 text = title,
                 style = ArflixTypography.cardTitle.copy(fontSize = 16.sp),
-                color = TextPrimary,
+                color = foreground,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -217,20 +220,21 @@ fun SettingsToggleRow(
                 Text(
                     text = subtitle,
                     style = ArflixTypography.caption.copy(fontSize = 13.sp, lineHeight = 17.sp),
-                    color = TextSecondary,
+                    color = secondary,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
             }
         }
 
+        Spacer(Modifier.width(12.dp))
         Box(
             modifier = Modifier
                 .width(44.dp)
                 .height(24.dp)
                 .background(
-                    color = if (isEnabled) SuccessGreen else Color.White.copy(alpha = 0.2f),
-                    shape = RoundedCornerShape(13.dp)
+                    color = if (isEnabled) SuccessGreen else Color.White.copy(alpha = if (isFocused) 0.3f else 0.2f),
+                    shape = RoundedCornerShape(16.dp)
                 )
                 .padding(3.dp),
             contentAlignment = if (isEnabled) Alignment.CenterEnd else Alignment.CenterStart
@@ -240,7 +244,7 @@ fun SettingsToggleRow(
                     .size(18.dp)
                     .background(
                         color = Color.White,
-                        shape = RoundedCornerShape(10.dp)
+                        shape = RoundedCornerShape(12.dp)
                     )
             )
         }
@@ -257,15 +261,13 @@ fun MobileSettingsCategory(
     ) {
         Text(
             text = title,
-            style = ArflixTypography.caption.copy(fontSize = 12.sp, letterSpacing = 1.sp),
+            style = ArflixTypography.caption.copy(fontSize = 13.sp, letterSpacing = 0.sp),
             color = TextSecondary,
-            modifier = Modifier.padding(start = 16.dp, bottom = 8.dp)
+            modifier = Modifier.padding(bottom = 8.dp)
         )
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(BackgroundElevated)
         ) {
             content()
         }
@@ -286,15 +288,34 @@ fun MobileSettingsRow(
     isExternalLink: Boolean = false,
     actionIcon: ImageVector? = null,
     showDivider: Boolean = true,
+    toggleChecked: Boolean? = null,
     onClick: () -> Unit
 ) {
+    // Older callers still use English display tokens; localized toggles pass their Boolean state.
+    val checked = toggleChecked ?: if (isToggle) {
+        when (value) {
+            "On" -> true
+            "Off" -> false
+            else -> null
+        }
+    } else null
+    val toggleDescription = if (checked != null) {
+        stringResource(if (checked) R.string.on else R.string.off)
+    } else ""
     val alpha = if (enabled) 1f else 0.4f
-    Column(modifier = Modifier.alpha(alpha)) {
+    val safeValue = value.orEmpty()
+    val stackedValue = checked == null && !isExternalLink && actionIcon == null &&
+        (safeValue.length > 16 || androidx.compose.ui.platform.LocalDensity.current.fontScale > 1.2f)
+    Column(modifier = Modifier.alpha(alpha).then(
+        if (checked != null) Modifier.toggleable(checked, enabled = enabled, role = Role.Switch) { onClick() }
+            .semantics { stateDescription = toggleDescription }
+        else Modifier.clickable(enabled = enabled, onClick = onClick)
+    )) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(enabled = enabled) { onClick() }
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .padding(horizontal = 4.dp, vertical = 8.dp)
+                .heightIn(min = 40.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -324,7 +345,7 @@ fun MobileSettingsRow(
                         text = title,
                         style = ArflixTypography.cardTitle.copy(fontSize = 16.sp),
                         color = TextPrimary,
-                        maxLines = 1,
+                        maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
                     if (subtitle.isNotEmpty()) {
@@ -332,35 +353,31 @@ fun MobileSettingsRow(
                             text = subtitle,
                             style = ArflixTypography.caption.copy(fontSize = 13.sp, lineHeight = 17.sp),
                             color = TextSecondary,
-                            maxLines = 4,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Clip
                         )
                     }
                 }
             }
-            val safeValue = value.orEmpty()
-            val isOpenLabel = safeValue.equals("Open", ignoreCase = true) || safeValue == stringResource(R.string.settings_open)
-            if (safeValue.isNotEmpty() || isExternalLink || actionIcon != null) {
+            if (checked != null || (!stackedValue && safeValue.isNotEmpty()) || isExternalLink || actionIcon != null) {
                 Spacer(modifier = Modifier.width(16.dp))
-                if (isToggle && (safeValue == "On" || safeValue == "Off")) {
-                    val isChecked = safeValue == "On"
+                if (checked != null) {
                     Box(
                         modifier = Modifier
                             .width(44.dp)
                             .height(24.dp)
                             .background(
-                                color = if (isChecked) SuccessGreen else Color.White.copy(alpha = 0.2f),
-                                shape = RoundedCornerShape(13.dp)
+                                color = if (checked) SuccessGreen else Color.White.copy(alpha = 0.2f),
+                                shape = RoundedCornerShape(16.dp)
                             )
                             .padding(3.dp),
-                        contentAlignment = if (isChecked) Alignment.CenterEnd else Alignment.CenterStart
+                        contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart
                     ) {
                         Box(
                             modifier = Modifier
                                 .size(18.dp)
                                 .background(
                                     color = Color.White,
-                                    shape = RoundedCornerShape(10.dp)
+                                    shape = RoundedCornerShape(12.dp)
                                 )
                         )
                     }
@@ -379,11 +396,24 @@ fun MobileSettingsRow(
                             fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
                         ),
                         color = TextSecondary,
-                        maxLines = 1,
+                        modifier = Modifier.widthIn(max = 108.dp),
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextSecondary, modifier = Modifier.size(18.dp))
                 }
             }
+        }
+        if (stackedValue && safeValue.isNotEmpty()) Row(
+            Modifier.fillMaxWidth()
+                .padding(start = 44.dp, end = 4.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(localizeSettingValue(safeValue), color = TextSecondary, fontSize = 14.sp,
+                modifier = Modifier.weight(1f), textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            Spacer(Modifier.width(8.dp))
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextSecondary, modifier = Modifier.size(20.dp))
         }
         if (showDivider) {
             Box(modifier = Modifier.fillMaxWidth().height(1.dp).padding(horizontal = 16.dp).background(Color.White.copy(alpha = 0.05f)))

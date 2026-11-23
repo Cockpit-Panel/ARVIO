@@ -57,14 +57,9 @@ class EpgProgramActionsTest {
     }
 
     @Test
-    fun watchLiveClearsSelectedProgramSoPlaybackUsesLiveStream() {
-        val selectedProgram = IptvProgram(
-            title = "Live Movie",
-            startUtcMillis = 1_000L,
-            endUtcMillis = 2_000L,
-        )
-
-        assertThat(epgWatchLivePlaybackProgram(selectedProgram)).isNull()
+    fun watchLiveFromVodDialogUsesFullScreenLivePlayback() {
+        assertThat(epgDialogWatchLiveAction())
+            .isEqualTo(EpgInteractionAction.PlayLiveFullscreen)
     }
 
 
@@ -209,41 +204,15 @@ class EpgProgramActionsTest {
         assertThat(
             channelRowInteractionAction(
                 isSamePlayingChannel = false,
-                hasCurrentProgram = true,
-                vodActionsEnabled = true,
             )
         ).isEqualTo(EpgInteractionAction.PlayLiveMini)
     }
 
     @Test
-    fun channelRowSecondClickResolvesVodWhenCurrentProgramExists() {
+    fun channelRowSecondClickOpensFullscreenWithoutProgrammeLookup() {
         assertThat(
             channelRowInteractionAction(
                 isSamePlayingChannel = true,
-                hasCurrentProgram = true,
-                vodActionsEnabled = true,
-            )
-        ).isEqualTo(EpgInteractionAction.ResolveVodOrPlayFullscreen)
-    }
-
-    @Test
-    fun channelRowSecondClickWithoutEpgPlaysLiveFullscreen() {
-        assertThat(
-            channelRowInteractionAction(
-                isSamePlayingChannel = true,
-                hasCurrentProgram = false,
-                vodActionsEnabled = true,
-            )
-        ).isEqualTo(EpgInteractionAction.PlayLiveFullscreen)
-    }
-
-    @Test
-    fun disabledVodActionsMakeSecondChannelClickPlayFullscreen() {
-        assertThat(
-            channelRowInteractionAction(
-                isSamePlayingChannel = true,
-                hasCurrentProgram = true,
-                vodActionsEnabled = false,
             )
         ).isEqualTo(EpgInteractionAction.PlayLiveFullscreen)
     }

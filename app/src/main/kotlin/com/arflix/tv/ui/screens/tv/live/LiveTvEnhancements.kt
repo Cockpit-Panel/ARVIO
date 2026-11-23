@@ -16,10 +16,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -49,14 +51,20 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.arflix.tv.R
 import com.arflix.tv.data.repository.IptvConfig
+import com.arflix.tv.data.repository.StalkerPortalSupport
+import com.arflix.tv.ui.theme.ErrorRed
+import com.arflix.tv.ui.theme.WarningOrange
+import com.arflix.tv.ui.focus.mirrorHorizontalForRtl
 
 data class TvProviderFilter(
     val id: String,
@@ -74,6 +82,7 @@ data class PlaylistCategorySection(
 fun buildPlaylistCategorySections(
     config: IptvConfig,
     categories: List<LiveCategory>,
+    hiddenGroups: Set<String> = emptySet(),
 ): List<PlaylistCategorySection> {
     val playlists = config.playlists
         .asSequence()
@@ -82,7 +91,15 @@ fun buildPlaylistCategorySections(
         .toList()
     val knownPlaylistIds = playlists.mapTo(HashSet()) { it.id }
     val configuredSections = playlists.mapNotNull { playlist ->
-        val providerCategories = categories.filter { it.playlistId == playlist.id }
+        val providerCategories = categories
+            .filter { it.playlistId == playlist.id }
+            .filterNot { category ->
+                val groupName = category.playlistGroupName ?: category.label
+                val playlistId = category.playlistId ?: playlist.id
+                (playlistId.isNotBlank() && com.arflix.tv.data.model.PlaylistGroupKey.build(playlistId, groupName) in hiddenGroups) ||
+                    groupName in hiddenGroups ||
+                    category.label in hiddenGroups
+            }
         providerCategories.takeIf { it.isNotEmpty() }?.let {
             PlaylistCategorySection(
                 id = playlist.id,
@@ -94,15 +111,32 @@ fun buildPlaylistCategorySections(
     }
     val unmatchedSections = categories
         .filter { category -> category.playlistId.isNullOrBlank() || category.playlistId !in knownPlaylistIds }
+        .filterNot { category ->
+            val groupName = category.playlistGroupName ?: category.label
+            val playlistId = category.playlistId.orEmpty()
+            (playlistId.isNotBlank() && com.arflix.tv.data.model.PlaylistGroupKey.build(playlistId, groupName) in hiddenGroups) ||
+                groupName in hiddenGroups ||
+                category.label in hiddenGroups
+        }
         .groupBy { category -> category.playlistId?.takeIf { it.isNotBlank() } ?: "other" }
         .entries
-        .sortedWith(compareBy<Map.Entry<String, List<LiveCategory>>> { if (it.key == "stalker") 0 else 1 }.thenBy { it.key })
-        .map { (sourceId, sourceCategories) ->
+        .sortedWith(compareBy<Map.Entry<String, List<LiveCategory>>> { if (it.key.startsWith("stalker")) 0 else 1 }.thenBy { it.key })
+        .mapNotNull { (sourceId, sourceCategories) ->
+            if (sourceCategories.isEmpty()) return@mapNotNull null
+            // Multi-portal Stalker ids look like "stalker1"/"stalker2" (see
+            // StalkerPortalSupport), not the legacy single-portal "stalker" - look
+            // up the name the user configured for that portal before falling back
+            // to a generic capitalized id.
+            val stalkerPortalName = config.stalkerPortals
+                .firstOrNull { it.id == sourceId }
+                ?.name
+                ?.takeIf { it.isNotBlank() }
             PlaylistCategorySection(
                 id = "source:$sourceId",
-                label = when (sourceId) {
-                    "stalker" -> "Stalker"
-                    "other" -> "Other sources"
+                label = when {
+                    stalkerPortalName != null -> stalkerPortalName
+                    sourceId == "stalker" -> "Stalker"
+                    sourceId == "other" -> "Other sources"
                     else -> sourceId.replaceFirstChar { it.uppercase() }
                 },
                 count = sourceCategories.sumOf(LiveCategory::count),
@@ -131,54 +165,70 @@ fun buildTvProviderFilters(
     playlistGroupCounts: List<Triple<String, String, Int>> = emptyList(),
 ): List<TvProviderFilter> {
     val enabledPlaylists = config.playlists
-        .filter { it.enabled && it.id.isNotBlank() }
+        .filter { it.enabled && it.importLiveTv != false && it.id.isNotBlank() }
         .distinctBy { it.id }
-    if (enabledPlaylists.size <= 1) return emptyList()
+    val enabledPortals = config.stalkerPortals
+        .filter { it.enabled && it.importLiveTv != false && it.id.isNotBlank() }
+        .distinctBy { it.id }
+    val totalSources = enabledPlaylists.size + enabledPortals.size
+    if (totalSources <= 1) return emptyList()
 
-    val knownIds = enabledPlaylists.mapTo(HashSet()) { it.id }
+    val knownIds = (enabledPlaylists.map { it.id } + enabledPortals.map { it.id }).toHashSet()
     val pagedCounts = playlistGroupCounts
         .asSequence()
-        .filter { (playlistId, _, count) -> playlistId in knownIds && count > 0 }
-        .groupingBy { (playlistId, _, _) -> playlistId }
+        .filter { (playlistId, _, count) ->
+            (playlistId in knownIds || playlistId.removePrefix("source:") in knownIds) && count > 0
+        }
+        .groupingBy { (playlistId, _, _) -> playlistId.removePrefix("source:") }
         .fold(0) { total, (_, _, count) -> total + count }
-    val counts = pagedCounts.ifEmpty {
+    val loadedCounts =
         channels
             .mapNotNull { channelPlaylistId(it, knownIds) }
-            .groupingBy { it }
+            .groupingBy { it.removePrefix("source:") }
             .eachCount()
-    }
-    if (counts.size <= 1) return emptyList()
+    // Partial page counts must not suppress another source already present in memory.
+    val counts = loadedCounts + pagedCounts
 
     return buildList {
         add(TvProviderFilter("all", "All providers", counts.values.sum()))
         enabledPlaylists.forEach { playlist ->
             val count = counts[playlist.id] ?: 0
-            if (count > 0) {
-                add(TvProviderFilter(playlist.id, playlist.name.ifBlank { playlist.id }, count))
-            }
+            add(TvProviderFilter(playlist.id, playlist.name.ifBlank { playlist.id }, count))
+        }
+        enabledPortals.forEach { portal ->
+            val count = counts[portal.id] ?: counts["source:${portal.id}"] ?: 0
+            add(TvProviderFilter(portal.id, portal.name.ifBlank { portal.id }, count))
         }
     }
 }
 
 fun providerMatches(channel: EnrichedChannel, providerId: String, config: IptvConfig): Boolean {
     if (providerId == "all") return true
-    val knownIds = config.playlists
-        .filter { it.enabled && it.id.isNotBlank() }
-        .mapTo(HashSet()) { it.id }
-    return channelPlaylistId(channel, knownIds) == providerId
+    val targetId = providerId.removePrefix("source:")
+    val knownIds = (config.playlists.filter { it.enabled && it.id.isNotBlank() }.map { it.id } +
+        config.stalkerPortals.filter { it.enabled && it.id.isNotBlank() }.map { it.id }).toHashSet()
+    val chPlId = channelPlaylistId(channel, knownIds)
+    return chPlId == providerId || chPlId == targetId
 }
 
 fun providerMatcher(providerId: String, config: IptvConfig): (EnrichedChannel) -> Boolean {
     if (providerId == "all") return { true }
-    val knownIds = config.playlists
-        .filter { it.enabled && it.id.isNotBlank() }
-        .mapTo(HashSet()) { it.id }
-    return { channel -> channelPlaylistId(channel, knownIds) == providerId }
+    val targetId = providerId.removePrefix("source:")
+    val knownIds = (config.playlists.filter { it.enabled && it.id.isNotBlank() }.map { it.id } +
+        config.stalkerPortals.filter { it.enabled && it.id.isNotBlank() }.map { it.id }).toHashSet()
+    return { channel ->
+        val chPlId = channelPlaylistId(channel, knownIds)
+        chPlId == providerId || chPlId == targetId
+    }
 }
 
 private fun channelPlaylistId(channel: EnrichedChannel, knownIds: Set<String>): String? {
+    val stalkerId = StalkerPortalSupport.playlistIdFromChannelId(channel.id)
+    if (stalkerId in knownIds) return stalkerId
     val prefix = channel.id.substringBefore(':', missingDelimiterValue = "")
-    return prefix.takeIf { it in knownIds }
+    if (prefix in knownIds) return prefix
+    val rawPrefix = prefix.removePrefix("source:")
+    return rawPrefix.takeIf { it in knownIds }
 }
 
 fun variantGroupKey(channel: EnrichedChannel): String {
@@ -236,6 +286,7 @@ private fun Quality.rank(): Int = when (this) {
     Quality.FHD -> 3
     Quality.HD -> 2
     Quality.SD -> 1
+    Quality.UNKNOWN -> 0
 }
 
 @OptIn(ExperimentalTvMaterial3Api::class)
@@ -251,88 +302,107 @@ fun ProviderSelector(
 ) {
     if (providers.size <= 1) return
     var focusedId by remember { mutableStateOf<String?>(null) }
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(start = 10.dp, end = 14.dp, top = 6.dp, bottom = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center,
     ) {
-        providers.forEachIndexed { index, provider ->
-            val selected = provider.id == selectedId
-            val focused = focusedId == provider.id
-            val selectedIndex = providers.indexOfFirst { it.id == selectedId }.takeIf { it >= 0 } ?: index
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(if (selected || focused) LiveColors.PanelRaised else LiveColors.PanelDeep)
-                    .border(
-                        width = if (focused) 2.dp else 1.dp,
-                        color = when {
-                            focused -> LiveColors.FocusRing
-                            selected -> LiveColors.Accent
-                            else -> LiveColors.Divider
-                        },
-                        shape = RoundedCornerShape(999.dp),
-                    )
-                    .then(if (selected && focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-                    .onFocusChanged { if (it.hasFocus) focusedId = provider.id }
-                    .focusable()
-                    .onKeyEvent { event ->
-                        if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
-                        when (event.key) {
-                            Key.DirectionLeft -> {
-                                val next = providers.getOrNull((selectedIndex - 1).coerceAtLeast(0)) ?: provider
-                                focusedId = next.id
-                                onSelect(next.id)
-                                true
+        Row(
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            providers.forEachIndexed { index, provider ->
+                val selected = provider.id == selectedId
+                val focused = focusedId == provider.id
+                val selectedIndex = providers.indexOfFirst { it.id == selectedId }.takeIf { it >= 0 } ?: index
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 110.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                selected -> liveAccent().copy(alpha = 0.18f)
+                                focused -> LiveColors.PanelRaised
+                                else -> LiveColors.PanelDeep
                             }
-                            Key.DirectionRight -> {
-                                val next = providers.getOrNull((selectedIndex + 1).coerceAtMost(providers.lastIndex)) ?: provider
-                                focusedId = next.id
-                                onSelect(next.id)
-                                true
+                        )
+                        .border(
+                            width = if (focused) 2.dp else 1.dp,
+                            color = when {
+                                focused -> LiveColors.FocusRing
+                                selected -> liveAccent()
+                                else -> LiveColors.Divider
+                            },
+                            shape = CircleShape,
+                        )
+                        .then(if (selected && focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+                        .onFocusChanged { if (it.hasFocus) focusedId = provider.id }
+                        .focusable()
+                        .onKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
+                            when (event.key.mirrorHorizontalForRtl(isRtl)) {
+                                Key.DirectionLeft -> {
+                                    val next = providers.getOrNull((selectedIndex - 1).coerceAtLeast(0)) ?: provider
+                                    focusedId = next.id
+                                    onSelect(next.id)
+                                    true
+                                }
+                                Key.DirectionRight -> {
+                                    val next = providers.getOrNull((selectedIndex + 1).coerceAtMost(providers.lastIndex)) ?: provider
+                                    focusedId = next.id
+                                    onSelect(next.id)
+                                    true
+                                }
+                                Key.DirectionUp -> {
+                                    onMoveUp()
+                                    true
+                                }
+                                Key.DirectionDown -> {
+                                    onMoveDown()
+                                    true
+                                }
+                                Key.DirectionCenter, Key.Enter -> {
+                                    onSelect(provider.id)
+                                    true
+                                }
+                                else -> false
                             }
-                            Key.DirectionUp -> {
-                                onMoveUp()
-                                true
-                            }
-                            Key.DirectionDown -> {
-                                onMoveDown()
-                                true
-                            }
-                            Key.DirectionCenter, Key.Enter -> {
-                                onSelect(provider.id)
-                                true
-                            }
-                            else -> false
                         }
-                    }
-                    .clickable { onSelect(provider.id) }
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        .clickable { onSelect(provider.id) }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.SettingsInputAntenna,
-                        contentDescription = null,
-                        tint = if (selected) LiveColors.Accent else LiveColors.FgMute,
-                        modifier = Modifier.size(14.dp),
-                    )
-                    Text(
-                        text = provider.label,
-                        style = LiveType.CatLabel.copy(color = if (selected) LiveColors.Fg else LiveColors.FgDim),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = provider.count.toString(),
-                        style = LiveType.NumberMono.copy(color = LiveColors.FgMute),
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.SettingsInputAntenna,
+                            contentDescription = null,
+                            tint = if (selected) liveAccent() else LiveColors.FgMute,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Text(
+                            text = provider.label,
+                            style = LiveType.CatLabel.copy(
+                                color = if (selected) LiveColors.Fg else LiveColors.FgDim,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                fontSize = 13.sp,
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = provider.count.toString(),
+                            style = LiveType.NumberMono.copy(
+                                color = if (selected) liveAccent() else LiveColors.FgMute,
+                                fontSize = 11.sp,
+                            ),
+                        )
+                    }
                 }
             }
         }
@@ -375,7 +445,7 @@ fun EpgStatusStrip(
             Icon(
                 imageVector = Icons.Filled.Info,
                 contentDescription = null,
-                tint = if (warning.isNullOrBlank()) LiveColors.Accent else Color(0xFFFFC04A),
+                tint = if (warning.isNullOrBlank()) liveAccent() else WarningOrange,
                 modifier = Modifier.size(14.dp),
             )
             Text(
@@ -417,7 +487,7 @@ fun ChannelNumberOverlay(
             )
             Text(
                 text = exactChannelName ?: if (matchCount > 0) stringResource(R.string.live_label_matches, matchCount) else stringResource(R.string.live_empty_no_channel),
-                style = LiveType.SectionTag.copy(color = if (matchCount > 0) LiveColors.FgDim else Color(0xFFFF8A9A)),
+                style = LiveType.SectionTag.copy(color = if (matchCount > 0) LiveColors.FgDim else ErrorRed),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -431,17 +501,24 @@ fun PlaybackDiagnosticBanner(
     diagnostic: PlaybackDiagnostic?,
     modifier: Modifier = Modifier,
 ) {
+    var visible by remember(diagnostic) { mutableStateOf(diagnostic != null) }
+    LaunchedEffect(diagnostic) {
+        if (diagnostic != null) {
+            kotlinx.coroutines.delay(8_000)
+            visible = false
+        }
+    }
     AnimatedVisibility(
-        visible = diagnostic != null,
+        visible = visible,
         enter = fadeIn(),
         exit = fadeOut(),
         modifier = modifier,
     ) {
         val current = diagnostic ?: return@AnimatedVisibility
         val tint = when (current.severity) {
-            PlaybackDiagnosticSeverity.Info -> LiveColors.Accent
-            PlaybackDiagnosticSeverity.Warning -> Color(0xFFFFC04A)
-            PlaybackDiagnosticSeverity.Error -> Color(0xFFFF6B81)
+            PlaybackDiagnosticSeverity.Info -> liveAccent()
+            PlaybackDiagnosticSeverity.Warning -> WarningOrange
+            PlaybackDiagnosticSeverity.Error -> ErrorRed
         }
         Row(
             modifier = Modifier
@@ -467,6 +544,52 @@ fun PlaybackDiagnosticBanner(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+fun EpgWarningBanner(
+    warning: String?,
+    modifier: Modifier = Modifier,
+) {
+    var visible by remember(warning) { mutableStateOf(warning != null) }
+    LaunchedEffect(warning) {
+        if (warning != null) {
+            kotlinx.coroutines.delay(12_000)
+            visible = false
+        }
+    }
+    AnimatedVisibility(
+        visible = visible && warning != null,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = modifier,
+    ) {
+        val text = warning ?: return@AnimatedVisibility
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.Black.copy(alpha = 0.78f))
+                .border(1.dp, WarningOrange.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
+                .clickable { visible = false }
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.ErrorOutline,
+                contentDescription = null,
+                tint = WarningOrange,
+                modifier = Modifier.size(20.dp),
+            )
+            Text(
+                text,
+                style = LiveType.SectionTag.copy(color = LiveColors.FgDim),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -518,7 +641,7 @@ fun VariantPickerOverlay(
                 Icon(
                     imageVector = Icons.Filled.SwapHoriz,
                     contentDescription = null,
-                    tint = LiveColors.Accent,
+                    tint = liveAccent(),
                     modifier = Modifier.size(22.dp),
                 )
                 Column {
@@ -563,12 +686,12 @@ private fun VariantRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(if (focused) LiveColors.Panel else LiveColors.PanelDeep)
             .border(
                 width = if (focused) 2.dp else 1.dp,
                 color = if (focused) LiveColors.FocusRing else LiveColors.Divider,
-                shape = RoundedCornerShape(10.dp),
+                shape = RoundedCornerShape(12.dp),
             )
             .onFocusChanged { focused = it.hasFocus }
             .focusable()
@@ -588,7 +711,7 @@ private fun VariantRow(
         Box(
             modifier = Modifier
                 .size(8.dp)
-                .background(if (focused) LiveColors.Accent else LiveColors.FgMute, CircleShape),
+                .background(if (focused) liveAccent() else LiveColors.FgMute, CircleShape),
         )
         Text(
             text = channel.number.toString(),
@@ -609,11 +732,11 @@ private fun VariantRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Text(
+        if (channel.quality != Quality.UNKNOWN) Text(
             text = channel.quality.label,
             style = LiveType.Badge.copy(color = LiveColors.Fg),
             modifier = Modifier
-                .clip(RoundedCornerShape(4.dp))
+                .clip(RoundedCornerShape(8.dp))
                 .background(LiveColors.PanelRaised)
                 .padding(horizontal = 8.dp, vertical = 3.dp),
         )
@@ -621,7 +744,7 @@ private fun VariantRow(
             text = channel.lang,
             style = LiveType.Badge.copy(color = LiveColors.FgMute),
             modifier = Modifier
-                .clip(RoundedCornerShape(4.dp))
+                .clip(RoundedCornerShape(8.dp))
                 .background(LiveColors.PanelRaised)
                 .padding(horizontal = 8.dp, vertical = 3.dp),
         )

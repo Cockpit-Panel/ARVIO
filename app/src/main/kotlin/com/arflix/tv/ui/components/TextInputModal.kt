@@ -118,7 +118,7 @@ fun TextInputModal(
     // Request focus on input when modal becomes visible and show keyboard
     LaunchedEffect(isVisible) {
         if (isVisible) {
-            inputFocusRequester.requestFocus()
+            runCatching { inputFocusRequester.requestFocus() }
             focusedButton = -1
             // Delay to ensure focus is set before showing keyboard
             kotlinx.coroutines.delay(200)
@@ -160,7 +160,7 @@ fun TextInputModal(
                             Key.DirectionUp -> {
                                 if (focusedButton >= 0) {
                                     focusedButton = -1
-                                    inputFocusRequester.requestFocus()
+                                    runCatching { inputFocusRequester.requestFocus() }
                                     showKeyboard()
                                 }
                                 true
@@ -203,7 +203,7 @@ fun TextInputModal(
             Column(
                 modifier = Modifier
                     .width(500.dp)
-                    .background(Color(0xFF1A1A1A), RoundedCornerShape(20.dp))
+                    .background(BackgroundElevated, RoundedCornerShape(16.dp))
                     .padding(32.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {

@@ -178,6 +178,62 @@ class SportsAddonCapabilitiesTest {
     }
 
     @Test
+    fun `xtream iptv vod movies and episodes keep continue watching enabled`() {
+        assertFalse(SportsAddonCapabilities.isLiveStreamAddonId("iptv_xtream_vod"))
+        assertFalse(
+            SportsAddonCapabilities.isLiveStreamOrSportsItem(
+                mediaType = MediaType.MOVIE,
+                id = 123,
+                streamAddonId = "iptv_xtream_vod"
+            )
+        )
+        assertFalse(
+            SportsAddonCapabilities.isLiveStreamOrSportsItem(
+                mediaType = MediaType.TV,
+                id = 456,
+                streamAddonId = "iptv_xtream_vod"
+            )
+        )
+    }
+
+    @Test
+    fun `internal vod addon id wins over an inherited live manifest but not explicit live playback`() {
+        for (id in IptvVodSourceIds.ALL) {
+            val manifest = AddonManifest(id = "live-parent", name = "IPTV", version = "1", description = "Live TV",
+                types = listOf("tv"), resources = listOf(AddonResource(name = "stream")), catalogs = emptyList())
+            val addon = Addon(id = id, name = "IPTV", version = "1", description = "", isInstalled = true,
+                type = AddonType.COMMUNITY, manifest = manifest)
+            assertFalse(SportsAddonCapabilities.isLiveStreamAddon(addon))
+            assertFalse(SportsAddonCapabilities.isLiveStreamOrSportsItem(MediaType.TV, 1416,
+                streamAddonId = id, addons = listOf(addon)))
+            assertTrue(SportsAddonCapabilities.isLiveStreamOrSportsItem(MediaType.TV, 1416,
+                streamAddonId = id, addons = listOf(addon), isLiveStream = true))
+            assertTrue(SportsAddonCapabilities.isLiveStreamOrSportsItem(MediaType.TV, -1,
+                streamAddonId = id, addons = listOf(addon)))
+        }
+    }
+
+    @Test
+    fun `regular iptv and explicit live playback remain excluded from continue watching`() {
+        assertTrue(SportsAddonCapabilities.isLiveStreamAddonId("my_iptv_provider"))
+        assertTrue(
+            SportsAddonCapabilities.isLiveStreamOrSportsItem(
+                mediaType = MediaType.TV,
+                id = 123,
+                streamAddonId = "my_iptv_provider"
+            )
+        )
+        assertTrue(
+            SportsAddonCapabilities.isLiveStreamOrSportsItem(
+                mediaType = MediaType.TV,
+                id = 123,
+                streamAddonId = "iptv_xtream_vod",
+                isLiveStream = true
+            )
+        )
+    }
+
+    @Test
     fun `sports statuses are recognized as home sports items`() {
         assertTrue(SportsAddonCapabilities.isSportsHomeStatus("sports:football"))
         assertTrue(SportsAddonCapabilities.isSportsHomeStatus("sports_event:addon|sports|event"))

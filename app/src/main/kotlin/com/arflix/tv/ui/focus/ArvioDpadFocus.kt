@@ -10,7 +10,6 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.key.Key
@@ -18,14 +17,20 @@ import kotlin.Unit
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalComposeUiApi::class)
 fun Modifier.arvioDpadFocusGroup(
-    restoreFocusRequester: FocusRequester? = null,
     enableFocusRestorer: Boolean = true
 ): Modifier {
-    val restorer = when {
-        !enableFocusRestorer -> Modifier
-        restoreFocusRequester != null -> Modifier.focusRestorer { restoreFocusRequester }
-        else -> Modifier.focusRestorer()
-    }
+    // Compose's focusRestorer(onRestoreFailed = { restoreFocusRequester }) captures the
+    // requester at modifier-application time and, on a focus enter whose automatic restore
+    // fails, calls requestFocus() ITSELF — deep inside the modifier, without a try/catch.
+    // When the restore target lives in a LazyColumn row that is not yet composed/attached
+    // (the case right after categories finish loading on a fresh TV entry), that internal
+    // requestFocus() throws IllegalStateException: FocusRequester is not initialized and
+    // crashes the app, unreachable by the runCatching guards wrapping direct calls.
+    //
+    // Keep focus restoration limited to Compose's own saved focus history. Callers that
+    // need an initial focus target should request it after the target is attached instead
+    // of supplying a fallback that Compose can invoke before a lazy item is composed.
+    val restorer = if (enableFocusRestorer) Modifier.focusRestorer() else Modifier
     return this.then(restorer).focusGroup()
 }
 
@@ -46,6 +51,24 @@ fun isArvioDpadNavigationKey(key: Key): Boolean {
         key == Key.DirectionRight ||
         key == Key.DirectionUp ||
         key == Key.DirectionDown
+}
+
+/**
+ * Mirrors a horizontal D-pad key when the layout direction is RTL.
+ *
+ * In an RTL locale the IPTV screen's visuals are mirrored by Compose, but its
+ * navigation code is written against an LTR mental model (Left = toward the
+ * sidebar / earlier, Right = deeper / later). Feeding the mirrored key into that
+ * code keeps focus movement pointing the same way the eye expects. Vertical and
+ * non-directional keys pass through untouched.
+ */
+fun Key.mirrorHorizontalForRtl(isRtl: Boolean): Key {
+    if (!isRtl) return this
+    return when (this) {
+        Key.DirectionLeft -> Key.DirectionRight
+        Key.DirectionRight -> Key.DirectionLeft
+        else -> this
+    }
 }
 
 @Stable

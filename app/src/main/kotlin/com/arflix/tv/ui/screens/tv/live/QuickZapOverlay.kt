@@ -48,9 +48,11 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
@@ -58,6 +60,7 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.arflix.tv.R
 import com.arflix.tv.data.model.IptvNowNext
+import com.arflix.tv.ui.focus.mirrorHorizontalForRtl
 
 /**
  * Helper to flat list categories with items.
@@ -127,6 +130,7 @@ fun QuickZapOverlay(
     var originalCategoryId by remember { mutableStateOf(selectedCategoryId) }
 
     val focusRequester = remember { FocusRequester() }
+    val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
 
     LaunchedEffect(visible) {
         if (visible) {
@@ -167,8 +171,11 @@ fun QuickZapOverlay(
                 .focusable()
                 .onKeyEvent { ev ->
                     if (ev.type != KeyEventType.KeyDown) return@onKeyEvent false
+                    // The category / channel columns mirror in RTL, so swap the
+                    // physical Left/Right keys to keep the logic below LTR.
+                    val logicalKey = ev.key.mirrorHorizontalForRtl(isRtl)
                     if (categoryListFocused) {
-                        when (ev.key) {
+                        when (logicalKey) {
                             Key.DirectionUp -> {
                                 if (categories.isNotEmpty()) {
                                     selectedCategoryIndex = (selectedCategoryIndex - 1 + categories.size) % categories.size
@@ -195,7 +202,7 @@ fun QuickZapOverlay(
                             else -> false
                         }
                     } else {
-                        when (ev.key) {
+                        when (logicalKey) {
                             Key.DirectionUp -> {
                                 if (channels.isNotEmpty()) {
                                     selectedChannelIndex = (selectedChannelIndex - 1 + channels.size) % channels.size
@@ -250,7 +257,7 @@ fun QuickZapOverlay(
                         "< ${stringResource(R.string.channel_categories).uppercase()}"
                     },
                     style = LiveType.SectionTag.copy(
-                        color = if (categoryListFocused) LiveColors.Accent else LiveColors.FgMute,
+                        color = if (categoryListFocused) liveAccent() else LiveColors.FgMute,
                         fontSize = 11.sp,
                         letterSpacing = 1.sp,
                         fontWeight = if (categoryListFocused) FontWeight.Bold else FontWeight.Normal
@@ -394,14 +401,14 @@ private fun FocusedCategoryRow(label: String, isFocused: Boolean) {
                 Icon(
                     imageVector = Icons.Default.KeyboardArrowUp,
                     contentDescription = null,
-                    tint = LiveColors.Accent,
+                    tint = liveAccent(),
                     modifier = Modifier.size(10.dp)
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Icon(
                     imageVector = Icons.Default.KeyboardArrowDown,
                     contentDescription = null,
-                    tint = LiveColors.Accent,
+                    tint = liveAccent(),
                     modifier = Modifier.size(10.dp)
                 )
             }
@@ -409,7 +416,7 @@ private fun FocusedCategoryRow(label: String, isFocused: Boolean) {
         Text(
             text = label,
             style = LiveType.CellTitle.copy(
-                color = if (isFocused) LiveColors.Accent else LiveColors.Fg,
+                color = if (isFocused) liveAccent() else LiveColors.Fg,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold
             ),
@@ -568,7 +575,7 @@ private fun FocusedChannelSlot(
             Text(
                 text = number.toString(),
                 style = LiveType.NumberMono.copy(
-                    color = if (isFocused) LiveColors.Accent else LiveColors.FgDim,
+                    color = if (isFocused) liveAccent() else LiveColors.FgDim,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold
                 )
@@ -618,7 +625,7 @@ private fun FocusedChannelSlot(
                     Text(
                         text = formatTimeWindow(it),
                         style = LiveType.TimeMono.copy(
-                            color = LiveColors.Accent,
+                            color = liveAccent(),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold
                         ),
@@ -636,7 +643,7 @@ private fun FocusedChannelSlot(
                     .fillMaxWidth()
                     .height(3.dp)
                     .clip(RoundedCornerShape(1.5.dp)),
-                color = LiveColors.Accent,
+                color = liveAccent(),
                 trackColor = LiveColors.Divider
             )
         }

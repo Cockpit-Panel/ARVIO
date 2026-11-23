@@ -14,6 +14,13 @@ internal object ContinueWatchingRowReducer {
         val existing = existingCategory?.items?.firstOrNull {
             it.id == fresh.id && it.mediaType == fresh.mediaType
         }
+        val episodeChanged = existing?.nextEpisode?.let { previous ->
+            val next = fresh.nextEpisode
+            next != null && (
+                previous.seasonNumber != next.seasonNumber ||
+                    previous.episodeNumber != next.episodeNumber
+                )
+        } == true
         val merged = existing?.copy(
             title = fresh.title.ifBlank { existing.title },
             subtitle = fresh.subtitle,
@@ -21,9 +28,10 @@ internal object ContinueWatchingRowReducer {
             duration = fresh.duration.ifBlank { existing.duration },
             image = fresh.image.ifBlank { existing.image },
             backdrop = fresh.backdrop ?: existing.backdrop,
+            episodeStill = fresh.episodeStill ?: existing.episodeStill.takeUnless { episodeChanged },
             progress = fresh.progress,
             nextEpisode = fresh.nextEpisode,
-            timeRemainingLabel = fresh.timeRemainingLabel,
+            timeRemainingMinutes = fresh.timeRemainingMinutes,
             showPlaybackProgress = fresh.showPlaybackProgress
         ) ?: fresh
 

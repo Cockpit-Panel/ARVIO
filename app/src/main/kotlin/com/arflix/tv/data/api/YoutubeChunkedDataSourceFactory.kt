@@ -19,7 +19,8 @@ import androidx.media3.datasource.TransferListener
  */
 @UnstableApi
 class YoutubeChunkedDataSourceFactory(
-    private val chunkSizeBytes: Long = CHUNK_SIZE
+    private val chunkSizeBytes: Long = CHUNK_SIZE,
+    private val timeoutMs: Int = 15_000
 ) : DataSource.Factory {
 
     companion object {
@@ -30,15 +31,16 @@ class YoutubeChunkedDataSourceFactory(
 
     override fun createDataSource(): DataSource {
         val upstream = DefaultHttpDataSource.Factory()
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(15_000)
+            .setUserAgent(YOUTUBE_TRAILER_USER_AGENT)
+            .setConnectTimeoutMs(timeoutMs)
+            .setReadTimeoutMs(timeoutMs)
             .setAllowCrossProtocolRedirects(true)
             .createDataSource()
         return YoutubeChunkedDataSource(upstream, chunkSizeBytes)
     }
 
-    private class YoutubeChunkedDataSource(
-        private val upstream: DefaultHttpDataSource,
+    internal class YoutubeChunkedDataSource(
+        private val upstream: DataSource,
         private val chunkSize: Long
     ) : DataSource {
 
@@ -121,7 +123,9 @@ class YoutubeChunkedDataSourceFactory(
 
                 return try {
                     openNextChunk()
-                    upstream.read(buffer, offset, length)
+                    upstream.read(buffer, offset, length).also { firstRead ->
+                        if (firstRead > 0) bytesReadInChunk += firstRead
+                    }
                 } catch (e: Exception) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
 

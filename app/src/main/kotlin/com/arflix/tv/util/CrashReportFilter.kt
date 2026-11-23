@@ -1,6 +1,5 @@
 package com.arflix.tv.util
 
-import io.sentry.SentryLevel
 import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
@@ -15,9 +14,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.SSLHandshakeException
 
 /**
- * Filters expected, handled failures out of paid crash-reporting quota.
+ * Filters expected, handled failures out of crash reporting.
  *
- * Real crashes still go through Sentry. These rules are for failures that are
+ * Real crashes still go through Crashlytics. These rules are for failures that are
  * already handled by the app or caused by user/network/provider state.
  */
 object CrashReportFilter {
@@ -95,16 +94,11 @@ object CrashReportFilter {
         return dropReasonForHandledException(throwable) == null
     }
 
-    fun shouldSendSentryEvent(throwable: Throwable?, level: SentryLevel?): Boolean {
-        return shouldSendSentryEvent(throwable, level, isCrashed = false)
-    }
-
-    fun shouldSendSentryEvent(
+    fun shouldSendCrashReport(
         throwable: Throwable?,
-        level: SentryLevel?,
-        isCrashed: Boolean
+        isFatal: Boolean = false
     ): Boolean {
-        if (isCrashed || level == SentryLevel.FATAL) return true
+        if (isFatal) return true
         // Non-fatal message-only events are not actionable and can be extremely noisy.
         if (throwable == null) return false
         if (isAlwaysIgnored(throwable)) return false

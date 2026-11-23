@@ -1,19 +1,39 @@
 // GET  /entitlement-status  → the web app reads the signed-in account's web
-//                             subscription status (paid / trial / none).
-// POST /entitlement-status  { action: "start-trial" } → consume the one-time
-//                             3-day trial for this account.
+//                             subscription status (paid / none).
+// POST /entitlement-status  { action: "start-trial" } → legacy clients receive
+//                             trial_unavailable; no trial access is created.
 // Auth: the account's ARVIO access token (same as account-sync-*). The email is
-// taken from the verified identity, so a user can only read/trial THEIR account.
+// taken from the verified identity, so a user can only read THEIR account.
 const { json, options, resolveIdentity, normalizeEmail, sha256 } = require("./_backend");
 const {
-  TRIAL_MS,
   entitlementsStore,
   readEntitlement,
   writeEntitlement,
   evaluateEntitlement
 } = require("./_entitlements");
 const { recordPremiumEvent } = require("./_premium-funnel");
-const { queueTrialEmails } = require("./_trial-emails");
+const { rewardReferralIfDue } = require("./_referrals");
+const { partnerEntitlement } = require("./_partner-entitlement");
+
+function requestAction(event) {
+  let raw = event.body;
+  if (event.isBase64Encoded && typeof raw === "string") {
+    try { raw = Buffer.from(raw, "base64").toString("utf8"); } catch { raw = ""; }
+  }
+
+  let body = {};
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    body = raw;
+  } else if (typeof raw === "string" && raw.trim()) {
+    try { body = JSON.parse(raw); } catch { body = {}; }
+  }
+
+  // This endpoint has one authenticated POST operation. Some browsers/proxies
+  // have reached Netlify with an empty or encoded body, so keep those requests
+  // backward-compatible so stale requests receive the same trial_unavailable
+  // response rather than accidentally bypassing the paid-access policy.
+  return String(body.action || "start-trial").trim().toLowerCase();
+}
 
 exports.handler = async (event) => {
   const cors = options(event);
@@ -37,59 +57,39 @@ exports.handler = async (event) => {
     const store = entitlementsStore(event);
     let record = await readEntitlement(store, emailHash);
 
-    // Start-trial: grant a one-time 3-day trial if never used and not already paid.
+    // Retain the old route for stale clients, without granting free access,
+    // altering account records or sending trial email.
     if (event.httpMethod === "POST") {
-      let body = {};
-      try { body = JSON.parse(event.body || "{}"); } catch { body = {}; }
-      if (body.action === "start-trial") {
+      const action = requestAction(event);
+      if (action === "start-trial") {
         const current = evaluateEntitlement(record);
         if (current.entitled) {
           return json(200, { ...current, alreadyEntitled: true });
         }
-        if (record && record.trialUsed) {
-          return json(409, { error: "trial_used", ...current });
-        }
-        const now = new Date();
-        record = {
-          ...(record || {}),
-          status: "active",
-          source: "trial",
-          tier: null,
-          startedAt: (record && record.startedAt) || now.toISOString(),
-          expiresAt: new Date(now.getTime() + TRIAL_MS).toISOString(),
-          trialUsed: true,
-          lastEvent: "trial-started",
-          updatedAt: now.toISOString()
-        };
-        await writeEntitlement(store, emailHash, record);
-        await recordPremiumEvent(event, {
-          email,
-          accountId: identity.supabaseUserId,
-          eventName: "trial_started",
-          metadata: { duration_days: 3 }
-        }).catch((error) => console.error("trial funnel recording failed", error));
-        try {
-          await queueTrialEmails(event, email, record.expiresAt);
-        } catch (error) {
-          // Email must never prevent an otherwise valid trial from starting.
-          console.error("trial email scheduling failed", error);
-        }
-        return json(200, { ...evaluateEntitlement(record), trialStarted: true });
+        return json(403, {
+          error: "trial_unavailable",
+          message: "ARVIO Web requires a paid Premium membership. Free trials are no longer available.",
+          ...current
+        });
       }
       return json(400, { error: "unknown_action" });
     }
 
     // Renewal sync for linked Ko-fi emails. The Ko-fi webhook renews the record
     // under the KO-FI email; an account that linked a different email holds a
-    // COPY with the old expiry. When that copy lapses, chase linkedFrom — if the
-    // source subscription is still active, refresh the copy in place so
-    // mismatched-email subscribers never have to re-link after each renewal.
+    // COPY. On every read, take the billing record when it reaches further or
+    // its plan changed (a renewal, a 12-month pass, a referral bonus), so a
+    // linked member never sees "payment not received" after paying on time.
     let state = evaluateEntitlement(record);
-    if (!state.entitled && record && record.linkedFrom) {
+    let payerHash = emailHash;
+    if (record && record.linkedFrom) {
       const sourceEmail = normalizeEmail(record.linkedFrom);
       if (sourceEmail && sourceEmail !== email) {
-        const source = await readEntitlement(store, sha256(sourceEmail));
-        if (evaluateEntitlement(source).entitled) {
+        payerHash = sha256(sourceEmail);
+        const source = await readEntitlement(store, payerHash);
+        const sourceState = evaluateEntitlement(source);
+        const end = (value) => (value && value.expiresAt === null ? Infinity : Date.parse(value?.expiresAt || "") || 0);
+        if (sourceState.entitled && (!state.entitled || end(source) > end(record) || (source.plan || null) !== (record.plan || null))) {
           record = {
             ...source,
             linkedFrom: sourceEmail,
@@ -102,9 +102,36 @@ exports.handler = async (event) => {
       }
     }
 
+    // Catch payments that arrived under a different, subsequently verified
+    // billing email, and referrals still pending from before instant rewards.
+    if (state.entitled && state.reason === "subscription" && record && record.source !== "referral") {
+      const reward = await rewardReferralIfDue(event, { emailHash, payerHash }).catch((error) => {
+        console.error("referral reward check failed", error && error.message);
+        return null;
+      });
+      if (reward && reward.rewarded) {
+        record = await readEntitlement(store, emailHash);
+        if (record && record.linkedFrom) {
+          const source = await readEntitlement(store, payerHash);
+          if (source) {
+            record = { ...source, linkedFrom: record.linkedFrom, trialUsed: record.trialUsed === true, updatedAt: new Date().toISOString() };
+            await writeEntitlement(store, emailHash, record);
+          }
+        }
+        state = evaluateEntitlement(record);
+      }
+    }
+
+    if (state.entitled && state.reason === "subscription") {
+      await recordPremiumEvent(event, { email, eventName: "paid_access_observed", metadata: { source: state.source || "unknown" } })
+        .catch(() => console.error("Paid access analytics temporarily unavailable"));
+    }
+    if (!state.entitled) state = await partnerEntitlement(identity) || state;
     return json(200, state);
   } catch (error) {
     console.error("entitlement-status failed", error);
     return json(500, { error: "entitlement_status_failed", message: error.message });
   }
 };
+
+exports._test = { requestAction };

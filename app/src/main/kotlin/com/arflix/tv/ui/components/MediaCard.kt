@@ -1,11 +1,14 @@
 package com.arflix.tv.ui.components
 
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -25,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -38,7 +42,10 @@ import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
+import coil.size.Scale
 import com.arflix.tv.R
+import com.arflix.tv.ui.theme.BackgroundCard
+import com.arflix.tv.ui.theme.BackgroundElevated
 import com.arflix.tv.data.model.CollectionGroupKind
 import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
@@ -46,9 +53,13 @@ import com.arflix.tv.ui.skin.ArvioFocusableSurface
 import com.arflix.tv.ui.skin.ArvioSkin
 import com.arflix.tv.ui.skin.rememberArvioCardShape
 import com.arflix.tv.util.LocalDeviceType
+import com.arflix.tv.util.TmdbImageSizing
+import com.arflix.tv.util.Constants
+import com.arflix.tv.ui.screens.details.formatEpisodeAirDateLabel
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.platform.testTag
 
 /**
  * Media card component for rows/grids.
@@ -61,8 +72,8 @@ import androidx.compose.ui.zIndex
 
 private val missingArtworkBrush = Brush.linearGradient(
     colors = listOf(
-        Color(0xFF1F2333),
-        Color(0xFF0D0D14)
+        BackgroundElevated,
+        BackgroundCard
     )
 )
 
@@ -85,6 +96,7 @@ fun MediaCard(
     showTitle: Boolean = true,
     showSubtitle: Boolean = true,
     titleMaxLines: Int = 1,
+    titleMinLines: Int = 1,
     subtitleMaxLines: Int = 1,
     isFocusedOverride: Boolean = false,
     focusedScale: Float = 1.045f,
@@ -93,6 +105,10 @@ fun MediaCard(
     onClick: () -> Unit = {},
     onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    artworkPainter: Painter? = null,
+    artworkHeight: Dp? = null,
+    /** The artwork fills the height the parent gives the card (a parent that animates the size). */
+    fillArtworkHeight: Boolean = false,
 ) {
     // If this is a placeholder card, show skeleton only
     if (item.isPlaceholder) {
@@ -123,10 +139,15 @@ fun MediaCard(
     // hovered tile animates its GIF. Regular media items keep the existing
     // behavior (landscape uses backdrop art, poster uses image).
     val isCollectionTile = item.status?.startsWith("collection:") == true
+    val isChannelLogo = item.status?.startsWith("iptv:") == true
+    val isProviderLogo = item.status?.startsWith("collection:collection_service_") == true &&
+        item.image.startsWith("https://image.tmdb.org/")
+    val continueWatchingArtwork = item.episodeStill
+        ?.takeIf { showProgress && isLandscape && it.isNotBlank() }
     val baseImageUrl = if (isCollectionTile) {
         item.image.takeIf { it.isNotBlank() } ?: item.backdrop?.takeIf { it.isNotBlank() }
     } else if (isLandscape) {
-        (item.backdrop ?: item.image).takeIf { it.isNotBlank() }
+        (continueWatchingArtwork ?: item.backdrop ?: item.image).takeIf { it.isNotBlank() }
     } else {
         item.image.takeIf { it.isNotBlank() }
     }
@@ -149,23 +170,37 @@ fun MediaCard(
     val context = LocalContext.current
     val density = LocalDensity.current
     val overlayBrush: Brush? = null  // Gradient removed per user feedback
-    val imageRequest = remember(rawImageUrl, width, aspectRatio, isMobile) {
-        if (rawImageUrl == null) return@remember null
+    val imageRequest = remember(rawImageUrl, item.backdrop, width, aspectRatio, isMobile, isChannelLogo, isCollectionTile, artworkPainter != null) {
+        if (rawImageUrl == null || artworkPainter != null) return@remember null
         val widthPx = with(density) { width.roundToPx() }
         val heightPx = (widthPx / aspectRatio).toInt().coerceAtLeast(1)
-        val cacheKey = "$rawImageUrl|${widthPx}x$heightPx"
+        // Collection tiles and channel logos keep their own artwork rules.
+        val imageUrl = if (isCollectionTile || isChannelLogo) {
+            rawImageUrl
+        } else {
+            TmdbImageSizing.forSlot(
+                rawImageUrl,
+                widthPx,
+                heightPx,
+                TmdbImageSizing.cardArtworkKind(rawImageUrl, item.backdrop, isLandscape)
+            )
+        }
+        val cacheKey = "$imageUrl|${widthPx}x$heightPx" + if (isChannelLogo) "|channel-logo" else ""
         ImageRequest.Builder(context)
-            .data(rawImageUrl)
+            .data(imageUrl)
             .size(widthPx, heightPx)
+            .scale(if (isChannelLogo) Scale.FIT else Scale.FILL)
             .precision(Precision.INEXACT)
             .allowHardware(true)
             .memoryCacheKey(cacheKey)
             .placeholderMemoryCacheKey(cacheKey)
-            .crossfade(if (isMobile) 250 else 0)
+            .crossfade(if (isMobile && !isChannelLogo) 250 else 0)
             .build()
     }
+    var channelLogoFailed by remember(imageRequest) { mutableStateOf(false) }
+    var artworkIsOpaque by remember(imageRequest) { mutableStateOf(false) }
     // Performance: Removed context/density from keys
-    val effectiveLogoImageUrl = logoImageUrl.takeIf { showLogoImage }
+    val effectiveLogoImageUrl = logoImageUrl.takeIf { showLogoImage && !isChannelLogo }
     val logoRequest = remember(effectiveLogoImageUrl, isMobile) {
         val logoWidthPx = with(density) { 220.dp.roundToPx() }.coerceAtLeast(1)
         val logoHeightPx = with(density) { 64.dp.roundToPx() }.coerceAtLeast(1)
@@ -193,7 +228,11 @@ fun MediaCard(
         ArvioFocusableSurface(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(aspectRatio),
+                .then(when {
+                    fillArtworkHeight -> Modifier.fillMaxHeight()
+                    artworkHeight != null -> Modifier.height(artworkHeight)
+                    else -> Modifier.aspectRatio(aspectRatio)
+                }),
             shape = shape,
             backgroundColor = ArvioSkin.colors.surface,
             outlineColor = ArvioSkin.colors.focusOutline,
@@ -213,30 +252,51 @@ fun MediaCard(
             },
         ) { _ ->
             Box(modifier = Modifier.fillMaxSize()) {
-                // Branded gradient fallback with title that sits behind AsyncImage.
-                // When AsyncImage loads, it fades in smoothly over this background;
-                // if image fails or is slow, the title remains visible instead of a black box.
-                Box(
+                // Channel logos can be transparent: never leave placeholder text behind them.
+                if (!artworkIsOpaque && artworkPainter == null) Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(missingArtworkBrush),
+                        .then(if (isChannelLogo) Modifier.background(ArvioSkin.colors.surface)
+                              else Modifier.background(missingArtworkBrush)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = item.title,
-                        style = ArvioSkin.typography.cardTitle,
-                        color = Color.White.copy(alpha = 0.72f),
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 10.dp)
-                    )
+                    if (!isProviderLogo && (!isChannelLogo || imageRequest == null || channelLogoFailed) &&
+                        !(showCollectionTitleOverlay && item.status?.startsWith("collection:custom_") == true)) {
+                        Text(
+                            text = item.title,
+                            style = ArvioSkin.typography.cardTitle,
+                            color = Color.White.copy(alpha = 0.72f),
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp)
+                        )
+                    }
                 }
-                if (imageRequest != null) {
+                if (artworkPainter != null) {
+                    Image(artworkPainter, item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                } else if (imageRequest != null) {
                     AsyncImage(
                         model = imageRequest,
                         contentDescription = item.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
+                        contentScale = if (isChannelLogo || isProviderLogo) ContentScale.Fit else ContentScale.Crop,
+                        onError = {
+                            artworkIsOpaque = false
+                            if (isChannelLogo) channelLogoFailed = true
+                        },
+                        onSuccess = {
+                            if (isChannelLogo) channelLogoFailed = false
+                            // Keep the fallback behind transparent artwork and crossfades.
+                            artworkIsOpaque = !isMobile && !isChannelLogo &&
+                                it.result.drawable.opacity == android.graphics.PixelFormat.OPAQUE
+                        },
+                        modifier = Modifier.fillMaxSize().then(
+                            if (isProviderLogo) Modifier.padding(horizontal = width * 0.22f,
+                                vertical = if (isMobile) (width / aspectRatio) * 0.18f else 24.dp)
+                            else if (isChannelLogo) Modifier.padding(
+                                horizontal = width * 0.1f,
+                                vertical = (width / aspectRatio) * 0.12f
+                            ) else Modifier
+                        ),
                     )
                 }
                 if (overlayBrush != null) {
@@ -247,7 +307,15 @@ fun MediaCard(
                     )
                 }
 
-                if (showCollectionTitleOverlay) {
+                if (showCollectionTitleOverlay && isMobile && !isProviderLogo) {
+                    Box(Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))))
+                        .padding(horizontal = 10.dp, vertical = 12.dp)) {
+                        Text(item.title, color = Color.White, fontSize = 14.sp, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                if (showCollectionTitleOverlay && !isMobile) {
                     Box(
                         modifier = Modifier
                             .align(if (isGenreCollectionTile) Alignment.BottomStart else Alignment.TopStart)
@@ -320,40 +388,25 @@ fun MediaCard(
 
                 // Subtle green watched badge
                 if (item.isWatched) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                        .padding(bottom = 6.dp, end = 6.dp)
-                        .size(14.dp)
-                        .background(
-                            color = ArvioSkin.colors.watchedGreen.copy(alpha = 0.2f),
-                            shape = CircleShape
-                        )
-                        .border(
-                            width = 1.dp,
-                            color = ArvioSkin.colors.watchedGreen,
-                            shape = CircleShape
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = null,
-                        tint = ArvioSkin.colors.watchedGreen,
-                        modifier = Modifier.size(8.dp)
+                    WatchedBadge(
+                        Modifier.align(Alignment.BottomEnd)
+                            .padding(bottom = 6.dp, end = 6.dp)
+                            .testTag("media_watched_${item.mediaType}_${item.id}")
                     )
-                }
                 }
 
                 // Subtle playback progress bar for Continue Watching.
-                if (showProgress && item.showPlaybackProgress && !item.isWatched && item.progress in 1..94) {
+                if (
+                    showProgress && item.showPlaybackProgress && !item.isWatched &&
+                    item.progress in 1 until Constants.WATCHED_THRESHOLD
+                ) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .fillMaxWidth()
                             .padding(horizontal = 8.dp, vertical = 6.dp)
                             .height(5.dp)
-                            .clip(RoundedCornerShape(999.dp))
+                            .clip(CircleShape)
                             .background(Color.Black.copy(alpha = 0.48f))
                     ) {
                         Box(
@@ -367,9 +420,16 @@ fun MediaCard(
 
                 // ── Continue Watching badges ──
                 if (showProgress) {
+                    // A narrow poster cannot hold both top badges in full, so the right one is shortened too.
+                    val compactBadges = !isLandscape && width < CONTINUE_WATCHING_FULL_BADGE_MIN_WIDTH
                     // Top-right: time remaining or "New Episode" badge
-                    val topRightLabel = item.timeRemainingLabel
-                        ?: if (item.mediaType == MediaType.TV && item.progress == 0 && !item.isWatched) stringResource(R.string.component_badge_new_episode) else null
+                    val topRightLabel = item.timeRemainingMinutes?.let { timeRemainingBadgeLabel(it, compactBadges) }
+                        ?: if (item.mediaType == MediaType.TV && item.progress == 0 && !item.isWatched) {
+                            stringResource(
+                                if (compactBadges) R.string.component_badge_new_episode_short
+                                else R.string.component_badge_new_episode
+                            )
+                        } else null
                     if (topRightLabel != null) {
                         Box(
                             modifier = Modifier
@@ -438,8 +498,8 @@ fun MediaCard(
                             Text(
                                 text = stringResource(
                                     R.string.component_season_episode_marker,
-                                    nextEpisode.seasonNumber,
-                                    nextEpisode.episodeNumber
+                                    nextEpisode.displaySeason ?: nextEpisode.seasonNumber,
+                                    nextEpisode.displayEpisode ?: nextEpisode.episodeNumber
                                 ),
                                 style = ArvioSkin.typography.badge,
                                 color = ArvioSkin.colors.textPrimary,
@@ -475,26 +535,27 @@ fun MediaCard(
                     ArvioSkin.colors.textPrimary.copy(alpha = 0.85f)
                 },
                 maxLines = titleMaxLines,
+                minLines = titleMinLines.coerceIn(1, titleMaxLines),
                 overflow = TextOverflow.Ellipsis,
             )
 
             if (showSubtitle) {
-                // Prefer release date (or year) under the title. Fall back to the
-                // explicit subtitle or media-type label only when neither is set.
+                // Standardized metadata format: "{type} · {year}" (e.g. "Movie · 2024").
+                // Falls back to explicit subtitle only when type/year are both missing.
                 val tvSeriesLabel = stringResource(R.string.component_label_tv_series)
                 val movieLabel = stringResource(R.string.movie)
                 val mediaLabel = stringResource(R.string.component_label_media)
-                val subtitle = remember(item.subtitle, item.releaseDate, item.year, item.mediaType, tvSeriesLabel, movieLabel, mediaLabel) {
-                    val release = item.releaseDate?.takeIf { it.isNotBlank() }
+                val subtitle = remember(item.subtitle, item.releaseDate, item.year, item.mediaType, isMobile, tvSeriesLabel, movieLabel, mediaLabel) {
+                    val typeLabel = when (item.mediaType) {
+                        MediaType.TV -> tvSeriesLabel
+                        MediaType.MOVIE -> movieLabel
+                        else -> mediaLabel
+                    }
+                    val year = item.releaseDate?.takeIf { it.isNotBlank() }
                         ?: item.year.takeIf { it.isNotBlank() }
-                    release
-                        ?: item.subtitle.ifBlank {
-                            when (item.mediaType) {
-                                MediaType.TV -> tvSeriesLabel
-                                MediaType.MOVIE -> movieLabel
-                                else -> mediaLabel
-                            }
-                        }
+                    val dateLabel = if (isMobile && year != null) formatEpisodeAirDateLabel(year) ?: year else year
+                    if (dateLabel != null) mediaCardSubtitle(typeLabel, dateLabel)
+                    else item.subtitle.ifBlank { typeLabel }
                 }
                 Text(
                     text = subtitle,
@@ -511,6 +572,41 @@ fun MediaCard(
                 )
             }
         }
+    }
+}
+
+/**
+ * "{type} · {date}", e.g. "Movie · 13 Nov 2026". The date is always English, while the type
+ * follows the app language. In a right-to-left language the Hebrew/Arabic type makes the line
+ * right-to-left, and the bidi algorithm then splits the date's leading day off its month and
+ * year ("Nov 2026 13"). A left-to-right mark before the date makes the day follow a
+ * left-to-right character, so the whole date stays one run in its own order. It is invisible,
+ * and left-to-right languages are unaffected.
+ */
+internal fun mediaCardSubtitle(typeLabel: String, dateLabel: String): String = "$typeLabel · \u200E$dateLabel"
+
+/** Narrower posters show the short Continue Watching badges ("Neu", "25 Min."); the full ones overlap there. */
+private val CONTINUE_WATCHING_FULL_BADGE_MIN_WIDTH = 140.dp
+
+/** Remaining time for the Continue Watching badge, e.g. "25min left", or "25m" when [compact]. */
+@Composable
+internal fun timeRemainingBadgeLabel(totalMinutes: Int, compact: Boolean): String {
+    val hours = totalMinutes / 60
+    val minutes = totalMinutes % 60
+    return when {
+        hours == 0 -> stringResource(
+            if (compact) R.string.component_time_left_minutes_short else R.string.component_time_left_minutes,
+            minutes
+        )
+        minutes == 0 -> stringResource(
+            if (compact) R.string.component_time_left_hours_short else R.string.component_time_left_hours,
+            hours
+        )
+        else -> stringResource(
+            if (compact) R.string.component_time_left_hours_minutes_short else R.string.component_time_left_hours_minutes,
+            hours,
+            minutes
+        )
     }
 }
 
@@ -721,14 +817,35 @@ fun FeaturedMediaCard(
     trailerDelayMs: Long,
     trailerVolume: Float,
     onClick: () -> Unit,
+    // The expanded size, so the artwork size does not change while [width] animates.
+    artworkWidth: Dp = width,
+    autoplayNotBeforeMs: Long? = null,
 ) {
+    val density = LocalDensity.current
+    val imageUrl = remember(item.backdrop, item.image, artworkWidth, density) {
+        (item.backdrop ?: item.image).takeIf { it.isNotBlank() }?.let { url ->
+            TmdbImageSizing.forSlot(
+                url,
+                with(density) { artworkWidth.roundToPx() },
+                with(density) { (artworkWidth * (9f / 16f)).roundToPx() },
+                TmdbImageSizing.Kind.BACKDROP
+            )
+        }
+    }
+
     val shape = rememberArvioCardShape(ArvioSkin.radius.md)
-    val imageUrl = (item.backdrop ?: item.image).takeIf { it.isNotBlank() }
+    // Remaining focus delay, fixed when the card opens so recompositions don't restart it.
+    val startDelayMs = remember(item.id, item.mediaType, trailerKey) {
+        autoplayNotBeforeMs?.let { (it - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0L) }
+            ?: trailerDelayMs
+    }
+    // The player is mounted only once expansion has reached its final size.
+    val expanded = kotlin.math.abs(width.value - artworkWidth.value) < 0.5f
 
     ArvioFocusableSurface(
-        modifier = Modifier.size(width, height),
+        modifier = Modifier.size(width, height).testTag("home_trailer_card_${item.mediaType}_${item.id}"),
         shape = shape,
-        backgroundColor = Color(0xFF1A1A1A),
+        backgroundColor = BackgroundElevated,
         outlineColor = ArvioSkin.colors.focusOutline,
         outlineWidth = 2.5.dp,
         focusedScale = 1f,
@@ -746,10 +863,10 @@ fun FeaturedMediaCard(
                 modifier = Modifier.fillMaxSize()
             )
         }
-        if (trailerKey != null) {
+        if (trailerKey != null && expanded) {
             TrailerPlayer(
                 youtubeKey = trailerKey,
-                delayMs = trailerDelayMs,
+                delayMs = startDelayMs,
                 volume = trailerVolume,
                 modifier = Modifier.fillMaxSize()
             )
@@ -774,7 +891,34 @@ fun FeaturedMediaCard(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .padding(start = 10.dp, end = if (item.isWatched) 36.dp else 10.dp, top = 8.dp, bottom = 8.dp)
+        )
+        if (item.isWatched) {
+            WatchedBadge(
+                Modifier.align(Alignment.BottomEnd)
+                    .padding(bottom = 8.dp, end = 10.dp)
+                    .testTag("featured_watched_${item.mediaType}_${item.id}"),
+                size = 18.dp
+            )
+        }
+    }
+}
+
+/** The green tick on a watched title. Every card that shows a title draws this one. */
+@Composable
+fun WatchedBadge(modifier: Modifier = Modifier, size: Dp = 14.dp) {
+    Box(
+        modifier = modifier
+            .size(size)
+            .background(color = ArvioSkin.colors.watchedGreen.copy(alpha = 0.2f), shape = CircleShape)
+            .border(width = 1.dp, color = ArvioSkin.colors.watchedGreen, shape = CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = null,
+            tint = ArvioSkin.colors.watchedGreen,
+            modifier = Modifier.size(size * (8f / 14f))
         )
     }
 }

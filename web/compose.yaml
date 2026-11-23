@@ -1,0 +1,25 @@
+services:
+  arvio:
+    build:
+      context: .
+    ports:
+      - "${ARVIO_BIND_ADDRESS:-127.0.0.1}:${ARVIO_PORT:-3000}:3000"
+    env_file:
+      - .env.local
+    environment:
+      NEXT_PUBLIC_SELF_HOSTED: "true"
+      NEXT_PUBLIC_PAYWALL_ENABLED: "false"
+      NEXT_TELEMETRY_DISABLED: "1"
+    init: true
+    volumes:
+      - simkl-sessions:/app/.data/simkl-sessions
+      - wetrakr-sessions:/app/.data/wetrakr-sessions
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  simkl-sessions:
+  wetrakr-sessions:

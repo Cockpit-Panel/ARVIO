@@ -63,15 +63,19 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.arflix.tv.R
 import com.arflix.tv.data.model.IptvNowNext
+import com.arflix.tv.data.model.IptvGuideHistory
 import com.arflix.tv.data.model.IptvProgram
+import com.arflix.tv.ui.focus.mirrorHorizontalForRtl
 import kotlinx.coroutines.delay
 import java.time.Instant
 import java.time.ZoneId
@@ -108,11 +112,13 @@ internal fun FullscreenGuideOverlay(
 
     BackHandler(enabled = visible, onBack = onDismiss)
 
+    val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
     val nowMillis = clockTickMillis
 
     val catchupSupported = remember(channel) { channel.supportsFullscreenCatchup() }
-    val pastWindowStart = nowMillis - 48L * 60L * 60_000L
-    val past = remember(guide, nowMillis, catchupSupported) {
+    val historyDays = IptvGuideHistory.days(channel.source).takeIf { it > 0 } ?: 3
+    val pastWindowStart = nowMillis - historyDays * IptvGuideHistory.DAY_MS
+    val past = remember(guide, nowMillis, channel.source, historyDays) {
         guide?.recent.orEmpty()
             .asSequence()
             .filter { it.endUtcMillis <= nowMillis && it.endUtcMillis >= pastWindowStart }
@@ -121,7 +127,9 @@ internal fun FullscreenGuideOverlay(
             .map {
                 GuideProgramItem(
                     it,
-                    if (catchupSupported) GuideProgramState.PastPlayable else GuideProgramState.PastUnavailable
+                    if (IptvGuideHistory.canReplay(channel.source, it, nowMillis)) {
+                        GuideProgramState.PastPlayable
+                    } else GuideProgramState.PastUnavailable
                 )
             }
             .toList()
@@ -193,7 +201,7 @@ internal fun FullscreenGuideOverlay(
         val panelShape = if (isTouchDevice) {
             RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 14.dp, bottomEnd = 14.dp)
         } else {
-            RoundedCornerShape(18.dp)
+            RoundedCornerShape(16.dp)
         }
         Box(modifier = Modifier.fillMaxSize()) {
             Box(
@@ -223,7 +231,11 @@ internal fun FullscreenGuideOverlay(
                         }
                     )
                     .onPreviewKeyEvent { ev ->
-                        if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionLeft) {
+                        // Panel sits on the end edge (right in LTR, left in RTL);
+                        // the "toward the video" key opens quick-zap either way.
+                        if (ev.type == KeyEventType.KeyDown &&
+                            ev.key.mirrorHorizontalForRtl(isRtl) == Key.DirectionLeft
+                        ) {
                             onLeftClick?.invoke()
                             true
                         } else {
@@ -319,10 +331,14 @@ private fun FullscreenGuideContent(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(if (isTouchDevice) 5.dp else 6.dp)) {
-                    GuideChip(stringResource(R.string.live_label_ch, channel.number), LiveColors.FgDim, Color.White.copy(alpha = 0.08f))
-                    GuideChip(channel.quality.label, LiveColors.FgDim, Color.White.copy(alpha = 0.08f))
+                    if (!isTouchDevice) {
+                        GuideChip(stringResource(R.string.live_label_ch, channel.number), LiveColors.FgDim, Color.White.copy(alpha = 0.08f))
+                    }
+                    if (channel.quality != Quality.UNKNOWN) {
+                        GuideChip(channel.quality.label, LiveColors.FgDim, Color.White.copy(alpha = 0.08f))
+                    }
                     if (catchupSupported) {
-                        GuideChip(stringResource(R.string.live_label_catchup), LiveColors.Bg, LiveColors.Accent)
+                        GuideChip(stringResource(R.string.live_label_catchup), LiveColors.Bg, liveAccent())
                     }
                 }
             }
@@ -338,11 +354,15 @@ private fun FullscreenGuideContent(
 
         val listState = rememberLazyListState()
         val anchorFocusRequester = remember { FocusRequester() }
-        LaunchedEffect(channel.id, items.size, anchorIndex) {
-            if (items.isNotEmpty()) {
+        var initialAnchorApplied by remember(channel.id) { mutableStateOf(false) }
+        LaunchedEffect(channel.id, items.isNotEmpty()) {
+            if (items.isNotEmpty() && !initialAnchorApplied) {
                 listState.scrollToItem((anchorIndex - 1).coerceAtLeast(0))
-                delay(90)
-                runCatching { anchorFocusRequester.requestFocus() }
+                initialAnchorApplied = true
+                if (!isTouchDevice) {
+                    delay(90)
+                    runCatching { anchorFocusRequester.requestFocus() }
+                }
             }
         }
 
@@ -362,7 +382,7 @@ private fun FullscreenGuideContent(
             } else {
                 itemsIndexed(
                     items = items,
-                    key = { index, item -> "${item.state}:${item.program.startUtcMillis}:${item.program.title}:$index" },
+                    key = { _, item -> "${item.program.startUtcMillis}:${item.program.endUtcMillis}:${item.program.title}" },
                 ) { index, item ->
                     GuideProgramRow(
                         item = item,
@@ -400,7 +420,7 @@ private fun GuideSheetHandle() {
             modifier = Modifier
                 .width(42.dp)
                 .height(4.dp)
-                .clip(RoundedCornerShape(999.dp))
+                .clip(CircleShape)
                 .background(Color.White.copy(alpha = 0.24f))
         )
     }
@@ -418,9 +438,9 @@ private fun GuideTimelineSummary(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(Color.White.copy(alpha = if (isTouchDevice) 0.055f else 0.045f))
-            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)), RoundedCornerShape(14.dp))
+            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)), RoundedCornerShape(16.dp))
             .padding(5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(if (isTouchDevice) 5.dp else 7.dp),
@@ -428,7 +448,7 @@ private fun GuideTimelineSummary(
         GuideTimelinePill(
             label = stringResource(R.string.live_label_aired),
             value = pastCount.toString(),
-            accent = if (catchupSupported) LiveColors.Accent else LiveColors.FgMute,
+            accent = if (catchupSupported) liveAccent() else LiveColors.FgMute,
             modifier = Modifier.weight(1f),
         )
         GuideTimelinePill(
@@ -456,7 +476,7 @@ private fun GuideTimelinePill(
 ) {
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(accent.copy(alpha = 0.13f))
             .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -497,7 +517,7 @@ private fun GuideProgramRow(
         else -> Color.White.copy(alpha = 0.07f)
     }
     val border = when {
-        selected -> LiveColors.Accent
+        selected -> liveAccent()
         focused -> LiveColors.Fg.copy(alpha = 0.42f)
         else -> Color.White.copy(alpha = 0.08f)
     }
@@ -534,7 +554,7 @@ private fun GuideProgramRow(
                 text = timelineDateLabel(item.program, nowMillis),
                 style = LiveType.Badge.copy(
                     color = when (item.state) {
-                        GuideProgramState.PastPlayable -> LiveColors.Accent
+                        GuideProgramState.PastPlayable -> liveAccent()
                         GuideProgramState.PastUnavailable -> LiveColors.FgDim
                         GuideProgramState.Live -> LiveColors.LiveRed
                         GuideProgramState.Future -> LiveColors.FgDim
@@ -558,7 +578,7 @@ private fun GuideProgramRow(
                 .clip(CircleShape)
                 .background(
                     when (item.state) {
-                        GuideProgramState.PastPlayable -> LiveColors.Accent.copy(alpha = 0.18f)
+                        GuideProgramState.PastPlayable -> liveAccent().copy(alpha = 0.18f)
                         GuideProgramState.PastUnavailable -> Color.White.copy(alpha = 0.06f)
                         GuideProgramState.Live -> LiveColors.LiveRed.copy(alpha = 0.22f)
                         GuideProgramState.Future -> Color.White.copy(alpha = 0.08f)
@@ -575,7 +595,7 @@ private fun GuideProgramRow(
                 },
                 contentDescription = null,
                 tint = when (item.state) {
-                    GuideProgramState.PastPlayable -> LiveColors.Accent
+                    GuideProgramState.PastPlayable -> liveAccent()
                     GuideProgramState.PastUnavailable -> LiveColors.FgDim
                     GuideProgramState.Live -> LiveColors.LiveRed
                     GuideProgramState.Future -> LiveColors.FgDim
@@ -606,7 +626,7 @@ private fun GuideProgramRow(
                         GuideProgramState.Future -> LiveColors.FgDim
                     },
                     bg = when (item.state) {
-                        GuideProgramState.PastPlayable -> LiveColors.Accent
+                        GuideProgramState.PastPlayable -> liveAccent()
                         GuideProgramState.PastUnavailable -> Color.White.copy(alpha = 0.08f)
                         GuideProgramState.Live -> LiveColors.LiveRed
                         GuideProgramState.Future -> Color.White.copy(alpha = 0.08f)
@@ -641,8 +661,8 @@ private fun GuideProgramRow(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(3.dp)
-                            .clip(RoundedCornerShape(2.dp)),
-                        color = LiveColors.Accent,
+                            .clip(RoundedCornerShape(8.dp)),
+                        color = liveAccent(),
                         trackColor = LiveColors.Panel,
                     )
                 }
@@ -667,9 +687,9 @@ private fun GuideEmptyState(
         modifier = Modifier
             .fillMaxWidth()
             .height(if (isTouchDevice) 118.dp else 150.dp)
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(Color.White.copy(alpha = 0.055f))
-            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)), RoundedCornerShape(14.dp))
+            .border(BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)), RoundedCornerShape(16.dp))
             .padding(if (isTouchDevice) 14.dp else 18.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -687,7 +707,7 @@ private fun GuideEmptyState(
 private fun GuideChip(label: String, fg: Color, bg: Color) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(5.dp))
+            .clip(RoundedCornerShape(8.dp))
             .background(bg)
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {

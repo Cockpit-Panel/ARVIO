@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -83,6 +84,8 @@ fun MediaContextMenu(
     onToggleWatchlist: () -> Unit,
     onToggleWatched: () -> Unit,
     onRemoveFromContinueWatching: (() -> Unit)? = null,
+    // Shown when a service with personal lists (Trakt, MDBList) is connected.
+    onAddToList: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val isMobile = LocalDeviceType.current.isTouchDevice()
@@ -105,6 +108,13 @@ fun MediaContextMenu(
             labelRes = if (isInWatchlist) R.string.remove_from_watchlist else R.string.add_to_watchlist,
             action = onToggleWatchlist
         ))
+        if (onAddToList != null) {
+            add(MenuItem(
+                icon = Icons.AutoMirrored.Filled.PlaylistAdd,
+                labelRes = R.string.list_add_to,
+                action = onAddToList
+            ))
+        }
         add(MenuItem(
             icon = if (isWatched) Icons.Default.Visibility else Icons.Default.Check,
             labelRes = if (isWatched) R.string.unwatched else R.string.watched,
@@ -124,7 +134,7 @@ fun MediaContextMenu(
         if (isVisible) {
             focusedIndex = 0
             if (!isMobile) {
-                focusRequester.requestFocus()
+                runCatching { focusRequester.requestFocus() }
             }
         }
     }
@@ -176,11 +186,10 @@ fun MediaContextMenu(
                 Column(
                     modifier = Modifier
                         .padding(top = 110.dp)
-                        .width(320.dp)
-                        .background(BackgroundCard, RoundedCornerShape(14.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(14.dp))
-                        .padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .width(360.dp)
+                        .background(BackgroundElevated, RoundedCornerShape(8.dp))
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.Start
                 ) {
                     // Title
                     Text(
@@ -210,14 +219,6 @@ fun MediaContextMenu(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Hint
-                    Text(
-                        text = stringResource(R.string.press_back_to_close),
-                        style = ArflixTypography.caption,
-                        color = TextSecondary.copy(alpha = 0.5f)
-                    )
                 }
             }
         }
@@ -261,7 +262,9 @@ fun MediaContextMenu(
                                 indication = null,
                                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
                             ) { /* consume click so backdrop handler doesn't fire */ }
-                            .padding(top = 16.dp, bottom = 24.dp)
+                            // The mobile bottom bar is drawn over the screen; without its height
+                            // the last entries ("Watched", and "Remove" on Continue Watching) sit behind it.
+                            .padding(top = 16.dp, bottom = 24.dp + LocalBottomBarHeight.current)
                     ) {
                         // Drag handle indicator
                         Box(
@@ -271,7 +274,7 @@ fun MediaContextMenu(
                                 .height(4.dp)
                                 .background(
                                     Color.White.copy(alpha = 0.2f),
-                                    RoundedCornerShape(2.dp)
+                                    RoundedCornerShape(8.dp)
                                 )
                         )
 
@@ -352,7 +355,7 @@ private fun ContextMenuItem(
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                if (isFocused) Pink else Color.Transparent,
+                if (isFocused) Color.White else Color.Transparent,
                 RoundedCornerShape(8.dp)
             )
             .border(
@@ -360,6 +363,8 @@ private fun ContextMenuItem(
                 color = if (isFocused) Color.Transparent else Color.White.copy(alpha = 0.1f),
                 shape = RoundedCornerShape(8.dp)
             )
+            .heightIn(min = 48.dp)
+            .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Row(

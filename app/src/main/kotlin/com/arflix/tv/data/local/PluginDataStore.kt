@@ -62,6 +62,15 @@ class PluginDataStore @Inject constructor(
             return File(context.filesDir, dirName)
         }
 
+    /** Removes the installed repositories, scrapers, their settings and downloaded code (sign-out). */
+    suspend fun clearAll() {
+        store().edit { it.clear() }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            context.filesDir.listFiles { file -> file.name.startsWith("plugin_code") }
+                ?.forEach { it.deleteRecursively() }
+        }
+    }
+
     private suspend fun ensureCodeDir(): File = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         codeDir.also { it.mkdirs() }
     }

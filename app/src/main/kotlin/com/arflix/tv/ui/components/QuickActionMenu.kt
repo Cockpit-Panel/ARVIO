@@ -67,7 +67,7 @@ fun QuickActionMenu(
         if (isVisible) {
             focusedIndex = 0
             ignoreNextEnter = true
-            focusRequester.requestFocus()
+            runCatching { focusRequester.requestFocus() }
         }
     }
 

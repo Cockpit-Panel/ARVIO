@@ -1,14 +1,24 @@
 package com.arflix.tv.data.api
 
 import com.google.gson.annotations.SerializedName
+import com.google.gson.JsonObject
 import retrofit2.http.GET
 import retrofit2.http.Path
 import retrofit2.http.Query
+import retrofit2.http.QueryMap
 
 /**
  * TMDB API interface
  */
 interface TmdbApi {
+
+    @GET("tv/{tv_id}")
+    suspend fun getTvSeasons(
+        @Path("tv_id") tvId: Int,
+        @Query("api_key") apiKey: String,
+        @Query("append_to_response") appendToResponse: String,
+        @Query("language") language: String? = null
+    ): JsonObject
 
     @GET("trending/movie/day")
     suspend fun getTrendingMovies(
@@ -35,9 +45,17 @@ interface TmdbApi {
         @Query("with_original_language") originalLanguage: String? = null,
         @Query("first_air_date_year") year: Int? = null,
         @Query("vote_count.gte") minVoteCount: Int? = null,
+        @Query("vote_average.gte") minVoteAverage: Double? = null,
+        @Query("vote_average.lte") maxVoteAverage: Double? = null,
         @Query("with_keywords") keywords: String? = null,
+        // `air_date` is the broadcast date of an individual episode, so a show with a recent
+        // episode passes it no matter when it started. That is what the home screen's anime
+        // rows want and what a "shows that started in the nineties" filter must not use — for
+        // that, `first_air_date` is the date the card actually prints. Both stay available.
         @Query("air_date.gte") airDateGte: String? = null,
         @Query("air_date.lte") airDateLte: String? = null,
+        @Query("first_air_date.gte") firstAirDateGte: String? = null,
+        @Query("first_air_date.lte") firstAirDateLte: String? = null,
         @Query("language") language: String? = null,
         @Query("page") page: Int = 1
     ): TmdbListResponse
@@ -49,11 +67,21 @@ interface TmdbApi {
         @Query("with_crew") crew: String? = null,
         @Query("sort_by") sortBy: String = "popularity.desc",
         @Query("vote_count.gte") minVoteCount: Int? = null,
+        @Query("vote_average.gte") minVoteAverage: Double? = null,
+        @Query("vote_average.lte") maxVoteAverage: Double? = null,
+        // TMDB offers certification filtering for movies only; discover/tv has no equivalent.
+        @Query("certification_country") certificationCountry: String? = null,
+        @Query("certification.lte") certificationLte: String? = null,
         @Query("with_keywords") keywords: String? = null,
         @Query("with_original_language") originalLanguage: String? = null,
         @Query("primary_release_year") year: Int? = null,
+        // `release_date` matches ANY release of a film — every country, a re-run, a digital
+        // start — while the card shows the first one. `primary_release_date` is that first
+        // one, the same date `primary_release_year` above filters by. Both stay available.
         @Query("release_date.gte") releaseDateGte: String? = null,
         @Query("release_date.lte") releaseDateLte: String? = null,
+        @Query("primary_release_date.gte") primaryReleaseDateGte: String? = null,
+        @Query("primary_release_date.lte") primaryReleaseDateLte: String? = null,
         @Query("with_watch_providers") watchProviders: Int? = null,
         @Query("watch_region") watchRegion: String? = null,
         @Query("language") language: String? = null,
@@ -64,6 +92,7 @@ interface TmdbApi {
     suspend fun getMovieDetails(
         @Path("movie_id") movieId: Int,
         @Query("api_key") apiKey: String,
+        @Query("append_to_response") appendToResponse: String = "release_dates",
         @Query("language") language: String? = null
     ): TmdbMovieDetails
 
@@ -71,8 +100,22 @@ interface TmdbApi {
     suspend fun getTvDetails(
         @Path("tv_id") tvId: Int,
         @Query("api_key") apiKey: String,
+        @Query("append_to_response") appendToResponse: String = "content_ratings",
         @Query("language") language: String? = null
     ): TmdbTvDetails
+
+    /** Certifications only — the kids filter checks many titles and needs nothing else. */
+    @GET("movie/{movie_id}/release_dates")
+    suspend fun getMovieReleaseDates(
+        @Path("movie_id") movieId: Int,
+        @Query("api_key") apiKey: String
+    ): TmdbReleaseDatesResponse
+
+    @GET("tv/{tv_id}/content_ratings")
+    suspend fun getTvContentRatings(
+        @Path("tv_id") tvId: Int,
+        @Query("api_key") apiKey: String
+    ): TmdbContentRatingsResponse
 
     @GET("tv/{tv_id}/season/{season_number}")
     suspend fun getTvSeason(
@@ -215,9 +258,63 @@ interface TmdbApi {
         @Query("api_key") apiKey: String,
         @Query("language") language: String? = null
     ): TmdbCollectionResponse
+
+    /**
+     * Free-form discover query used by imported collections, whose filters are
+     * raw TMDB query keys (with_companies, with_networks, *_date.gte, ...).
+     */
+    @GET("discover/{media_type}")
+    suspend fun discoverWithParams(
+        @Path("media_type") mediaType: String,
+        @Query("api_key") apiKey: String,
+        @QueryMap params: Map<String, String>,
+        @Query("sort_by") sortBy: String = "popularity.desc",
+        @Query("language") language: String? = null,
+        @Query("page") page: Int = 1
+    ): TmdbListResponse
+
+    /** Public TMDB v3 list; items keep the list's own order and carry a media_type. */
+    @GET("list/{list_id}")
+    suspend fun getPublicList(
+        @Path("list_id") listId: Int,
+        @Query("api_key") apiKey: String,
+        @Query("language") language: String? = null,
+        @Query("page") page: Int = 1
+    ): TmdbPublicListResponse
 }
 
 // Response data classes
+
+data class TmdbPublicListResponse(
+    val page: Int = 1,
+    val items: List<TmdbPublicListItem> = emptyList(),
+    @SerializedName("total_pages") val totalPages: Int = 1
+)
+
+data class TmdbPublicListItem(
+    val id: Int = 0,
+    @SerializedName("media_type") val mediaType: String? = null,
+    val title: String? = null,
+    val name: String? = null,
+    @SerializedName("original_title") val originalTitle: String? = null,
+    @SerializedName("original_name") val originalName: String? = null,
+    val overview: String? = null,
+    @SerializedName("release_date") val releaseDate: String? = null,
+    @SerializedName("first_air_date") val firstAirDate: String? = null,
+    @SerializedName("poster_path") val posterPath: String? = null,
+    @SerializedName("backdrop_path") val backdropPath: String? = null,
+    @SerializedName("vote_average") val voteAverage: Float = 0f,
+    @SerializedName("genre_ids") val genreIds: List<Int> = emptyList(),
+    @SerializedName("original_language") val originalLanguage: String? = null
+) {
+    fun asMediaItem() = TmdbMediaItem(
+        id = id, mediaType = mediaType, title = title, name = name,
+        originalTitle = originalTitle, originalName = originalName, overview = overview,
+        releaseDate = releaseDate, firstAirDate = firstAirDate,
+        posterPath = posterPath, backdropPath = backdropPath, voteAverage = voteAverage,
+        genreIds = genreIds, originalLanguage = originalLanguage
+    )
+}
 
 data class TmdbListResponse(
     val page: Int = 1,
@@ -245,6 +342,7 @@ data class TmdbMediaItem(
     val adult: Boolean = false,
     val popularity: Float = 0f,
     val character: String? = null,
+    val job: String? = null,
     @SerializedName("known_for") val knownFor: List<TmdbMediaItem> = emptyList()
 )
 
@@ -263,7 +361,10 @@ data class TmdbMovieDetails(
     val genres: List<TmdbGenre> = emptyList(),
     val status: String? = null,
     val adult: Boolean = false,
-    @SerializedName("belongs_to_collection") val belongsToCollection: TmdbCollectionRef? = null
+    @SerializedName("belongs_to_collection") val belongsToCollection: TmdbCollectionRef? = null,
+    // Appended via append_to_response. Nullable so the response stays valid
+    // when TMDB omits the block.
+    @SerializedName("release_dates") val releaseDates: TmdbReleaseDatesResponse? = null
 )
 
 /** Reference to a TMDB collection (franchise) returned inside movie/TV details. */
@@ -289,7 +390,12 @@ data class TmdbTvDetails(
     @SerializedName("episode_run_time") val episodeRunTime: List<Int> = emptyList(),
     val status: String? = null,
     val genres: List<TmdbGenre> = emptyList(),
-    val seasons: List<TmdbTvSeason> = emptyList()
+    val seasons: List<TmdbTvSeason> = emptyList(),
+    // Appended via append_to_response. Nullable so the response stays valid
+    // when TMDB omits the block.
+    @SerializedName("content_ratings") val contentRatings: TmdbContentRatingsResponse? = null,
+    @SerializedName("last_episode_to_air") val lastEpisodeToAir: TmdbEpisode? = null,
+    @SerializedName("next_episode_to_air") val nextEpisodeToAir: TmdbEpisode? = null
 )
 
 data class TmdbSeasonDetails(
@@ -313,6 +419,34 @@ data class TmdbEpisode(
     @SerializedName("air_date") val airDate: String? = null
 )
 
+/**
+ * Age certifications for a movie, appended to /movie/{id} as `release_dates`.
+ * A country can list several certifications (theatrical, TV, streaming), so the
+ * per-country entry carries a list.
+ */
+data class TmdbReleaseDatesResponse(val results: List<TmdbReleaseDatesResult> = emptyList())
+data class TmdbReleaseDatesResult(
+    @SerializedName("iso_3166_1") val iso31661: String = "",
+    @SerializedName("release_dates") val releaseDates: List<TmdbReleaseDate> = emptyList()
+)
+/** `type` 3 is the theatrical release. Unknown types sort last, see ContentRating. */
+data class TmdbReleaseDate(
+    val certification: String? = null,
+    val type: Int = Int.MAX_VALUE,
+    // TMDB encodes a calendar date as a timestamp. It is not a confirmed release time.
+    @SerializedName("release_date") val releaseDate: String? = null
+)
+
+/**
+ * Age certifications for a TV show, appended to /tv/{id} as `content_ratings`.
+ * Unlike movies there is exactly one value per country.
+ */
+data class TmdbContentRatingsResponse(val results: List<TmdbContentRatingResult> = emptyList())
+data class TmdbContentRatingResult(
+    @SerializedName("iso_3166_1") val iso31661: String = "",
+    val rating: String? = null
+)
+
 data class TmdbGenre(val id: Int = 0, val name: String = "")
 data class TmdbCreditsResponse(val id: Int = 0, val cast: List<TmdbCastMember> = emptyList(), val crew: List<TmdbCrewMember> = emptyList())
 data class TmdbCastMember(val id: Int = 0, val name: String = "", val character: String? = null, @SerializedName("profile_path") val profilePath: String? = null, val order: Int = 0)
@@ -320,18 +454,39 @@ data class TmdbCrewMember(val id: Int = 0, val name: String = "", val job: Strin
 data class TmdbImagesResponse(val id: Int = 0, val logos: List<TmdbImage> = emptyList(), val backdrops: List<TmdbImage> = emptyList())
 data class TmdbImage(@SerializedName("file_path") val filePath: String? = null, @SerializedName("iso_639_1") val iso6391: String? = null, val width: Int = 0, val height: Int = 0, @SerializedName("vote_average") val voteAverage: Float = 0f, @SerializedName("vote_count") val voteCount: Int = 0)
 data class TmdbVideosResponse(val id: Int = 0, val results: List<TmdbVideo> = emptyList())
-data class TmdbVideo(val id: String = "", val key: String = "", val name: String = "", val site: String = "", val type: String = "", val official: Boolean = false)
+data class TmdbVideo(val id: String = "", val key: String = "", val name: String = "", val site: String = "", val type: String = "", val official: Boolean = false, val size: Int = 0)
+
+internal fun preferredTrailer(videos: List<TmdbVideo>): TmdbVideo? = videos.asSequence()
+    .filter { it.site == "YouTube" && it.key.isNotBlank() }
+    .sortedWith(compareByDescending<TmdbVideo> {
+        when {
+            it.type == "Trailer" && it.official -> 3
+            it.type == "Trailer" -> 2
+            it.type == "Teaser" -> 1
+            else -> 0
+        }
+    }.thenByDescending { it.size.coerceAtMost(1080) })
+    .firstOrNull()
 data class TmdbExternalIds(@SerializedName("imdb_id") val imdbId: String? = null, @SerializedName("tvdb_id") val tvdbId: Int? = null)
 data class TmdbWatchProvidersResponse(val id: Int = 0, val results: Map<String, TmdbWatchProviderRegion> = emptyMap())
 data class TmdbWatchProviderRegion(val link: String? = null, val flatrate: List<TmdbWatchProvider> = emptyList(), val free: List<TmdbWatchProvider> = emptyList(), val ads: List<TmdbWatchProvider> = emptyList(), val rent: List<TmdbWatchProvider> = emptyList(), val buy: List<TmdbWatchProvider> = emptyList())
 data class TmdbWatchProvider(@SerializedName("provider_id") val providerId: Int = 0, @SerializedName("provider_name") val providerName: String = "", @SerializedName("logo_path") val logoPath: String? = null, @SerializedName("display_priority") val displayPriority: Int = 0)
 data class TmdbPersonDetails(val id: Int = 0, val name: String = "", val biography: String? = null, @SerializedName("place_of_birth") val placeOfBirth: String? = null, val birthday: String? = null, @SerializedName("profile_path") val profilePath: String? = null, @SerializedName("combined_credits") val combinedCredits: TmdbCombinedCredits? = null)
-data class TmdbCombinedCredits(val cast: List<TmdbMediaItem> = emptyList())
+data class TmdbCombinedCredits(val cast: List<TmdbMediaItem> = emptyList(), val crew: List<TmdbMediaItem> = emptyList())
 data class TmdbReviewsResponse(val id: Int = 0, val page: Int = 1, val results: List<TmdbReview> = emptyList(), @SerializedName("total_pages") val totalPages: Int = 1, @SerializedName("total_results") val totalResults: Int = 0)
 data class TmdbReview(val id: String = "", val author: String = "", @SerializedName("author_details") val authorDetails: TmdbAuthorDetails? = null, val content: String = "", @SerializedName("created_at") val createdAt: String = "", @SerializedName("updated_at") val updatedAt: String = "", val url: String = "")
 data class TmdbAuthorDetails(val name: String = "", val username: String = "", @SerializedName("avatar_path") val avatarPath: String? = null, val rating: Float? = null)
-data class TmdbFindResponse(@SerializedName("movie_results") val movieResults: List<TmdbFindItem> = emptyList(), @SerializedName("tv_results") val tvResults: List<TmdbFindItem> = emptyList())
+data class TmdbFindResponse(
+    @SerializedName("movie_results") val movieResults: List<TmdbFindItem> = emptyList(),
+    @SerializedName("tv_results") val tvResults: List<TmdbFindItem> = emptyList(),
+    @SerializedName("tv_episode_results") val tvEpisodeResults: List<TmdbFindEpisode> = emptyList()
+)
 data class TmdbFindItem(val id: Int = 0, val popularity: Float = 0f, val title: String = "", val name: String = "")
+data class TmdbFindEpisode(
+    @SerializedName("show_id") val showId: Int = 0,
+    @SerializedName("season_number") val seasonNumber: Int = -1,
+    @SerializedName("episode_number") val episodeNumber: Int = -1
+)
 
 /** Response for /collection/{id} — the `parts` array contains the films in a franchise. */
 data class TmdbCollectionResponse(

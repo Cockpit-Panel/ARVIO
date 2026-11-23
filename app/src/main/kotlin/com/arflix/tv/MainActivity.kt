@@ -1,8 +1,10 @@
 package com.arflix.tv
 
 import android.content.Context
+import com.arflix.tv.util.AppLogger
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
+import android.os.Build
 import android.os.Bundle
 import android.view.ViewTreeObserver
 import android.view.WindowManager
@@ -29,6 +31,33 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.runtime.mutableFloatStateOf
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.haze
+import com.arflix.tv.ui.components.LocalBottomBarInset
+import com.arflix.tv.ui.components.LocalBottomBarHeight
+import com.arflix.tv.ui.components.mobileContentInsets
+import com.arflix.tv.ui.components.AppBottomBarMode
+import com.arflix.tv.ui.components.currentAppBottomBarMode
+import com.arflix.tv.ui.components.currentBottomBarSpec
+import com.arflix.tv.ui.components.appBottomBarClearance
+import com.arflix.tv.ui.components.navigationRailCutoutInsetPx
+import com.arflix.tv.ui.components.LANDSCAPE_RAIL_WIDTH_DP
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
@@ -41,6 +70,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,6 +90,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.arflix.tv.ui.components.AppBottomBar
+import com.arflix.tv.ui.components.shouldShowBottomBar
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -72,7 +103,7 @@ import com.arflix.tv.util.ACCENT_COLOR_KEY
 import com.arflix.tv.util.LocalDeviceType
 import com.arflix.tv.util.LocalHasTouchScreen
 import com.arflix.tv.util.LocalAppLanguage
-import com.arflix.tv.util.LAST_APP_LANGUAGE_KEY
+import com.arflix.tv.util.resolveAppLanguage
 import com.arflix.tv.util.detectDeviceType
 import com.arflix.tv.util.deviceHasTouchScreen
 import com.arflix.tv.util.findActivity
@@ -81,10 +112,10 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.delay
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.metrics.performance.JankStats
 import androidx.metrics.performance.PerformanceMetricsState
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -109,6 +140,15 @@ import com.arflix.tv.data.repository.WatchlistRepository
 import com.arflix.tv.data.repository.toLauncherContinueWatchingRequest
 import com.arflix.tv.navigation.AppNavigation
 import com.arflix.tv.navigation.Screen
+import com.arflix.tv.navigation.navigateToProfileSelection
+import com.arflix.tv.navigation.ProfileSessionGate
+import com.arflix.tv.navigation.PartnerOpenLinkParser
+import com.arflix.tv.navigation.PartnerOpenLinkResolver
+import com.arflix.tv.navigation.PartnerOpenLinkInbox
+import com.arflix.tv.navigation.PartnerOpenRequest
+import com.arflix.tv.navigation.PartnerOpenTarget
+import com.arflix.tv.navigation.PendingPartnerOpenLink
+import com.arflix.tv.navigation.partnerOpenNavigationOptions
 import com.arflix.tv.ui.screens.login.LoginScreen
 import com.arflix.tv.ui.startup.StartupViewModel
 import com.arflix.tv.ui.theme.ArflixTvTheme
@@ -119,6 +159,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import dagger.Lazy
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ensureActive
 import javax.inject.Inject
 import kotlin.math.PI
 import kotlin.math.cos
@@ -137,7 +178,23 @@ private sealed interface ActiveProfileLoadState {
 class MainActivity : ComponentActivity() {
 
     @Inject
+    lateinit var appForegroundSignals: com.arflix.tv.data.repository.AppForegroundSignals
+
+    @Inject
+    lateinit var idleReturnCoordinator: com.arflix.tv.data.repository.IdleReturnCoordinator
+
+    /** Key whose press ended an idle period on the player; its release is swallowed too. */
+    private val swallowedIdleKeys = mutableSetOf<Int>()
+    private var swallowedIdleTouch = false
+
+    /** True until the first onResume after onCreate has been handled. */
+    private var hasHandledFirstResume = false
+
+    @Inject
     lateinit var authRepository: Lazy<AuthRepository>
+
+    @Inject
+    lateinit var partnerDeliveryRepository: Lazy<com.arflix.tv.data.repository.PartnerDeliveryRepository>
 
     @Inject
     lateinit var profileRepository: Lazy<ProfileRepository>
@@ -160,6 +217,9 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var mediaRepository: Lazy<MediaRepository>
 
+    @Inject
+    internal lateinit var partnerOpenLinkResolver: Lazy<PartnerOpenLinkResolver>
+
     // Prefetch IPTV early so the TV screen opens without a loading stall.
     // IptvRepository is @Singleton; touching it at activity start warms the
     // in-memory snapshot (and will trigger a disk-cache read + silent
@@ -171,6 +231,9 @@ class MainActivity : ComponentActivity() {
     private var jankStats: JankStats? = null
     private var pendingLauncherRequest by mutableStateOf<LauncherContinueWatchingRequest?>(null)
     private var pendingInstallPackUrl by mutableStateOf<String?>(null)
+    private var pendingInstallAddonUrl by mutableStateOf<String?>(null)
+    private val partnerOpenLinks = PartnerOpenLinkInbox()
+    private val pendingPartnerOpenLink get() = partnerOpenLinks.pending
 
     // StartupViewModel for parallel loading during splash
     private val startupViewModel: StartupViewModel by viewModels()
@@ -204,24 +267,40 @@ class MainActivity : ComponentActivity() {
         }
 
         super.onCreate(savedInstanceState)
+        if (BuildConfig.PARTNER_MANAGEMENT_ENABLED) {
+            lifecycleScope.launch {
+                repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+                    partnerDeliveryRepository.get().runForegroundSession()
+                }
+            }
+        }
         window.setBackgroundDrawable(ColorDrawable(android.graphics.Color.BLACK))
         window.decorView.setBackgroundColor(android.graphics.Color.BLACK)
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
         pendingLauncherRequest = parseLauncherRequest(intent)
         pendingInstallPackUrl = parseInstallPackUrl(intent)
+        pendingInstallAddonUrl = parseInstallAddonUrl(intent)
+        // A consumed link must not replay after rotation/process recreation from the old intent.
+        if (savedInstanceState?.getBoolean(PARTNER_LINK_STATE_SAVED) == true) {
+            partnerOpenLinks.restore(savedInstanceState.getString(PARTNER_LINK_URI), savedInstanceState.getString(PARTNER_LINK_TICKET))
+        } else {
+            partnerOpenLinks.replace(parsePartnerOpenLink(intent))
+        }
 
         val crashPrefs = getSharedPreferences("arvio_crash_store", Context.MODE_PRIVATE)
         if (crashPrefs.getBoolean("has_pending_crash_report", false)) {
             val crashId = crashPrefs.getString("last_crash_id", "N/A")
             val crashMsg = crashPrefs.getString("last_crash_msg", "Unexpected error")
             val crashTime = crashPrefs.getLong("last_crash_time", System.currentTimeMillis())
+            val crashProvider = crashPrefs.getString("last_crash_provider", "firebase") ?: "firebase"
             crashPrefs.edit().putBoolean("has_pending_crash_report", false).commit()
 
             val crashIntent = android.content.Intent(this, com.arflix.tv.ui.screens.crash.CrashReportActivity::class.java).apply {
                 putExtra(com.arflix.tv.ui.screens.crash.CrashReportActivity.EXTRA_CRASH_ID, crashId)
                 putExtra(com.arflix.tv.ui.screens.crash.CrashReportActivity.EXTRA_CRASH_MSG, crashMsg)
                 putExtra(com.arflix.tv.ui.screens.crash.CrashReportActivity.EXTRA_CRASH_TIME, crashTime)
+                putExtra(com.arflix.tv.ui.screens.crash.CrashReportActivity.EXTRA_CRASH_PROVIDER, crashProvider)
             }
             startActivity(crashIntent)
         }
@@ -229,7 +308,7 @@ class MainActivity : ComponentActivity() {
         // Initialize Discord RPC Manager
         com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.init(this)
         intent?.data?.let { uri ->
-            android.util.Log.d("MainActivity", "Received intent data URI in onCreate: $uri")
+            android.util.Log.d("MainActivity", "Received intent data URI in onCreate")
             if (uri.scheme == "arvio" && uri.host == "discord" && uri.path == "/auth") {
                 android.util.Log.i("MainActivity", "Matching Discord auth redirect. Forwarding to DiscordRpcManager.")
                 com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.onLoginDeepLink(uri)
@@ -254,14 +333,19 @@ class MainActivity : ComponentActivity() {
                 statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
                 navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
             )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isNavigationBarContrastEnforced = false
+                window.isStatusBarContrastEnforced = false
+            }
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
             // Clear any FLAG_FULLSCREEN the Leanback theme may have set
             @Suppress("DEPRECATION")
             window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         }
 
-        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { iptvRepository.get().warmupFromCacheOnly() }
-        }
+        // Cache warmup runs once in runAfterFirstDraw below (warmup + 60s
+        // delayed fresh prefetch). Starting it here as well would serialize a
+        // second disk read behind the same loadMutex for no benefit.
 
         setContent {
             // Observe device mode override changes live from DataStore
@@ -294,17 +378,16 @@ class MainActivity : ComponentActivity() {
             val activeProfileId by remember {
                 profileRepository.get().activeProfileId
             }.collectAsStateWithLifecycle(initialValue = null)
+            val initialAppLanguage = remember {
+                getSharedPreferences("app_locale", Context.MODE_PRIVATE)
+                    .getString("locale_tag", null)?.takeIf { it.isNotBlank() }
+                    ?: com.arflix.tv.util.defaultAppLanguage()
+            }
             val appLanguage by remember(activeProfileId) {
                 this@MainActivity.settingsDataStore.data.map { prefs ->
-                    val fallbackLanguage = prefs[LAST_APP_LANGUAGE_KEY] ?: "en-US"
-                    val profileId = activeProfileId
-                    if (profileId.isNullOrBlank()) {
-                        fallbackLanguage
-                    } else {
-                        prefs[stringPreferencesKey("profile_${profileId}_content_language")] ?: fallbackLanguage
-                    }
+                    resolveAppLanguage(prefs, activeProfileId)
                 }
-            }.collectAsStateWithLifecycle(initialValue = "en-US")
+            }.collectAsStateWithLifecycle(initialValue = initialAppLanguage)
             LaunchedEffect(appLanguage) {
                 mediaRepository.get().contentLanguage = appLanguage
             }
@@ -364,6 +447,11 @@ class MainActivity : ComponentActivity() {
                         onConsumeLauncherRequest = { pendingLauncherRequest = null },
                         pendingInstallPackUrl = pendingInstallPackUrl,
                         onConsumeInstallPackUrl = { pendingInstallPackUrl = null },
+                        pendingInstallAddonUrl = pendingInstallAddonUrl,
+                        onConsumeInstallAddonUrl = { pendingInstallAddonUrl = null },
+                        pendingPartnerOpenLink = pendingPartnerOpenLink,
+                        resolvePartnerOpenLink = { partnerOpenLinkResolver.get().resolve(it) },
+                        onConsumePartnerOpenLink = partnerOpenLinks::consume,
                         preloadedCategories = startupState.categories,
                         preloadedHeroItem = startupState.heroItem,
                         preloadedHeroLogoUrl = startupState.heroLogoUrl,
@@ -391,10 +479,73 @@ class MainActivity : ComponentActivity() {
             ArflixApplication.instance.scheduleTraktSyncIfNeeded()
             lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                 val repo = iptvRepository.get()
-                runCatching { repo.warmupFromCacheOnly() }
+                try {
+                    repo.warmupFromCacheOnly()
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    AppLogger.recordException(e)
+                }
                 kotlinx.coroutines.delay(60_000L)
-                runCatching { repo.prefetchFreshStartupData() }
+                try {
+                    repo.prefetchFreshStartupData()
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    AppLogger.recordException(e)
+                }
             }
+        }
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.keyCode in swallowedIdleKeys) {
+            if (event.action == android.view.KeyEvent.ACTION_UP) swallowedIdleKeys.remove(event.keyCode)
+            return true
+        }
+        if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+            // The first press after a long idle must not act on a player left paused
+            // overnight (resuming it would write its old position over newer progress
+            // from another device); the player is leaving for the previous screen instead.
+            idleReturnCoordinator.onUserInteraction()
+            if (idleReturnCoordinator.isPlayerOpen && idleReturnCoordinator.shouldDiscardPlayer) {
+                swallowedIdleKeys.add(event.keyCode)
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean {
+        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
+            idleReturnCoordinator.onUserInteraction()
+            swallowedIdleTouch = idleReturnCoordinator.isPlayerOpen && idleReturnCoordinator.shouldDiscardPlayer
+        }
+        if (swallowedIdleTouch) {
+            if (event.actionMasked == android.view.MotionEvent.ACTION_UP ||
+                event.actionMasked == android.view.MotionEvent.ACTION_CANCEL) swallowedIdleTouch = false
+            return true
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        idleReturnCoordinator.onUserInteraction()
+    }
+
+    override fun onResume() {
+        // Before super.onResume(): screens observe ON_RESUME and must already see the
+        // post-idle sync as running, or they would rebuild from stale state first.
+        idleReturnCoordinator.onAppForeground()
+        super.onResume()
+        // Signalled from here, not from a screen: the app can return to the
+        // foreground on any destination — a TV woken in the morning resumes onto
+        // whatever was left on display — and a Home-scoped observer would never
+        // run in that case. The first resume is skipped because startup already
+        // fetches.
+        if (hasHandledFirstResume) {
+            appForegroundSignals.notifyReturnedToForeground()
+        } else {
+            hasHandledFirstResume = true
         }
     }
 
@@ -403,8 +554,20 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         pendingLauncherRequest = parseLauncherRequest(intent)
         pendingInstallPackUrl = parseInstallPackUrl(intent)
+        pendingInstallAddonUrl = parseInstallAddonUrl(intent)
+        val partnerLink = parsePartnerOpenLink(intent)
+        val isDiscordAuthCallback = intent.data?.let {
+            it.scheme == "arvio" && it.host == "discord" && it.path == "/auth"
+        } == true
+        if (partnerLink != null ||
+            (intent.action == android.content.Intent.ACTION_VIEW && !isDiscordAuthCallback) ||
+            intent.action == android.content.Intent.ACTION_MAIN) {
+            // Supersede an in-flight lookup immediately. Discord auth callbacks deliberately
+            // leave the title pending so authentication cannot discard the user's destination.
+            partnerOpenLinks.replace(partnerLink)
+        }
         intent.data?.let { uri ->
-            android.util.Log.d("MainActivity", "Received intent data URI in onNewIntent: $uri")
+            android.util.Log.d("MainActivity", "Received intent data URI in onNewIntent")
             if (uri.scheme == "arvio" && uri.host == "discord" && uri.path == "/auth") {
                 android.util.Log.i("MainActivity", "Matching Discord auth redirect. Forwarding to DiscordRpcManager.")
                 com.arflix.tv.ui.screens.details.discord.DiscordRpcManager.onLoginDeepLink(uri)
@@ -431,6 +594,22 @@ class MainActivity : ComponentActivity() {
         jankStats = null
         super.onDestroy()
     }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(PARTNER_LINK_STATE_SAVED, true)
+        outState.putString(PARTNER_LINK_URI, pendingPartnerOpenLink?.request?.canonicalUri())
+        outState.putString(PARTNER_LINK_TICKET, pendingPartnerOpenLink?.ticket)
+        super.onSaveInstanceState(outState)
+    }
+}
+
+private const val PARTNER_LINK_STATE_SAVED = "partner_link_state_saved"
+private const val PARTNER_LINK_URI = "partner_link_uri"
+private const val PARTNER_LINK_TICKET = "partner_link_ticket"
+
+private fun parsePartnerOpenLink(intent: android.content.Intent?): PartnerOpenRequest? {
+    if (intent?.action != android.content.Intent.ACTION_VIEW) return null
+    return PartnerOpenLinkParser.parse(intent.data?.toString())
 }
 
 private fun MainActivity.parseLauncherRequest(intent: android.content.Intent?): LauncherContinueWatchingRequest? {
@@ -448,6 +627,12 @@ private fun MainActivity.parseInstallPackUrl(intent: android.content.Intent?): S
     } else {
         null
     }
+}
+
+/** The install link behind an addon website's "Install" button (stremio://host/.../manifest.json). */
+private fun MainActivity.parseInstallAddonUrl(intent: android.content.Intent?): String? {
+    val data = intent?.data ?: return null
+    return if (data.scheme.equals("stremio", ignoreCase = true)) data.toString() else null
 }
 
 private fun ComponentActivity.runAfterFirstDraw(block: () -> Unit) {
@@ -572,6 +757,11 @@ fun ArflixApp(
     onConsumeLauncherRequest: () -> Unit = {},
     pendingInstallPackUrl: String? = null,
     onConsumeInstallPackUrl: () -> Unit = {},
+    pendingInstallAddonUrl: String? = null,
+    onConsumeInstallAddonUrl: () -> Unit = {},
+    pendingPartnerOpenLink: PendingPartnerOpenLink? = null,
+    resolvePartnerOpenLink: suspend (PartnerOpenRequest) -> PartnerOpenTarget? = { null },
+    onConsumePartnerOpenLink: (PendingPartnerOpenLink) -> Boolean = { false },
     preloadedCategories: List<com.arflix.tv.data.model.Category> = emptyList(),
     preloadedHeroItem: com.arflix.tv.data.model.MediaItem? = null,
     preloadedHeroLogoUrl: String? = null,
@@ -585,17 +775,16 @@ fun ArflixApp(
             ActiveProfileLoadState.Loaded(profile) as ActiveProfileLoadState
         }
     }.collectAsStateWithLifecycle(initialValue = ActiveProfileLoadState.Loading)
-    var startupIntroComplete by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay(1350)
-        startupIntroComplete = true
-    }
     val activeProfile = (activeProfileState as? ActiveProfileLoadState.Loaded)?.profile
+    com.arflix.tv.ui.components.ObserveNavigationVisibility(activeProfile?.id)
     val startupReady = skipProfileSelection != null &&
         activeProfileState is ActiveProfileLoadState.Loaded &&
         authState !is AuthState.Loading
 
-    if (!startupReady || !startupIntroComplete) {
+    // Render content as soon as auth/profile/selection state resolves. The
+    // previous fixed 1350ms minimum splash delay added over a second to every
+    // fast cold start; the loading screen still shows while data is loading.
+    if (!startupReady) {
         ArvioLoadingScreen()
         return
     }
@@ -615,35 +804,61 @@ fun ArflixApp(
         }
     }
 
-    val startDestination = if (authState !is AuthState.Authenticated) {
-        Screen.Login.route
-    } else if (skipProfileSelection == true && activeProfile != null) {
-        Screen.Home.route
-    } else {
-        Screen.ProfileSelection.route
+    var selectedSessionProfileId by rememberSaveable {
+        mutableStateOf(ProfileSessionGate.initialProfileId(skipProfileSelection == true, activeProfile))
     }
+    val startDestination = rememberSaveable {
+        // Cockpit: require panel sign-in before profiles/home.
+        when {
+            authState !is AuthState.Authenticated -> Screen.Login.route
+            selectedSessionProfileId != null -> Screen.Home.route
+            else -> Screen.ProfileSelection.route
+        }
+    }
+    val canOpenPendingLink = ProfileSessionGate.canOpenLink(activeProfile?.id, selectedSessionProfileId)
 
     val deviceType = LocalDeviceType.current
     val isMobile = deviceType.isTouchDevice()
     val currentBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = currentBackStackEntry?.destination?.route
+    val partnerLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    val partnerLifecycleState by partnerLifecycle.currentStateFlow.collectAsState()
+    val canResolvePartnerLink = canOpenPendingLink && authState !is AuthState.Loading &&
+        currentRoute != null && currentRoute != Screen.Login.route && currentRoute != Screen.ProfileSelection.route &&
+        partnerLifecycleState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+    var partnerRetry by remember(pendingPartnerOpenLink?.ticket) { mutableStateOf(0) }
+    var partnerLinkFailed by remember(pendingPartnerOpenLink?.ticket) { mutableStateOf(false) }
     var iptvFullscreen by remember { mutableStateOf(false) }
+    // A fullscreen overlay inside a screen (the trailer modal) is not a route,
+    // so it cannot be read off the back stack. Without this the bottom bar keeps
+    // its height reserved and the video is drawn smaller than the screen.
+    var overlayFullscreen by remember { mutableStateOf(false) }
+    var isSettingsSubPage by remember { mutableStateOf(false) }
+    var isTvSubScreen by remember { mutableStateOf(false) }
     LaunchedEffect(currentRoute) {
+        com.arflix.tv.util.UsageAnalytics.screen(currentRoute)
         if (currentRoute?.startsWith("tv") != true) {
             iptvFullscreen = false
+            isTvSubScreen = false
+        }
+        if (currentRoute?.startsWith("settings") != true) {
+            isSettingsSubPage = false
         }
     }
-    // Hide bottom bar on player, profile selection, and login screens.
-    // TV route shows the bottom bar on mobile (touch devices) for easy navigation;
-    // the fullscreen IPTV player uses BackHandler to return to the guide.
-    val showBottomBar = isMobile && activeProfile != null &&
-        currentRoute != null &&
-        !iptvFullscreen &&
-        !currentRoute.contains("player") &&
-        !currentRoute.contains("profile") &&
-        !currentRoute.contains("login")
+    // Hide bottom bar on player, profile selection, login, and all subscreens.
+    // Bottom bar is only shown on main screens: Home, Search, Watchlist, TV guide, and main Settings.
+    val isPlayerScreen = currentRoute?.startsWith("player") == true
+    val isFullscreenRoute = isPlayerScreen || iptvFullscreen || overlayFullscreen
+    val showBottomBar = shouldShowBottomBar(
+        isMobile = isMobile,
+        currentRoute = currentRoute,
+        isFullscreenRoute = isFullscreenRoute,
+        isSettingsSubPage = isSettingsSubPage,
+        isTvSubScreen = isTvSubScreen
+    )
+    val applySystemBarsPadding = isMobile && !isFullscreenRoute
 
-    val isPlayerRoute = iptvFullscreen || currentRoute?.contains("player") == true
+    val isPlayerRoute = iptvFullscreen || overlayFullscreen || currentRoute?.contains("player") == true
 
     val hostActivity = remember(context) { context.findActivity() }
     LaunchedEffect(isPlayerRoute, isMobile) {
@@ -652,6 +867,11 @@ fun ArflixApp(
             if (win != null) {
                 @Suppress("DEPRECATION")
                 win.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    win.isNavigationBarContrastEnforced = false
+                    win.isStatusBarContrastEnforced = false
+                }
+                win.navigationBarColor = android.graphics.Color.TRANSPARENT
                 WindowInsetsControllerCompat(win, win.decorView).apply {
                     systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
                     show(WindowInsetsCompat.Type.systemBars())
@@ -662,7 +882,48 @@ fun ArflixApp(
         }
     }
 
-    Column(
+    val switchProfile: () -> Unit = {
+        selectedSessionProfileId = null
+        appCoroutineScope.launch {
+            traktRepository.clearAllProfileCaches()
+            watchHistoryRepository.clearProfileCaches()
+            watchlistRepository.clearWatchlistCache()
+            iptvRepository.invalidateCache()
+            profileManager.setCurrentProfileId("default")
+            profileManager.setCurrentProfileName("default")
+            profileRepository.clearActiveProfile()
+        }
+    }
+
+    val density = LocalDensity.current
+    val layoutDirection = LocalLayoutDirection.current
+    val barMode = currentAppBottomBarMode()
+    val isLandscapeRail = barMode == AppBottomBarMode.LANDSCAPE_RAIL
+    val railCutoutInset = with(density) {
+        navigationRailCutoutInsetPx(
+            systemLeftInsetPx = WindowInsets.systemBars.getLeft(this, layoutDirection),
+            cutoutLeftInsetPx = WindowInsets.displayCutout.getLeft(this, layoutDirection),
+            systemRightInsetPx = WindowInsets.systemBars.getRight(this, layoutDirection),
+            cutoutRightInsetPx = WindowInsets.displayCutout.getRight(this, layoutDirection),
+            layoutDirection = layoutDirection,
+        ).toDp()
+    }
+    val barSpec = currentBottomBarSpec()
+    val navigationInset = with(density) { WindowInsets.navigationBars.getBottom(this).toDp() }
+    var measuredBarHeight by remember(barSpec, density.fontScale) { mutableStateOf(0.dp) }
+
+    val barClearance = appBottomBarClearance(
+        mode = barMode,
+        showBottomBar = showBottomBar,
+        screenHeightDp = LocalConfiguration.current.screenHeightDp,
+        measuredHeightDp = measuredBarHeight.value,
+        navigationInsetDp = navigationInset.value,
+    )
+    val barInset = barClearance.scrollInsetDp.dp
+    val fullBarHeight = barClearance.fullHeightDp.dp
+
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             // Background fills edge-to-edge (including behind transparent bars).
@@ -679,68 +940,102 @@ fun ArflixApp(
                     )
                 }
             )
-            // On mobile, push content below the status bar (except player).
-            // Applied AFTER background so the gradient fills behind the bars.
-            // statusBarsPadding() reads live WindowInsets, so it automatically
-            // becomes 0 when the player hides the bars.
-            .then(if (isMobile && !isPlayerRoute) Modifier.statusBarsPadding() else Modifier)
+            // Mobile navigation overlays scrollable content; other screens reserve its height.
+            // Player screens remain completely stable edge-to-edge without jumping when
+            // transient system bars appear or disappear.
+            .then(when {
+                isMobile && !isFullscreenRoute -> Modifier.windowInsetsPadding(
+                    mobileContentInsets(WindowInsets.systemBars, showBottomBar,
+                        edgeToEdgeTop = currentRoute?.substringBefore('?') == Screen.Details.route.substringBefore('?') ||
+                            (currentRoute?.substringBefore('?') == Screen.Home.route &&
+                                LocalConfiguration.current.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE))
+                )
+                applySystemBarsPadding -> Modifier.systemBarsPadding()
+                else -> Modifier
+            })
     ) {
-        Box(modifier = Modifier.weight(1f)) {
-            AppNavigation(
-                navController = navController,
-                startDestination = startDestination,
-                preloadedCategories = preloadedCategories,
-                preloadedHeroItem = preloadedHeroItem,
-                preloadedHeroLogoUrl = preloadedHeroLogoUrl,
-                preloadedLogoCache = preloadedLogoCache,
-                currentProfile = activeProfile,
-                isCloudConnected = authState is AuthState.Authenticated,
-                onSwitchProfile = {
-                    appCoroutineScope.launch {
-                        traktRepository.clearAllProfileCaches()
-                        watchHistoryRepository.clearProfileCaches()
-                        watchlistRepository.clearWatchlistCache()
-                        iptvRepository.invalidateCache()
-                        profileManager.setCurrentProfileId("default")
-                        profileManager.setCurrentProfileName("default")
-                        profileRepository.clearActiveProfile()
-                    }
-                },
-                onTvFullscreenChanged = { fullscreen ->
-                    iptvFullscreen = fullscreen
-                },
-                onExitApp = onExitApp
-            )
+        CompositionLocalProvider(
+            LocalBottomBarInset provides if (showBottomBar) barInset else 0.dp,
+            LocalBottomBarHeight provides fullBarHeight
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+            ) {
+                AppNavigation(
+                    navController = navController,
+                    startDestination = startDestination,
+                    navigationRailInset = if (isLandscapeRail) LANDSCAPE_RAIL_WIDTH_DP.dp + railCutoutInset else 0.dp,
+                    navigationRailBottomInset = navigationInset,
+                    preloadedCategories = preloadedCategories,
+                    preloadedHeroItem = preloadedHeroItem,
+                    preloadedHeroLogoUrl = preloadedHeroLogoUrl,
+                    preloadedLogoCache = preloadedLogoCache,
+                    currentProfile = activeProfile,
+                    isCloudConnected = authState is AuthState.Authenticated,
+                    onProfileSelected = { profileId -> selectedSessionProfileId = profileId },
+                    onSwitchProfile = switchProfile,
+                    onTvFullscreenChanged = { fullscreen ->
+                        iptvFullscreen = fullscreen
+                    },
+                    onOverlayFullscreenChanged = { fullscreen ->
+                        overlayFullscreen = fullscreen
+                    },
+                    onTvSubScreenChanged = { isSubScreen ->
+                        isTvSubScreen = isSubScreen
+                    },
+                    onSettingsSubPageChanged = { isSubPage ->
+                        isSettingsSubPage = isSubPage
+                    },
+                    onExitApp = onExitApp
+                )
+            }
+
         }
 
-        if (isMobile && !isPlayerRoute) {
-            val bottomBarAlpha by androidx.compose.animation.core.animateFloatAsState(
-                targetValue = if (showBottomBar) 1f else 0f,
-                animationSpec = androidx.compose.animation.core.tween(250),
-                label = "bottom_bar_alpha"
-            )
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showBottomBar,
+            enter = androidx.compose.animation.slideInVertically(
+                animationSpec = androidx.compose.animation.core.tween(220, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            ) { it },
+            exit = androidx.compose.animation.slideOutVertically(
+                animationSpec = androidx.compose.animation.core.tween(220, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            ) { it },
+            modifier = Modifier
+                .align(if (isLandscapeRail) Alignment.CenterStart else Alignment.BottomCenter)
+                .then(if (isLandscapeRail) Modifier.padding(start = railCutoutInset) else Modifier)
+        ) {
             AppBottomBar(
                 currentRoute = currentRoute,
                 onNavigate = { route ->
-                    if (showBottomBar) {
-                        navController.navigate(route) {
-                            popUpTo("home") { inclusive = false }
-                            launchSingleTop = true
+                    if (route == currentRoute) {
+                        return@AppBottomBar
+                    }
+                    navController.navigate(route) {
+                        popUpTo("home") {
+                            saveState = true
                         }
+                        launchSingleTop = true
+                        restoreState = true
                     }
                 },
+                currentProfile = activeProfile,
+                onSwitchProfile = {
+                    switchProfile()
+                    navController.navigateToProfileSelection()
+                },
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .graphicsLayer {
-                        alpha = bottomBarAlpha
+                    .then(if (!isLandscapeRail) Modifier.fillMaxWidth() else Modifier)
+                    .onSizeChanged {
+                        measuredBarHeight = with(density) { it.height.toDp() }
                     }
             )
         }
     }
 
-    LaunchedEffect(activeProfile?.id, pendingLauncherRequest) {
+    LaunchedEffect(activeProfile?.id, canOpenPendingLink, pendingLauncherRequest) {
         val request = pendingLauncherRequest ?: return@LaunchedEffect
-        if (activeProfile == null) return@LaunchedEffect
+        if (!canOpenPendingLink) return@LaunchedEffect
 
         val route = Screen.Details.createRoute(
             mediaType = request.mediaType,
@@ -755,9 +1050,9 @@ fun ArflixApp(
         onConsumeLauncherRequest()
     }
 
-    LaunchedEffect(activeProfile?.id, pendingInstallPackUrl) {
+    LaunchedEffect(activeProfile?.id, canOpenPendingLink, pendingInstallPackUrl) {
         val packUrl = pendingInstallPackUrl ?: return@LaunchedEffect
-        if (activeProfile == null) return@LaunchedEffect
+        if (!canOpenPendingLink) return@LaunchedEffect
 
         val encodedUrl = java.net.URLEncoder.encode(packUrl, "UTF-8")
         val route = "settings?initialSection=catalogs&installPackUrl=$encodedUrl"
@@ -766,6 +1061,61 @@ fun ArflixApp(
             launchSingleTop = true
         }
         onConsumeInstallPackUrl()
+    }
+
+    LaunchedEffect(activeProfile?.id, canOpenPendingLink, pendingInstallAddonUrl) {
+        val addonUrl = pendingInstallAddonUrl ?: return@LaunchedEffect
+        if (!canOpenPendingLink) return@LaunchedEffect
+
+        val encodedUrl = java.net.URLEncoder.encode(addonUrl, "UTF-8")
+        val route = "settings?initialSection=stremio&installAddonUrl=$encodedUrl"
+        navController.navigate(route) {
+            popUpTo(Screen.ProfileSelection.route) { inclusive = true }
+            launchSingleTop = true
+        }
+        onConsumeInstallAddonUrl()
+    }
+
+    LaunchedEffect(activeProfile?.id, canResolvePartnerLink, pendingPartnerOpenLink?.ticket, partnerRetry) {
+        val link = pendingPartnerOpenLink ?: return@LaunchedEffect
+        if (!canResolvePartnerLink) return@LaunchedEffect
+        val profileId = activeProfile?.id ?: return@LaunchedEffect
+        partnerLinkFailed = false
+        val target = try {
+            kotlinx.coroutines.withTimeout(15_000L) { resolvePartnerOpenLink(link.request) }
+        } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+            null
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // No URI, token or API-key-bearing network exception is logged.
+            null
+        }
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        // State can change before Compose cancels this effect. Recheck the profile session and
+        // atomically consume the ticket in the Activity before navigating to the title details.
+        if (!ProfileSessionGate.canOpenLink(activeProfile?.id, selectedSessionProfileId) ||
+            activeProfile?.id != profileId || authState is AuthState.Loading ||
+            navController.currentDestination?.route in listOf(Screen.Login.route, Screen.ProfileSelection.route) ||
+            !partnerLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+            return@LaunchedEffect
+        }
+        if (target == null) {
+            partnerLinkFailed = true
+        } else if (onConsumePartnerOpenLink(link)) {
+            navController.navigate(
+                Screen.Details.createRoute(target.mediaType, target.tmdbId, target.season, target.episode),
+                partnerOpenNavigationOptions()
+            )
+        }
+    }
+
+    if (pendingPartnerOpenLink != null && canResolvePartnerLink) {
+        com.arflix.tv.ui.components.PartnerOpenLinkDialog(
+            failed = partnerLinkFailed,
+            onRetry = { partnerLinkFailed = false; partnerRetry += 1 },
+            onCancel = { pendingPartnerOpenLink?.let { onConsumePartnerOpenLink(it) } }
+        )
     }
 }
 

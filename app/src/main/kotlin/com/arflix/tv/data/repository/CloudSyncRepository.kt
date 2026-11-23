@@ -1,4 +1,6 @@
 package com.arflix.tv.data.repository
+import com.arflix.tv.data.model.AnimeStructuringStyle
+import com.arflix.tv.data.model.AutoplayLimits
 
 import android.content.Context
 import android.util.Log
@@ -9,6 +11,7 @@ import com.arflix.tv.data.model.Addon
 import com.arflix.tv.data.model.AddonType
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.Profile
+import com.arflix.tv.data.model.StreamSearchMode
 import com.arflix.tv.data.repository.ContinueWatchingItem
 import com.arflix.tv.network.OkHttpProvider
 import com.arflix.tv.ui.components.CARD_LAYOUT_MODE_LANDSCAPE
@@ -17,6 +20,11 @@ import com.arflix.tv.ui.components.catalogueRowLayoutPreferencePrefixFor
 import com.arflix.tv.ui.components.normalizeCardLayoutMode
 import com.arflix.tv.ui.components.profileCatalogueRowLayoutModeKey
 import com.arflix.tv.util.LAST_APP_LANGUAGE_KEY
+import com.arflix.tv.util.HOME_PRESENTATION_VERSION
+import com.arflix.tv.util.canMergeHomePresentationSetting
+import com.arflix.tv.util.restoreHomePresentation
+import com.arflix.tv.util.resolveAppLanguage
+import com.arflix.tv.util.IPTV_FAVORITES_ON_HOME
 import com.arflix.tv.util.AppLogger
 import com.arflix.tv.util.ACCENT_COLOR_KEY
 import com.arflix.tv.util.OLED_BLACK_BACKGROUND_KEY
@@ -122,7 +130,8 @@ class CloudSyncRepository @Inject constructor(
     private val profileAvatarImageManager: ProfileAvatarImageManager,
     private val invalidationBus: CloudSyncInvalidationBus,
     private val pluginDataStore: com.arflix.tv.data.local.PluginDataStore,
-    private val syncProviderStore: com.arflix.tv.data.repository.sync.SyncProviderStore
+    private val syncProviderStore: com.arflix.tv.data.repository.sync.SyncProviderStore,
+    private val streamIntegrationRepository: StreamIntegrationRepository
 ) {
     private val TAG = "CloudSync"
     private val gson = Gson()
@@ -140,6 +149,8 @@ class CloudSyncRepository @Inject constructor(
     private val customUserAgentKey = stringPreferencesKey(OkHttpProvider.USER_AGENT_PREF_KEY)
     @Volatile
     private var latestLocalDirtyAt: Long = 0L
+    private val dirtyStateLock = Any()
+    private var localMutationVersion = 0L
 
     private fun payloadSizeBucket(payload: String): String = when {
         payload.length < 10_000 -> "lt_10kb"
@@ -188,10 +199,40 @@ class CloudSyncRepository @Inject constructor(
         addonLists.flatten().forEach { addon ->
             val id = addon.id.trim()
             if (id.isNotBlank()) {
-                merged.putIfAbsent(id, addon)
+                val existing = merged[id]
+                merged[id] = if (existing == null) addon
+                else mergeAddonPreservingSetupAndMetadata(existing, addon, preferIncomingOnTie = false)
             }
         }
         return merged.values.toList()
+    }
+
+    private fun parseAddonMetadataByKey(root: JSONObject): Map<String, AddonManifestCacheEntry> {
+        val obj = root.optJSONObject("addonMetadataByKey") ?: return emptyMap()
+        val result = linkedMapOf<String, AddonManifestCacheEntry>()
+        for (rawKey in obj.keys()) {
+            val entryObj = obj.optJSONObject(rawKey) ?: continue
+            val manifestObj = entryObj.optJSONObject("manifest") ?: continue
+            val manifest = runCatching {
+                gson.fromJson(manifestObj.toString(), com.arflix.tv.data.model.AddonManifest::class.java)
+            }.getOrNull() ?: continue
+            val updatedAt = entryObj.optLong("metadataUpdatedAt", entryObj.optLong("updatedAt", 0L))
+            val key = normalizeAddonUrlKey(rawKey).ifBlank { rawKey }
+            if (key.isNotBlank()) result[key] = AddonManifestCacheEntry(manifest, updatedAt)
+        }
+        return result
+    }
+
+    private fun enrichAddonsFromCloudMetadata(
+        addons: List<Addon>,
+        metadataMap: Map<String, AddonManifestCacheEntry>
+    ): List<Addon> {
+        if (metadataMap.isEmpty()) return addons
+        return addons.map { addon ->
+            val urlKey = normalizeAddonUrlKey(addon.url)
+            val cache = metadataMap[urlKey] ?: metadataMap[addon.id] ?: metadataMap[addon.manifest?.id]
+            if (cache != null) enrichAddonWithMetadata(addon, cache.manifest, cache.updatedAt) else addon
+        }
     }
 
     /**
@@ -217,8 +258,11 @@ class CloudSyncRepository @Inject constructor(
 
     fun markLocalStateDirty() {
         val dirtyAt = System.currentTimeMillis()
-        latestLocalDirtyAt = max(latestLocalDirtyAt, dirtyAt)
-        isPushDirty = true
+        synchronized(dirtyStateLock) {
+            localMutationVersion++
+            latestLocalDirtyAt = max(latestLocalDirtyAt, dirtyAt)
+            isPushDirty = true
+        }
         repositoryScope.launch {
             persistLocalDirty(dirtyAt)
         }
@@ -226,8 +270,11 @@ class CloudSyncRepository @Inject constructor(
 
     suspend fun markLocalStateDirtyNow() {
         val dirtyAt = System.currentTimeMillis()
-        latestLocalDirtyAt = max(latestLocalDirtyAt, dirtyAt)
-        isPushDirty = true
+        synchronized(dirtyStateLock) {
+            localMutationVersion++
+            latestLocalDirtyAt = max(latestLocalDirtyAt, dirtyAt)
+            isPushDirty = true
+        }
         persistLocalDirty(dirtyAt)
     }
 
@@ -241,26 +288,34 @@ class CloudSyncRepository @Inject constructor(
     }
 
     private suspend fun markPushFailedDirty() {
-        val dirtyAt = latestLocalDirtyAt.takeIf { it > 0L } ?: System.currentTimeMillis()
-        latestLocalDirtyAt = max(latestLocalDirtyAt, dirtyAt)
-        isPushDirty = true
-        persistLocalDirty(dirtyAt)
+        markLocalStateDirtyNow()
     }
 
-    private suspend fun clearLocalDirtyAfterSuccessfulPush() {
-        latestLocalDirtyAt = 0L
-        isPushDirty = false
+    private suspend fun clearLocalDirtyAfterSuccessfulPush(uploadedVersion: Long) {
         context.settingsDataStore.edit { prefs ->
-            prefs.remove(cloudSyncLocalDirtyAtKey)
+            synchronized(dirtyStateLock) {
+                // A successful upload only acknowledges the snapshot it actually sent.
+                // Edits made while the network request was in flight still need another push.
+                if (localMutationVersion == uploadedVersion) {
+                    latestLocalDirtyAt = 0L
+                    isPushDirty = false
+                    prefs.remove(cloudSyncLocalDirtyAtKey)
+                }
+            }
             prefs[cloudSyncLastPushAtKey] = System.currentTimeMillis()
         }
     }
 
     private suspend fun clearStaleLocalDirtyBeforeRemoteRestore() {
-        latestLocalDirtyAt = 0L
-        isPushDirty = false
+        val version = synchronized(dirtyStateLock) { localMutationVersion }
         context.settingsDataStore.edit { prefs ->
-            prefs.remove(cloudSyncLocalDirtyAtKey)
+            synchronized(dirtyStateLock) {
+                if (version == localMutationVersion) {
+                    latestLocalDirtyAt = 0L
+                    isPushDirty = false
+                    prefs.remove(cloudSyncLocalDirtyAtKey)
+                }
+            }
         }
     }
 
@@ -299,14 +354,26 @@ class CloudSyncRepository @Inject constructor(
         val autoPlayNext: Boolean = true,
         val autoPlaySingleSource: Boolean = true,
         val autoPlayMinQuality: String = "Any",
-        val trailerAutoPlay: Boolean = false,
+        val autoPlayMaxQuality: String? = null,
+        val autoPlayMaxSizeGb: Int? = null,
+        val homePresentationVersion: Int = 0,
+        val trailerAutoPlay: Boolean = true,
         val trailerSoundEnabled: Boolean = false,
-        val trailerDelaySeconds: Int = 2,
+        val trailerDelaySeconds: Int = 1,
         val trailerInCards: Boolean = true,
+        // Null from older clients: keep the local preference.
+        val netflixHomeStyle: Boolean? = null,
+        val watchlistOnHome: Boolean? = null,
+        val hiddenNavigationSections: List<String>? = null,
         val clockFormat: String = "24h",
+        val guideRowCount: Int? = null,
         val showBudget: Boolean = true,
-        val showEpisodeRatings: Boolean = true,
+        val showEpisodeRatings: Boolean = false,
+        val animeEpisodeStructuring: String = AnimeStructuringStyle.BROADCAST.id,
+        val iptvFavoritesOnHome: Boolean = true,
         val showLoadingStats: Boolean? = null,
+        // Older clients omit this field; do not reset an opted-in TV on restore.
+        val showAddonStreamDetails: Boolean? = null,
         val spoilerBlurEnabled: Boolean = false,
         val volumeBoostDb: Int = 0,
         val includeSpecials: Boolean = false,
@@ -315,29 +382,51 @@ class CloudSyncRepository @Inject constructor(
         val subtitleSettingsUpdatedAt: Long = 0L,
         val secondarySubtitle: String = "Off",
         val filterSubtitlesByLanguage: Boolean = true,
+        val useForcedSubtitles: Boolean = false,
         val homeServerConnectionJson: String? = null,
         val torrServerBaseUrl: String? = null,
-        val catalogueRowLayoutModes: Map<String, String> = emptyMap()
+        val catalogueRowLayoutModes: Map<String, String> = emptyMap(),
+        val streamSearchMode: String = StreamSearchMode.PARALLEL.id,
+        val streamProvidersCustomOrder: String = "",
+        val streamIntegrationsMacroOrder: String = "",
+        val streamMacroEnabledMap: Map<String, Boolean> = emptyMap(),
+        val streamProviderEnabledMap: Map<String, Boolean> = emptyMap(),
+        /**
+         * Addon catalogs a parent approved for this kids profile (KidsTrustedCatalogs). Only the
+         * approvals sync; each device records the titles they list as its catalogs load. Null
+         * from older clients, which must not clear approvals.
+         */
+        val kidsCatalogApprovals: List<String>? = null
     )
 
     // ── DataStore key helpers ──
 
     private fun contentLanguageKeyFor(profileId: String) =
         profileManager.profileStringKeyFor(profileId, "content_language")
+    private fun animeEpisodeStructuringKeyFor(profileId: String) =
+        profileManager.profileStringKeyFor(profileId, com.arflix.tv.data.model.AnimeStructuringStyle.PREFERENCE_KEY)
     private fun trailerAutoPlayKeyFor(profileId: String) =
         profileManager.profileBooleanKeyFor(profileId, "trailer_auto_play")
     private fun trailerSoundEnabledKeyFor(profileId: String) =
         profileManager.profileBooleanKeyFor(profileId, "trailer_sound_enabled")
     private fun trailerInCardsKeyFor(profileId: String) =
         profileManager.profileBooleanKeyFor(profileId, "trailer_in_cards")
+    private fun netflixHomeStyleKeyFor(profileId: String) =
+        profileManager.profileBooleanKeyFor(profileId, com.arflix.tv.ui.screens.home.NETFLIX_HOME_STYLE_KEY)
+    private fun watchlistOnHomeKeyFor(profileId: String) =
+        profileManager.profileBooleanKeyFor(profileId, com.arflix.tv.util.WATCHLIST_ON_HOME)
     private fun trailerDelayKeyFor(profileId: String) =
         profileManager.profileStringKeyFor(profileId, "trailer_delay_seconds")
     private fun clockFormatKeyFor(profileId: String) =
         profileManager.profileStringKeyFor(profileId, "clock_format")
+    private fun guideRowCountKeyFor(profileId: String) =
+        profileManager.profileStringKeyFor(profileId, "guide_row_count")
     private fun showBudgetKeyFor(profileId: String) =
         profileManager.profileBooleanKeyFor(profileId, "show_budget_on_home")
     private fun showEpisodeRatingsKeyFor(profileId: String) =
         profileManager.profileBooleanKeyFor(profileId, "show_episode_ratings")
+    private fun iptvFavoritesOnHomeKeyFor(profileId: String) =
+        profileManager.profileBooleanKeyFor(profileId, IPTV_FAVORITES_ON_HOME)
     private fun showLoadingStatsKeyFor(profileId: String) =
         profileManager.profileBooleanKeyFor(profileId, "show_loading_stats")
     private fun spoilerBlurKeyFor(profileId: String) =
@@ -371,6 +460,8 @@ class CloudSyncRepository @Inject constructor(
         profileManager.profileStringKeyFor(profileId, "secondary_subtitle")
     private fun filterSubtitlesByLanguageKeyFor(profileId: String) =
         profileManager.profileBooleanKeyFor(profileId, "filter_subtitles_by_lang")
+    private fun useForcedSubtitlesKeyFor(profileId: String) =
+        profileManager.profileBooleanKeyFor(profileId, "use_forced_subtitles")
     private fun defaultSubtitleKeyFor(profileId: String) =
         profileManager.profileStringKeyFor(profileId, "default_subtitle")
     private fun defaultAudioLanguageKeyFor(profileId: String) =
@@ -395,6 +486,7 @@ class CloudSyncRepository @Inject constructor(
     private val subtitleAiEnabledKey = androidx.datastore.preferences.core.booleanPreferencesKey("subtitle_ai_enabled")
     private val subtitleAiAutoSelectKey = androidx.datastore.preferences.core.booleanPreferencesKey("subtitle_ai_auto_select")
     private val subtitleAiFindBestMatchKey = androidx.datastore.preferences.core.booleanPreferencesKey("subtitle_ai_find_best_match")
+    private val subtitleHearingSyncKey = androidx.datastore.preferences.core.booleanPreferencesKey("subtitle_hearing_sync_v2")
     private val subtitlePreloadEnabledKey = androidx.datastore.preferences.core.booleanPreferencesKey("subtitle_preload_enabled")
     private val dolbyVisionCompatKey = androidx.datastore.preferences.core.booleanPreferencesKey("dolby_vision_compat")
     private val subtitleAiApiKeyKey = androidx.datastore.preferences.core.stringPreferencesKey("subtitle_ai_api_key")
@@ -409,6 +501,8 @@ class CloudSyncRepository @Inject constructor(
     private fun autoPlayNextKey() = profileManager.profileBooleanKey("auto_play_next")
     private fun autoPlaySingleSourceKey() = profileManager.profileBooleanKey("auto_play_single_source")
     private fun autoPlayMinQualityKey() = profileManager.profileStringKey("auto_play_min_quality")
+    private fun autoPlayMaxQualityKeyFor(profileId: String) = profileManager.profileStringKeyFor(profileId, "auto_play_max_quality")
+    private fun autoPlayMaxSizeKeyFor(profileId: String) = profileManager.profileIntKeyFor(profileId, "auto_play_max_size_gb")
     private fun includeSpecialsKey() = profileManager.profileBooleanKey("include_specials")
 
     private fun catalogueRowLayoutModesForProfile(
@@ -462,7 +556,8 @@ class CloudSyncRepository @Inject constructor(
         "accentColor", "oledBlackBackground", "skipProfileSelection", "customUserAgent",
         "dnsProvider", "subtitleAiEnabled", "subtitleAiAutoSelect", "subtitleAiFindBestMatch",
         "subtitlePreloadEnabled", "dolbyVisionCompatEnabled", "subtitleAiApiKey",
-        "subtitleAiModel", "subtitleRemoveHearingImpaired"
+        "subtitleAiModel", "subtitleRemoveHearingImpaired", "telegramSearchOnClickOnly",
+        "subtitleHearingSyncV2", "liveAiSubsEnabled", "liveAiSubsAutoStart"
     )
     // Per-profile fields excluded from the generic merge (handled by their own logic / not values).
     private val profileMergeExclude = setOf("defaultSubtitle", "subtitleSettingsUpdatedAt")
@@ -478,10 +573,14 @@ class CloudSyncRepository @Inject constructor(
                 }
             }
         }
+        keys.addAll(IptvCloudFields.keys(root))
+        keys.addAll(CatalogCloudFields.keys(root))
         return keys
     }
 
     private fun mergeFieldValue(root: JSONObject, key: String): Any? {
+        if (key.startsWith("c:")) return CatalogCloudFields.value(root, key)
+        if (key.startsWith("i:")) return IptvCloudFields.value(root, key)
         if (key.startsWith("g:")) {
             val k = key.substring(2)
             return if (root.has(k)) root.get(k) else null
@@ -494,6 +593,10 @@ class CloudSyncRepository @Inject constructor(
     }
 
     private fun setMergeFieldValue(root: JSONObject, key: String, value: Any) {
+        if (key.startsWith("c:")) {
+            CatalogCloudFields.put(root, key, value)
+            return
+        }
         if (key.startsWith("g:")) {
             root.put(key.substring(2), value)
             return
@@ -530,32 +633,32 @@ class CloudSyncRepository @Inject constructor(
      * caller can embed it as `fieldUpdatedAt`. Generic — no per-write hooks; a change is stamped on
      * the next snapshot build, within the push debounce.
      */
-    private suspend fun stampAndLoadFieldTs(localRoot: JSONObject): JSONObject {
-        val tsMap = loadJsonMap(cloudSyncFieldTsKey)
-        val baseMap = loadJsonMap(cloudSyncFieldBaseKey)
+    private suspend fun stampAndLoadFieldTs(localRoot: JSONObject, capturedTimestamps: JSONObject): JSONObject {
+        var tsMap = JSONObject()
         val now = System.currentTimeMillis()
-        var changed = false
-        for (key in mergeKeysOf(localRoot)) {
-            val current = mergeFieldValue(localRoot, key)?.toString() ?: continue
-            val base = if (baseMap.has(key)) baseMap.optString(key) else null
-            if (base == null) {
-                // First time we've seen this field (e.g. a fresh upgrade): record the baseline but
-                // do NOT stamp a timestamp. A field with no prior baseline is not evidence of a
-                // local change, so it must not out-timestamp a peer's newer cloud value and revert
-                // it — it stays untimestamped (loses to any real cloud timestamp) until the user
-                // actually changes it, which the next build detects via this baseline.
-                baseMap.put(key, current)
-                changed = true
-            } else if (base != current) {
-                baseMap.put(key, current)
-                tsMap.put(key, now)
-                changed = true
+        context.settingsDataStore.edit { prefs ->
+            tsMap = prefs[cloudSyncFieldTsKey]?.let(::JSONObject) ?: JSONObject()
+            val baseMap = prefs[cloudSyncFieldBaseKey]?.let(::JSONObject) ?: JSONObject()
+            IptvCloudFields.reconcileSnapshot(localRoot, tsMap, baseMap, capturedTimestamps)
+            CatalogCloudFields.reconcileSnapshot(localRoot, tsMap, baseMap, capturedTimestamps)
+            var changed = false
+            for (key in mergeKeysOf(localRoot)) {
+                val current = mergeFieldValue(localRoot, key)?.toString() ?: continue
+                val base = if (baseMap.has(key)) baseMap.optString(key) else null
+                if (base == null) {
+                    // A first baseline is not evidence of a local edit. Keep it untimestamped
+                    // so a fresh installation cannot overwrite a peer's existing preferences.
+                    baseMap.put(key, current)
+                    changed = true
+                } else if (base != current) {
+                    baseMap.put(key, current)
+                    tsMap.put(key, maxOf(now, tsMap.optLong(key, 0) + 1))
+                    changed = true
+                }
             }
-        }
-        if (changed) {
-            context.settingsDataStore.edit {
-                it[cloudSyncFieldTsKey] = tsMap.toString()
-                it[cloudSyncFieldBaseKey] = baseMap.toString()
+            if (changed) {
+                prefs[cloudSyncFieldTsKey] = tsMap.toString()
+                prefs[cloudSyncFieldBaseKey] = baseMap.toString()
             }
         }
         return tsMap
@@ -573,6 +676,16 @@ class CloudSyncRepository @Inject constructor(
             mergeFieldValue(appliedRoot, key)?.let { base.put(key, it.toString()) }
         }
         context.settingsDataStore.edit {
+            // A user can edit IPTV while a remote snapshot is being applied.
+            // Do not erase its atomic deletion timestamp or its matching baseline.
+            val currentTs = it[cloudSyncFieldTsKey]?.let(::JSONObject) ?: JSONObject()
+            val currentBase = it[cloudSyncFieldBaseKey]?.let(::JSONObject) ?: JSONObject()
+            for (key in currentTs.keys()) {
+                if ((key.startsWith("i:") || key.startsWith("c:")) && currentTs.optLong(key) > ts.optLong(key)) {
+                    ts.put(key, currentTs.get(key))
+                    if (currentBase.has(key)) base.put(key, currentBase.get(key))
+                }
+            }
             it[cloudSyncFieldTsKey] = ts.toString()
             it[cloudSyncFieldBaseKey] = base.toString()
         }
@@ -596,6 +709,17 @@ class CloudSyncRepository @Inject constructor(
         val otherWon = HashSet<String>()
         val allKeys = LinkedHashSet<String>().apply { addAll(mergeKeysOf(base)); addAll(mergeKeysOf(other)) }
         for (key in allKeys) {
+            if (key.startsWith("i:")) continue
+            if (key.startsWith("p:")) {
+                val rest = key.substring(2)
+                val profileId = rest.substringBefore(':')
+                val baseVersion = base.optJSONObject("profileSettingsById")
+                    ?.optJSONObject(profileId)?.optInt("homePresentationVersion", 0) ?: 0
+                val otherVersion = other.optJSONObject("profileSettingsById")
+                    ?.optJSONObject(profileId)?.optInt("homePresentationVersion", 0) ?: 0
+                // A legacy timestamp must not reintroduce pre-2.3 defaults on push or pull.
+                if (!canMergeHomePresentationSetting(rest.substringAfter(':'), baseVersion, otherVersion)) continue
+            }
             val bt = baseTs.optLong(key, 0L)
             val ot = otherTs.optLong(key, 0L)
             if (ot > bt) {
@@ -610,6 +734,8 @@ class CloudSyncRepository @Inject constructor(
             }
         }
         base.put("fieldUpdatedAt", mergedTs)
+        otherWon.addAll(IptvCloudFields.merge(base, other))
+        WatchlistCloudFields.merge(base, other)
         return SettingsMergeResult(base.toString(), otherWon)
     }
 
@@ -630,21 +756,31 @@ class CloudSyncRepository @Inject constructor(
         // Per-profile settings
         val profileSettingsById = buildMap<String, CloudProfileSettings> {
             profiles.forEach { profile ->
+                val streamCloudState = streamIntegrationRepository.exportCloudSettingsForProfile(prefs, profile.id)
                 put(
                     profile.id,
                     CloudProfileSettings(
                         defaultSubtitle = prefs[defaultSubtitleKeyFor(profile.id)] ?: "Off",
                         defaultAudioLanguage = prefs[defaultAudioLanguageKeyFor(profile.id)] ?: "Auto (Original)",
-                        contentLanguage = prefs[contentLanguageKeyFor(profile.id)] ?: "en-US",
+                        contentLanguage = resolveAppLanguage(prefs, profile.id),
 
-                        trailerAutoPlay = prefs[trailerAutoPlayKeyFor(profile.id)] ?: false,
+                        homePresentationVersion = HOME_PRESENTATION_VERSION,
+                        trailerAutoPlay = prefs[trailerAutoPlayKeyFor(profile.id)] ?: true,
                         trailerSoundEnabled = prefs[trailerSoundEnabledKeyFor(profile.id)] ?: false,
-                        trailerDelaySeconds = prefs[trailerDelayKeyFor(profile.id)]?.toIntOrNull() ?: 2,
+                        trailerDelaySeconds = prefs[trailerDelayKeyFor(profile.id)]?.toIntOrNull() ?: 1,
                         trailerInCards = prefs[trailerInCardsKeyFor(profile.id)] ?: true,
+                        netflixHomeStyle = prefs[netflixHomeStyleKeyFor(profile.id)] ?: true,
+                        watchlistOnHome = prefs[watchlistOnHomeKeyFor(profile.id)] ?: false,
+                        hiddenNavigationSections = com.arflix.tv.util.navigationSectionsForCloud(prefs, profile.id),
                         clockFormat = prefs[clockFormatKeyFor(profile.id)] ?: "24h",
+                        guideRowCount = prefs[guideRowCountKeyFor(profile.id)]?.toIntOrNull()
+                            ?.takeIf { it in 6..10 } ?: 0,
                         showBudget = prefs[showBudgetKeyFor(profile.id)] ?: true,
-                        showEpisodeRatings = prefs[showEpisodeRatingsKeyFor(profile.id)] ?: true,
+                        showEpisodeRatings = prefs[showEpisodeRatingsKeyFor(profile.id)] ?: false,
+                        animeEpisodeStructuring = prefs[animeEpisodeStructuringKeyFor(profile.id)] ?: AnimeStructuringStyle.BROADCAST.id,
+                        iptvFavoritesOnHome = prefs[iptvFavoritesOnHomeKeyFor(profile.id)] ?: true,
                         showLoadingStats = prefs[showLoadingStatsKeyFor(profile.id)] ?: true,
+                        showAddonStreamDetails = prefs[com.arflix.tv.util.addonStreamDetailsKey(profile.id)] ?: false,
                         spoilerBlurEnabled = prefs[spoilerBlurKeyFor(profile.id)] ?: false,
                         volumeBoostDb = prefs[volumeBoostDbKeyFor(profile.id)]?.toIntOrNull()?.coerceIn(0, 15) ?: 0,
                         dnsProvider = prefs[dnsProviderKeyFor(profile.id)] ?: globalDnsProvider,
@@ -658,6 +794,7 @@ class CloudSyncRepository @Inject constructor(
                         subtitleStylized = prefs[subtitleStylizedKeyFor(profile.id)] ?: true,
                         secondarySubtitle = prefs[secondarySubtitleKeyFor(profile.id)] ?: "Off",
                         filterSubtitlesByLanguage = prefs[filterSubtitlesByLanguageKeyFor(profile.id)] ?: true,
+                        useForcedSubtitles = prefs[useForcedSubtitlesKeyFor(profile.id)] ?: false,
                         homeServerConnectionJson = homeServerRepository.exportCloudConnectionsJsonForProfile(profile.id),
                         torrServerBaseUrl = streamRepository.exportTorrServerBaseUrlForProfile(profile.id),
                         catalogueRowLayoutModes = catalogueRowLayoutModesForProfile(prefs, profile.id),
@@ -672,7 +809,15 @@ class CloudSyncRepository @Inject constructor(
                         autoPlayMinQuality = normalizeAutoPlayMinQuality(
                             prefs[autoPlayMinQualityKeyFor(profile.id)] ?: "Any"
                         ),
-                        includeSpecials = prefs[includeSpecialsKeyFor(profile.id)] ?: false
+                        includeSpecials = prefs[includeSpecialsKeyFor(profile.id)] ?: false,
+                        autoPlayMaxQuality = AutoplayLimits.normalizeQuality(prefs[autoPlayMaxQualityKeyFor(profile.id)]),
+                        autoPlayMaxSizeGb = AutoplayLimits.normalizeSizeGb(prefs[autoPlayMaxSizeKeyFor(profile.id)] ?: 0),
+                        streamSearchMode = streamCloudState.searchMode,
+                        streamProvidersCustomOrder = streamCloudState.customProviderOrder,
+                        streamIntegrationsMacroOrder = streamCloudState.macroCategoryOrder,
+                        streamMacroEnabledMap = streamCloudState.macroEnabledMap,
+                        streamProviderEnabledMap = streamCloudState.providerEnabledMap,
+                        kidsCatalogApprovals = prefs[KidsTrustedCatalogs.approvalsKey(profile.id)]?.sorted()
                     )
                 )
             }
@@ -688,6 +833,8 @@ class CloudSyncRepository @Inject constructor(
         root.put("autoPlayNext", prefs[autoPlayNextKey()] ?: true)
         root.put("autoPlaySingleSource", prefs[autoPlaySingleSourceKey()] ?: true)
         root.put("autoPlayMinQuality", normalizeAutoPlayMinQuality(prefs[autoPlayMinQualityKey()] ?: "Any"))
+        root.put("autoPlayMaxQuality", AutoplayLimits.normalizeQuality(prefs[profileManager.profileStringKey("auto_play_max_quality")]))
+        root.put("autoPlayMaxSizeGb", AutoplayLimits.normalizeSizeGb(prefs[profileManager.profileIntKey("auto_play_max_size_gb")] ?: 0))
         root.put("includeSpecials", prefs[includeSpecialsKey()] ?: false)
         root.put("dnsProvider", globalDnsProvider)
         root.put("customUserAgent", prefs[customUserAgentKey] ?: "")
@@ -708,6 +855,16 @@ class CloudSyncRepository @Inject constructor(
         root.put("subtitleAiApiKey", prefs[subtitleAiApiKeyKey] ?: "")
         root.put("subtitleAiModel", prefs[subtitleAiModelKey] ?: "GROQ_LLAMA_70B")
         root.put("subtitleRemoveHearingImpaired", prefs[subtitleRemoveHearingImpairedKey] ?: true)
+        // Live TV AI subtitles (global, like the AI subtitle key they share).
+        root.put("liveAiSubsEnabled", prefs[com.arflix.tv.ui.screens.tv.live.aisubs.LiveAiSubsPrefs.ENABLED] ?: false)
+        root.put("liveAiSubsAutoStart", prefs[com.arflix.tv.ui.screens.tv.live.aisubs.LiveAiSubsPrefs.AUTO_START] ?: false)
+        root.put(
+            "telegramSearchOnClickOnly",
+            prefs[com.arflix.tv.data.telegram.TelegramRepository.KEY_SEARCH_ON_CLICK_ONLY] ?: true
+        )
+        // Only an explicit choice: the default differs per device (off on low-memory devices), and
+        // an untouched device pushing "on" would switch it on everywhere.
+        prefs[subtitleHearingSyncKey]?.let { root.put("subtitleHearingSyncV2", it) }
 
         root.put("activeProfileId", profileRepository.getActiveProfileId() ?: JSONObject.NULL)
         root.put("profiles", JSONArray(gson.toJson(profiles)))
@@ -724,14 +881,6 @@ class CloudSyncRepository @Inject constructor(
             profileAvatarImageManager.buildInlineAvatarImagesJson(profiles, existingAvatarImagesById)
         )
         root.put("profileSettingsById", JSONObject(gson.toJson(profileSettingsById)))
-
-        // Validate active Trakt auth before exporting so revoked tokens do not
-        // get written back to cloud and restored on the next launch.
-        try {
-            traktRepository.hasTrakt()
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-        }
 
         // Trakt tokens per profile
         val traktTokens = traktRepository.exportTokensForProfiles(profiles.map { it.id })
@@ -772,16 +921,81 @@ class CloudSyncRepository @Inject constructor(
 
         // Addons are shared account state. Keep the per-profile payload shape
         // for older clients, but each profile receives the same shared list.
-        val sharedAddons = streamRepository.installedAddons.first()
+        // For backwards compatibility with older versions of ARVIO that read
+        // stream provider priority directly from the addons list order, order the
+        // Stremio addons in the exported snapshot to reflect their configured priority.
+        val addonState = streamRepository.exportAddonCloudState()
+        val installed = addonState.addons
+        val activeProfileCustomOrder = prefs[profileManager.profileStringKeyFor(profileManager.getProfileIdSync(), "stream_providers_custom_order")].orEmpty()
+        val activeOrderedStremioIds = if (activeProfileCustomOrder.isNotBlank()) {
+            activeProfileCustomOrder.split(",")
+                .map { it.trim() }
+                .filter { it.startsWith("stremio:") }
+                .map { it.removePrefix("stremio:") }
+        } else {
+            emptyList()
+        }
+        val sharedAddons = if (activeOrderedStremioIds.isNotEmpty()) {
+            val addonMap = installed.associateBy { it.id }
+            val prioritized = activeOrderedStremioIds.mapNotNull { addonMap[it] }
+            val remaining = installed.filter { it.id !in activeOrderedStremioIds }
+            prioritized + remaining
+        } else {
+            installed
+        }
         val addonsByProfile = buildMap<String, List<Addon>> {
             profiles.forEach { profile ->
-                put(profile.id, sharedAddons)
+                val profileCustomOrder = prefs[profileManager.profileStringKeyFor(profile.id, "stream_providers_custom_order")].orEmpty()
+                val profileOrderedStremioIds = if (profileCustomOrder.isNotBlank()) {
+                    profileCustomOrder.split(",")
+                        .map { it.trim() }
+                        .filter { it.startsWith("stremio:") }
+                        .map { it.removePrefix("stremio:") }
+                } else {
+                    emptyList()
+                }
+                val profileAddons = if (profileOrderedStremioIds.isNotEmpty()) {
+                    val addonMap = installed.associateBy { it.id }
+                    val prioritized = profileOrderedStremioIds.mapNotNull { addonMap[it] }
+                    val remaining = installed.filter { it.id !in profileOrderedStremioIds }
+                    prioritized + remaining
+                } else {
+                    sharedAddons
+                }
+                put(profile.id, profileAddons)
             }
         }
         root.put("addonsByProfile", JSONObject(gson.toJson(addonsByProfile)))
         // Set-level timestamp so an intentional "removed everything" can be told apart from a blank
         // pull on apply (see reconcileAddonsWithCloud).
-        root.put("addonsUpdatedAt", streamRepository.getAddonsUpdatedAt())
+        root.put("addonsUpdatedAt", addonState.updatedAt)
+        root.put("addonChanges", JSONObject(gson.toJson(addonState.changes)))
+
+        // Separate refreshable manifest cache so older clients that omit newer manifest fields
+        // cannot overwrite cached catalogs/delegation metadata in the cloud snapshot.
+        val localManifestCache = streamRepository.getAddonMetadataCache().toMutableMap()
+        installed.forEach { addon ->
+            val manifest = addon.manifest ?: return@forEach
+            val key = normalizeAddonUrlKey(addon.url).ifBlank { addon.id }
+            if (key.isNotBlank()) {
+                val existing = localManifestCache[key]
+                if (existing == null || addon.metadataUpdatedAt >= existing.updatedAt) {
+                    localManifestCache[key] = AddonManifestCacheEntry(manifest, maxOf(existing?.updatedAt ?: 0L, addon.metadataUpdatedAt))
+                }
+            }
+        }
+        if (localManifestCache.isNotEmpty()) {
+            val metadataJson = JSONObject()
+            localManifestCache.forEach { (key, entry) ->
+                val obj = JSONObject()
+                obj.put("manifest", JSONObject(gson.toJson(entry.manifest)))
+                obj.put("catalogs", org.json.JSONArray(gson.toJson(entry.manifest.catalogs)))
+                obj.put("resources", org.json.JSONArray(gson.toJson(entry.manifest.resources)))
+                if (entry.updatedAt > 0L) obj.put("metadataUpdatedAt", entry.updatedAt)
+                metadataJson.put(key, obj)
+            }
+            root.put("addonMetadataByKey", metadataJson)
+        }
 
         // Catalogs per profile
         val catalogsByProfile = buildMap<String, List<CatalogConfig>> {
@@ -824,21 +1038,21 @@ class CloudSyncRepository @Inject constructor(
         root.put("iptvByProfile", JSONObject(gson.toJson(iptvByProfile)))
 
         // Watchlist per profile
-        val watchlistByProfile = buildMap<String, List<LocalWatchlistItem>> {
+        val watchlistByProfile = buildMap<String, WatchlistSyncState> {
             profiles.forEach { profile ->
-                put(profile.id, watchlistRepository.exportWatchlistForProfile(profile.id))
+                put(profile.id, watchlistRepository.exportSyncStateForProfile(profile.id))
             }
         }
-        root.put("watchlistByProfile", JSONObject(gson.toJson(watchlistByProfile)))
+        WatchlistCloudFields.put(root, watchlistByProfile)
 
         // Backward compatibility fields (legacy single-profile clients)
         root.put("addons", JSONArray(gson.toJson(sharedAddons)))
-        root.put("catalogs", JSONArray(gson.toJson(catalogRepository.getCatalogs())))
+        root.put("catalogs", JSONArray(gson.toJson(catalogRepository.getPersonalCatalogs())))
         root.put(
             "hiddenPreinstalledCatalogs",
             JSONArray(gson.toJson(catalogRepository.getHiddenPreinstalledCatalogIdsForActiveProfile()))
         )
-        val iptvConfig = iptvRepository.observeConfig().first()
+        val iptvConfig = iptvRepository.observePersonalConfig().first()
         root.put("iptvM3uUrl", iptvConfig.m3uUrl)
         root.put("iptvEpgUrl", iptvConfig.epgUrl)
         root.put("iptvFavoriteGroups", JSONArray(gson.toJson(iptvRepository.observeFavoriteGroups().first())))
@@ -863,7 +1077,12 @@ class CloudSyncRepository @Inject constructor(
 
         // Per-field last-writer-wins timestamps (multi-device merge). Diff-stamps any locally
         // changed scalar setting and embeds the map so push/apply can merge field-by-field.
-        root.put("fieldUpdatedAt", stampAndLoadFieldTs(root))
+        val capturedTimestamps = try {
+            prefs[cloudSyncFieldTsKey]?.let(::JSONObject) ?: JSONObject()
+        } catch (_: JSONException) {
+            JSONObject()
+        }
+        root.put("fieldUpdatedAt", stampAndLoadFieldTs(root, capturedTimestamps))
 
         return root.toString()
     }
@@ -918,6 +1137,7 @@ class CloudSyncRepository @Inject constructor(
             )
             return Result.failure(IllegalStateException("Not logged in"))
         }
+        val uploadedVersion = synchronized(dirtyStateLock) { localMutationVersion }
         val payload = try {
             buildCloudSnapshotJson()
         } catch (it: Throwable) {
@@ -960,7 +1180,7 @@ class CloudSyncRepository @Inject constructor(
                     applyCloudPayload(existingRemotePayload)
                 }
                 markCloudPayloadApplied(existingRemotePayload, existingRemotePayload.hashCode())
-                clearLocalDirtyAfterSuccessfulPush()
+                clearLocalDirtyAfterSuccessfulPush(uploadedVersion)
                 Log.i(TAG, "Restored richer remote snapshot before push")
                 Result.success(Unit)
             } catch (error: Throwable) {
@@ -977,13 +1197,31 @@ class CloudSyncRepository @Inject constructor(
         } else {
             payload
         }
+        val traktMerged = if (existingRemotePayload != null) {
+            mergeRemoteTraktTokens(groupOrderMerged, existingRemotePayload)
+        } else {
+            groupOrderMerged
+        }
+        val trackingMerged = if (existingRemotePayload != null) {
+            mergeRemoteTrackingPreferences(traktMerged, existingRemotePayload)
+        } else {
+            traktMerged
+        }
         // Field-level merge against the already-loaded remote: keep local fields we changed more
         // recently, but never overwrite a cloud field with an older local value. This is what stops
         // a stale device from reverting a peer's setting (even via the pull's pre-push).
-        val effectivePayload = if (existingRemotePayload != null) {
-            mergeSettingsByTimestamp(baseStr = groupOrderMerged, otherStr = existingRemotePayload).json
+        val timestampMerged = if (existingRemotePayload != null) {
+            mergeSettingsByTimestamp(baseStr = trackingMerged, otherStr = existingRemotePayload).json
         } else {
-            groupOrderMerged
+            trackingMerged
+        }
+
+        // The profile list merges into the account's instead of replacing it, so a device that
+        // missed another device's new profile cannot delete it (ProfileListMerge).
+        val effectivePayload = if (existingRemotePayload != null) {
+            mergeRemoteProfiles(timestampMerged, existingRemotePayload)
+        } else {
+            timestampMerged
         }
 
         val payloadHash = try {
@@ -1001,7 +1239,7 @@ class CloudSyncRepository @Inject constructor(
 
         val result = authRepository.saveAccountSyncPayload(effectivePayload)
         if (result.isSuccess) {
-            clearLocalDirtyAfterSuccessfulPush()
+            clearLocalDirtyAfterSuccessfulPush(uploadedVersion)
             lastPushedPayloadHash = payloadHash
             pushFailureCount = 0
             Log.i(TAG, "Push succeeded size=${payloadSizeBucket(effectivePayload)}")
@@ -1055,6 +1293,154 @@ class CloudSyncRepository @Inject constructor(
             }
             local.toString()
         } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; localPayload }
+    }
+
+    /**
+     * Tracking routing is a profile-scoped domain rather than a normal scalar setting. Keep the
+     * newest per-profile selection while pushing so a device that was already open cannot replace
+     * a newer Trakt/Simkl choice with its stale snapshot.
+     */
+    private fun mergeRemoteTrackingPreferences(localPayload: String, remotePayload: String): String {
+        return try {
+            val localRoot = JSONObject(localPayload)
+            val remoteRoot = JSONObject(remotePayload)
+            val remoteSelections = remoteRoot.optJSONObject("mdbListSyncByProfile")
+                ?: return localPayload
+            val localSelections = localRoot.optJSONObject("mdbListSyncByProfile")
+                ?: JSONObject().also { localRoot.put("mdbListSyncByProfile", it) }
+
+            val profileIds = remoteSelections.keys()
+            while (profileIds.hasNext()) {
+                val profileId = profileIds.next()
+                val remoteSelection = remoteSelections.optJSONObject(profileId) ?: continue
+                val localSelection = localSelections.optJSONObject(profileId)
+                if (localSelection == null) {
+                    localSelections.put(profileId, JSONObject(remoteSelection.toString()))
+                    continue
+                }
+
+                mergeTrackingRouting(localSelection, remoteSelection)
+                mergeTrackingCredential(
+                    local = localSelection,
+                    remote = remoteSelection,
+                    credentialField = "simklAccessToken",
+                    timestampField = "simklCredentialUpdatedAt"
+                )
+                mergeMdbListCredentials(
+                    local = localSelection,
+                    remote = remoteSelection
+                )
+            }
+            localRoot.toString()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            localPayload
+        }
+    }
+
+    private suspend fun mergeRemoteProfiles(localPayload: String, remotePayload: String): String {
+        val deletedHere = profileRepository.getDeletedProfileIds()
+        return try {
+            ProfileListMerge.merge(JSONObject(localPayload), JSONObject(remotePayload), deletedHere).toString()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.w(TAG, "Profile merge failed; keeping the remote profile list", e)
+            // Never fall back to the local list: that is the replacement this merge prevents.
+            try {
+                val local = JSONObject(localPayload)
+                val remote = JSONObject(remotePayload)
+                local.put("profiles", remote.optJSONArray("profiles") ?: return localPayload).toString()
+            } catch (_: Exception) {
+                localPayload
+            }
+        }
+    }
+
+    private fun mergeRemoteTraktTokens(localPayload: String, remotePayload: String): String {
+        return try {
+            val localRoot = JSONObject(localPayload)
+            val remoteTokens = JSONObject(remotePayload).optJSONObject("traktTokens")
+                ?: return localPayload
+            val localTokens = localRoot.optJSONObject("traktTokens")
+                ?: JSONObject().also { localRoot.put("traktTokens", it) }
+            val profileIds = remoteTokens.keys()
+            while (profileIds.hasNext()) {
+                val profileId = profileIds.next()
+                val remoteToken = remoteTokens.optJSONObject(profileId) ?: continue
+                val localToken = localTokens.optJSONObject(profileId)
+                val remoteUpdatedAt = remoteToken.optLong("updatedAt", 0L)
+                val localUpdatedAt = localToken?.optLong("updatedAt", 0L) ?: 0L
+                if (localToken == null || remoteUpdatedAt >= localUpdatedAt) {
+                    localTokens.put(profileId, JSONObject(remoteToken.toString()))
+                }
+            }
+            localRoot.toString()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            localPayload
+        }
+    }
+
+    private fun mergeTrackingRouting(local: JSONObject, remote: JSONObject) {
+        val remoteUpdatedAt = remote.optLong("updatedAt", 0L)
+        val localUpdatedAt = local.optLong("updatedAt", 0L)
+        if (remoteUpdatedAt < localUpdatedAt) return
+
+        listOf(
+            "provider",
+            "watchlistReadMode",
+            "continueWatchingReadMode",
+            "watchedReadMode",
+            "writeToTrakt",
+            "writeToSimkl",
+            "updatedAt"
+        ).forEach { field -> copyOptionalJsonField(local, remote, field) }
+    }
+
+    private fun mergeTrackingCredential(
+        local: JSONObject,
+        remote: JSONObject,
+        credentialField: String,
+        timestampField: String
+    ) {
+        val remoteUpdatedAt = remote.optLong(timestampField, 0L)
+        val localUpdatedAt = local.optLong(timestampField, 0L)
+        val remoteIsModern = remoteUpdatedAt > 0L
+        val remoteWins = remoteUpdatedAt > localUpdatedAt ||
+            (remoteIsModern && remoteUpdatedAt == localUpdatedAt)
+        val legacyRemoteCanRestore = remoteUpdatedAt == 0L && localUpdatedAt == 0L &&
+            remote.has(credentialField)
+        if (!remoteWins && !legacyRemoteCanRestore) return
+
+        copyOptionalJsonField(local, remote, credentialField)
+        copyOptionalJsonField(local, remote, timestampField)
+    }
+
+    private fun mergeMdbListCredentials(local: JSONObject, remote: JSONObject) {
+        val remoteUpdatedAt = remote.optLong("mdbListCredentialUpdatedAt", 0L)
+        val localUpdatedAt = local.optLong("mdbListCredentialUpdatedAt", 0L)
+        val remoteIsModern = remoteUpdatedAt > 0L
+        val remoteWins = remoteUpdatedAt > localUpdatedAt ||
+            (remoteIsModern && remoteUpdatedAt == localUpdatedAt)
+        val legacyRemoteCanRestore = remoteUpdatedAt == 0L && localUpdatedAt == 0L &&
+            (remote.has("mdbListApiKey") || remote.has("mdbListAccessToken"))
+        if (!remoteWins && !legacyRemoteCanRestore) return
+
+        listOf(
+            "mdbListApiKey",
+            "mdbListAccessToken",
+            "mdbListRefreshToken",
+            "mdbListTokenExpiresAt",
+            "mdbListCredentialUpdatedAt"
+        ).forEach { field -> copyOptionalJsonField(local, remote, field) }
+    }
+
+    private fun copyOptionalJsonField(target: JSONObject, source: JSONObject, field: String) {
+        if (source.has(field)) {
+            target.put(field, source.get(field))
+        } else {
+            target.remove(field)
+        }
     }
 
     // ══════════════════════════════════════════════════════════
@@ -1220,25 +1606,49 @@ class CloudSyncRepository @Inject constructor(
     /**
      * Applies a cloud JSON payload to all local repositories.
      */
+    /**
+     * Profile ids that have a non-Trakt tracker (MDBList or Simkl) configured in
+     * this snapshot. Those trackers decide which titles appear in Continue
+     * Watching but store only a percentage, so their saved resume positions have
+     * to be merged in rather than replaced, exactly as for Trakt.
+     */
+    private fun trackerProfileIdsFromPayload(root: JSONObject): Set<String> {
+        val json = root.optJSONObject("mdbListSyncByProfile")
+            ?.toString()
+            ?.takeIf { it.isNotBlank() }
+            ?: return emptySet()
+        return try {
+            val type = TypeToken.getParameterized(
+                Map::class.java,
+                String::class.java,
+                com.arflix.tv.data.repository.sync.SyncProviderStore.ProfileSyncSelection::class.java
+            ).type
+            val map: Map<String, com.arflix.tv.data.repository.sync.SyncProviderStore.ProfileSyncSelection> =
+                gson.fromJson(json, type) ?: emptyMap()
+            map.filterValues { selection ->
+                !selection.mdbListApiKey.isNullOrBlank() ||
+                    !selection.mdbListAccessToken.isNullOrBlank() ||
+                    !selection.simklAccessToken.isNullOrBlank()
+            }.keys.filter { it.isNotBlank() }.toSet()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            emptySet()
+        }
+    }
+
     private suspend fun applyCloudPayload(payload: String) {
         // Field-level merge BEFORE applying: overlay any local scalar setting that is NEWER than the
         // remote's onto the incoming payload, so a pull can't overwrite a not-yet-pushed local
         // change. `defaultSubtitle` is excluded (kept by its own subtitleSettingsUpdatedAt logic
-        // below). Skipped when the remote predates this feature (no `fieldUpdatedAt`) so rollout
-        // behaves exactly like today until every device is on the new code. The rest of this
-        // function then writes the merged values exactly as before.
-        val incomingHasFieldTs = try {
-            JSONObject(payload).optJSONObject("fieldUpdatedAt") != null
-        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; false }
-        val localSnapshotForMerge = if (incomingHasFieldTs) {
-            try { buildCloudSnapshotJson() } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
-        } else {
-            null
-        }
+        // below). Legacy payloads have timestamp zero; they must not undo a newer local deletion.
+        // The rest of this function writes the merged values exactly as before.
+        val localSnapshotForMerge = try {
+            buildCloudSnapshotJson()
+        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
         val settingsMerge = localSnapshotForMerge?.let {
             mergeSettingsByTimestamp(baseStr = payload, otherStr = it)
         }
-        val preservedLocalSettings = settingsMerge?.otherWonKeys?.isNotEmpty() == true
+        var preservedLocalSettings = settingsMerge?.otherWonKeys?.isNotEmpty() == true
         val root = JSONObject(settingsMerge?.json ?: payload)
 
         val fallbackDefaultSubtitle = root.optString("defaultSubtitle", "Off")
@@ -1256,7 +1666,9 @@ class CloudSyncRepository @Inject constructor(
         val avatarImagesById = root.optJSONObject("profileAvatarImagesById")
         root.optJSONArray("profiles")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
             val type = TypeToken.getParameterized(List::class.java, Profile::class.java).type
-            val profiles: List<Profile> = gson.fromJson(json, type) ?: emptyList()
+            val deletedIds = ProfileListMerge.deletedIds(root)
+            val profiles: List<Profile> = (gson.fromJson<List<Profile>>(json, type) ?: emptyList())
+                .filterNot { it.id in deletedIds }
             val activeProfileId = root.optString("activeProfileId").ifBlank { null }
             if (profiles.isNotEmpty()) {
                 val localProfilesById = profileRepository.getProfiles().associateBy { it.id }
@@ -1348,14 +1760,27 @@ class CloudSyncRepository @Inject constructor(
                                 .edit().putString("locale_tag", state.contentLanguage).apply()
                         }
 
-                        prefs[trailerAutoPlayKeyFor(profileId)] = state.trailerAutoPlay
+                        restoreHomePresentation(
+                            prefs, profileId, state.homePresentationVersion,
+                            state.trailerAutoPlay, state.netflixHomeStyle
+                        )
                         prefs[trailerSoundEnabledKeyFor(profileId)] = state.trailerSoundEnabled
                         prefs[trailerDelayKeyFor(profileId)] = state.trailerDelaySeconds.toString()
                         prefs[trailerInCardsKeyFor(profileId)] = state.trailerInCards
+                        state.watchlistOnHome?.let { prefs[watchlistOnHomeKeyFor(profileId)] = it }
+                        com.arflix.tv.util.restoreNavigationSections(prefs, profileId, state.hiddenNavigationSections)
                         prefs[clockFormatKeyFor(profileId)] = state.clockFormat
+                        // Older clients omit this field; keep the local preference in that case.
+                        state.guideRowCount?.let { count ->
+                            prefs[guideRowCountKeyFor(profileId)] =
+                                (count.takeIf { it in 6..10 } ?: 0).toString()
+                        }
                         prefs[showBudgetKeyFor(profileId)] = state.showBudget
                         prefs[showEpisodeRatingsKeyFor(profileId)] = state.showEpisodeRatings
+                        prefs[animeEpisodeStructuringKeyFor(profileId)] = state.animeEpisodeStructuring.ifBlank { AnimeStructuringStyle.BROADCAST.id }
+                        prefs[iptvFavoritesOnHomeKeyFor(profileId)] = state.iptvFavoritesOnHome
                         state.showLoadingStats?.let { prefs[showLoadingStatsKeyFor(profileId)] = it }
+                        state.showAddonStreamDetails?.let { prefs[com.arflix.tv.util.addonStreamDetailsKey(profileId)] = it }
                         prefs[spoilerBlurKeyFor(profileId)] = state.spoilerBlurEnabled
                         prefs[volumeBoostDbKeyFor(profileId)] = state.volumeBoostDb.coerceIn(0, 15).toString()
                         prefs[dnsProviderKeyFor(profileId)] = state.dnsProvider.ifBlank { "system" }
@@ -1372,6 +1797,7 @@ class CloudSyncRepository @Inject constructor(
                         prefs[subtitleStylizedKeyFor(profileId)] = state.subtitleStylized
                         prefs[secondarySubtitleKeyFor(profileId)] = state.secondarySubtitle.ifBlank { "Off" }
                         prefs[filterSubtitlesByLanguageKeyFor(profileId)] = state.filterSubtitlesByLanguage
+                        prefs[useForcedSubtitlesKeyFor(profileId)] = state.useForcedSubtitles
                         state.homeServerConnectionJson?.let { homeServerConnectionJson ->
                             homeServerConnectionsToImport[profileId] = homeServerConnectionJson
                         }
@@ -1387,7 +1813,32 @@ class CloudSyncRepository @Inject constructor(
                         prefs[autoPlayNextKeyFor(profileId)] = state.autoPlayNext
                         prefs[autoPlaySingleSourceKeyFor(profileId)] = state.autoPlaySingleSource
                         prefs[autoPlayMinQualityKeyFor(profileId)] = normalizeAutoPlayMinQuality(state.autoPlayMinQuality)
+                        // Older clients omit these fields; absence must not clear a local limit.
+                        state.autoPlayMaxQuality?.let { prefs[autoPlayMaxQualityKeyFor(profileId)] = AutoplayLimits.normalizeQuality(it) }
+                        state.autoPlayMaxSizeGb?.let { prefs[autoPlayMaxSizeKeyFor(profileId)] = AutoplayLimits.normalizeSizeGb(it) }
                         prefs[includeSpecialsKeyFor(profileId)] = state.includeSpecials
+                        streamIntegrationRepository.applyCloudSettingsForProfile(
+                            prefs = prefs,
+                            profileId = profileId,
+                            state = StreamIntegrationProfileCloudState(
+                                searchMode = state.streamSearchMode,
+                                customProviderOrder = state.streamProvidersCustomOrder,
+                                macroCategoryOrder = state.streamIntegrationsMacroOrder,
+                                macroEnabledMap = state.streamMacroEnabledMap,
+                                providerEnabledMap = state.streamProviderEnabledMap
+                            )
+                        )
+                        state.kidsCatalogApprovals?.let { approvals ->
+                            val approved = approvals.toSet()
+                            val members = KidsTrustedCatalogs.membersKey(profileId)
+                            val current = prefs[KidsTrustedCatalogs.approvalsKey(profileId)].orEmpty()
+                            prefs[KidsTrustedCatalogs.approvalsKey(profileId)] = approved
+                            // An approval removed on another device takes its titles with it here.
+                            val revoked = current - approved
+                            if (revoked.isNotEmpty()) {
+                                prefs[members] = KidsTrustedCatalogs.withoutCatalogs(prefs[members].orEmpty(), revoked)
+                            }
+                        }
                     }
                 }
             }
@@ -1423,6 +1874,12 @@ class CloudSyncRepository @Inject constructor(
                 prefs[autoPlayNextKeyFor(activeProfileId)] = fallbackAutoPlayNext
                 prefs[autoPlaySingleSourceKeyFor(activeProfileId)] = fallbackAutoPlaySingleSource
                 prefs[autoPlayMinQualityKeyFor(activeProfileId)] = fallbackAutoPlayMinQuality
+                if (root.has("autoPlayMaxQuality") && !root.isNull("autoPlayMaxQuality")) {
+                    prefs[autoPlayMaxQualityKeyFor(activeProfileId)] = AutoplayLimits.normalizeQuality(root.optString("autoPlayMaxQuality"))
+                }
+                if (root.has("autoPlayMaxSizeGb") && !root.isNull("autoPlayMaxSizeGb")) {
+                    prefs[autoPlayMaxSizeKeyFor(activeProfileId)] = AutoplayLimits.normalizeSizeGb(root.optInt("autoPlayMaxSizeGb"))
+                }
                 prefs[includeSpecialsKeyFor(activeProfileId)] = fallbackIncludeSpecials
                 prefs[dnsProviderKeyFor(activeProfileId)] = root.optString("dnsProvider", "system").ifBlank { "system" }
                 root.optString("subtitleUsageJson", "").let { usage ->
@@ -1498,11 +1955,22 @@ class CloudSyncRepository @Inject constructor(
                 if (root.has("dolbyVisionCompatEnabled")) {
                     prefs[dolbyVisionCompatKey] = root.optBoolean("dolbyVisionCompatEnabled", true)
                 }
+                if (root.has("telegramSearchOnClickOnly")) {
+                    prefs[com.arflix.tv.data.telegram.TelegramRepository.KEY_SEARCH_ON_CLICK_ONLY] =
+                        root.optBoolean("telegramSearchOnClickOnly", true)
+                }
+                if (root.has("subtitleHearingSyncV2")) {
+                    prefs[subtitleHearingSyncKey] = root.optBoolean("subtitleHearingSyncV2", true)
+                }
                 val apiKey = root.optString("subtitleAiApiKey", "")
                 if (apiKey.isNotBlank()) prefs[subtitleAiApiKeyKey] = apiKey
                 val model = root.optString("subtitleAiModel", "GROQ_LLAMA_70B")
                 if (model.isNotBlank()) prefs[subtitleAiModelKey] = model
                 prefs[subtitleRemoveHearingImpairedKey] = root.optBoolean("subtitleRemoveHearingImpaired", true)
+                // has() guards: backups from versions without Live TV AI subtitles must not reset them.
+                val live = com.arflix.tv.ui.screens.tv.live.aisubs.LiveAiSubsPrefs
+                if (root.has("liveAiSubsEnabled")) prefs[live.ENABLED] = root.optBoolean("liveAiSubsEnabled", false)
+                if (root.has("liveAiSubsAutoStart")) prefs[live.AUTO_START] = root.optBoolean("liveAiSubsAutoStart", false)
             }
         }
         if (preservedNewerLocalSubtitle) {
@@ -1544,114 +2012,65 @@ class CloudSyncRepository @Inject constructor(
         // ── Addons ──
         try {
             val cloudAddonsTs = root.optLong("addonsUpdatedAt", 0L)
-            val localAddonsTs = streamRepository.getAddonsUpdatedAt()
-            var appliedCloudAddons = false
+            val changeType = object : TypeToken<Map<String, AddonChange>>() {}.type
+            val changes: Map<String, AddonChange>? = root.optJSONObject("addonChanges")?.let {
+                gson.fromJson(it.toString(), changeType)
+            }
+            val cloudMetadataMap = parseAddonMetadataByKey(root)
+            if (cloudMetadataMap.isNotEmpty()) {
+                streamRepository.mergeAddonMetadataCache(cloudMetadataMap)
+            }
             root.optJSONObject("addonsByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
                 val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, Addon::class.java).type).type
                 val map: Map<String, List<Addon>> = gson.fromJson(json, type) ?: emptyMap()
-                val sharedAddons = mergeAddonsForSharedRestore(map.values)
-                val localAddons = streamRepository.installedAddons.first()
-                val (resolvedAddons, _) = reconcileAddonsWithCloud(sharedAddons, localAddons, cloudAddonsTs, localAddonsTs)
-                // Apply the reconciled list even when it is empty — an intentional "removed all"
-                // must propagate (reconcile only returns empty when the cloud set is genuinely newer;
-                // opensubtitles is re-enforced downstream so playback isn't left with nothing).
-                streamRepository.replaceSharedAddonsFromCloud(resolvedAddons)
-                appliedCloudAddons = true
+                val addonType = object : TypeToken<List<Addon>>() {}.type
+                val rootAddons: List<Addon> = root.optJSONArray("addons")?.let {
+                    gson.fromJson(it.toString(), addonType)
+                } ?: emptyList()
+                val sharedAddons = enrichAddonsFromCloudMetadata(
+                    mergeAddonsForSharedRestore(map.values + listOf(rootAddons)),
+                    cloudMetadataMap
+                )
+                streamRepository.applyAddonCloudState(sharedAddons, cloudAddonsTs, changes)
             }
             root.optJSONArray("addons")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
                 if (!root.has("addonsByProfile")) {
                     val type = TypeToken.getParameterized(List::class.java, Addon::class.java).type
                     val addons: List<Addon> = gson.fromJson(json, type) ?: emptyList()
-                    val localAddons = streamRepository.installedAddons.first()
-                    val (resolvedAddons, _) = reconcileAddonsWithCloud(addons, localAddons, cloudAddonsTs, localAddonsTs)
-                    streamRepository.replaceSharedAddonsFromCloud(resolvedAddons)
-                    appliedCloudAddons = true
+                    streamRepository.applyAddonCloudState(
+                        enrichAddonsFromCloudMetadata(addons, cloudMetadataMap),
+                        cloudAddonsTs,
+                        changes
+                    )
                 }
-            }
-            // Keep the local set-timestamp in step with the cloud we just adopted, so we don't
-            // re-adopt/loop on the next pull.
-            if (appliedCloudAddons && cloudAddonsTs > localAddonsTs) {
-                streamRepository.setAddonsUpdatedAt(cloudAddonsTs)
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             AppLogger.recordException(e, mapOf("error_area" to "CloudSync", "cloud_flow" to "apply_addons"))
         }
 
-        // ── Catalogs ──
+        // Catalog lists and their hidden IDs must be restored as one profile transaction.
         try {
-            root.optJSONObject("catalogsByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
-                val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, CatalogConfig::class.java).type).type
-                val map: Map<String, List<CatalogConfig>> = gson.fromJson(json, type) ?: emptyMap()
-                map.forEach { (profileId, catalogs) ->
-                    catalogRepository.replaceCatalogsForProfile(profileId, catalogs)
+            val byProfile = linkedMapOf<String, MutableMap<String, String>>()
+            for (field in CatalogCloudFields.fields) {
+                val profiles = root.optJSONObject(field) ?: continue
+                for (id in profiles.keys()) {
+                    val value = profiles.optJSONArray(id) ?: continue
+                    byProfile.getOrPut(id) { linkedMapOf() }[field] = value.toString()
                 }
             }
-            root.optJSONArray("catalogs")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
-                if (!root.has("catalogsByProfile")) {
-                    val type = TypeToken.getParameterized(List::class.java, CatalogConfig::class.java).type
-                    val catalogs: List<CatalogConfig> = gson.fromJson(json, type) ?: emptyList()
-                    if (catalogs.isNotEmpty()) {
-                        catalogRepository.replaceCatalogsForProfile(activeProfileId, catalogs)
-                    }
+            for ((legacy, field) in mapOf("catalogs" to "catalogsByProfile", "hiddenPreinstalledCatalogs" to "hiddenPreinstalledByProfile")) {
+                if (!root.has(field)) root.optJSONArray(legacy)?.let {
+                    byProfile.getOrPut(activeProfileId) { linkedMapOf() }[field] = it.toString()
                 }
+            }
+            val timestamps = root.optJSONObject("fieldUpdatedAt") ?: JSONObject()
+            for ((id, fields) in byProfile) {
+                if (catalogRepository.applyCloudCatalogs(id, fields, timestamps)) preservedLocalSettings = true
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             AppLogger.recordException(e, mapOf("error_area" to "CloudSync", "cloud_flow" to "apply_catalogs"))
-        }
-
-        // ── Hidden preinstalled catalogs ──
-        try {
-            root.optJSONObject("hiddenPreinstalledByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
-                val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, String::class.java).type).type
-                val map: Map<String, List<String>> = gson.fromJson(json, type) ?: emptyMap()
-                map.forEach { (profileId, hidden) ->
-                    catalogRepository.setHiddenPreinstalledCatalogIdsForProfile(profileId, hidden)
-                }
-            }
-            root.optJSONArray("hiddenPreinstalledCatalogs")?.toString()?.let { json ->
-                if (!root.has("hiddenPreinstalledByProfile")) {
-                    val hidden = if (json.isBlank()) {
-                        emptyList()
-                    } else {
-                        val type = TypeToken.getParameterized(List::class.java, String::class.java).type
-                        gson.fromJson<List<String>>(json, type) ?: emptyList()
-                    }
-                    catalogRepository.setHiddenPreinstalledCatalogIdsForProfile(activeProfileId, hidden)
-                }
-            }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            AppLogger.recordException(e, mapOf("error_area" to "CloudSync", "cloud_flow" to "apply_hidden_preinstalled"))
-        }
-
-        // ── Hidden addon catalogs ──
-        try {
-            root.optJSONObject("hiddenAddonByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
-                val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, String::class.java).type).type
-                val map: Map<String, List<String>> = gson.fromJson(json, type) ?: emptyMap()
-                map.forEach { (profileId, hidden) ->
-                    catalogRepository.setHiddenAddonCatalogIdsForProfile(profileId, hidden)
-                }
-            }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            AppLogger.recordException(e, mapOf("error_area" to "CloudSync", "cloud_flow" to "apply_hidden_addons"))
-        }
-
-        // ── Hidden Home Server catalogs ──
-        try {
-            root.optJSONObject("hiddenHomeServerByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
-                val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, String::class.java).type).type
-                val map: Map<String, List<String>> = gson.fromJson(json, type) ?: emptyMap()
-                map.forEach { (profileId, hidden) ->
-                    catalogRepository.setHiddenHomeServerCatalogIdsForProfile(profileId, hidden)
-                }
-            }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            AppLogger.recordException(e, mapOf("error_area" to "CloudSync", "cloud_flow" to "apply_hidden_home_server"))
         }
 
         // ── IPTV config + favorites ──
@@ -1661,7 +2080,10 @@ class CloudSyncRepository @Inject constructor(
                 val type = TypeToken.getParameterized(Map::class.java, String::class.java, IptvCloudProfileState::class.java).type
                 val map: Map<String, IptvCloudProfileState> = gson.fromJson(json, type) ?: emptyMap()
                 map.forEach { (profileId, state) ->
-                    iptvRepository.importCloudConfigForProfile(profileId, state)
+                    val preserved = iptvRepository.importCloudConfigForProfile(
+                        profileId, state, root.optJSONObject("fieldUpdatedAt") ?: JSONObject(),
+                    )
+                    if (preserved) preservedLocalSettings = true
                     if (profileId == activeProfileId) {
                         importedActiveProfileIptv = true
                     }
@@ -1685,7 +2107,7 @@ class CloudSyncRepository @Inject constructor(
                     gson.fromJson<List<String>>(j, type) ?: emptyList()
                 }
             }
-            val localIptv = iptvRepository.observeConfig().first()
+            val localIptv = iptvRepository.observePersonalConfig().first()
             val cloudHasIptvData = m3u.isNotBlank() || epg.isNotBlank() || favorites.isNotEmpty() || favoriteChannels.isNotEmpty()
             val localHasIptvData = localIptv.m3uUrl.isNotBlank() || localIptv.epgUrl.isNotBlank()
             var importedLegacyIptv = false
@@ -1707,17 +2129,15 @@ class CloudSyncRepository @Inject constructor(
         }
 
         // ── Watchlist ──
+        var preservedLocalWatchlist = false
         try {
-            root.optJSONObject("watchlistByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
-                val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, LocalWatchlistItem::class.java).type).type
-                val map: Map<String, List<LocalWatchlistItem>> = gson.fromJson(json, type) ?: emptyMap()
-                map.forEach { (profileId, items) ->
-                    // Restore the cloud mirror for every profile, including Trakt profiles.
-                    // Trakt remains the source of truth after a successful live sync, but
-                    // skipping this cache made fresh installs show an empty watchlist while
-                    // auth/network refresh was still settling or failed.
-                    watchlistRepository.importWatchlistForProfile(profileId, items)
-                }
+            // Use the actual remote watchlist; comparing against the pre-merged root would hide
+            // pending local operations and prevent them being uploaded after a remote-first pull.
+            val remoteWatchlists = WatchlistCloudFields.states(JSONObject(payload))
+            val watchlistProfiles = profileRepository.getProfiles().map { it.id }.toSet()
+            watchlistProfiles.forEach { profileId ->
+                val state = remoteWatchlists[profileId] ?: WatchlistSyncState()
+                preservedLocalWatchlist = watchlistRepository.importWatchlistForProfile(profileId, state.items, state.changes) || preservedLocalWatchlist
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -1738,8 +2158,19 @@ class CloudSyncRepository @Inject constructor(
 
         // ── Local Continue Watching ──
         try {
-            // Only import local CW for profiles that DON'T have Trakt connected.
-            // For Trakt profiles, CW is sourced exclusively from Trakt's progress API.
+            // A profile with no tracker takes the snapshot as its Continue
+            // Watching list outright, because that list is all it has.
+            //
+            // A profile on any tracker takes it as resume positions only: the
+            // tracker decides which titles appear, but cannot say where to
+            // resume them, because every tracker here records a percentage and
+            // none records a position. Skipping this import for tracker
+            // profiles — as this used to for Trakt — left every cross-device
+            // resume to be guessed from that percentage against a generic
+            // catalogue runtime, which is how "continue from" drifted minutes
+            // away from the real position. Those entries are merged rather than
+            // applied wholesale, so a stale snapshot from one device cannot
+            // revive titles or overwrite newer progress made on another.
             root.optJSONObject("localContinueWatchingByProfile")?.toString()?.takeIf { it.isNotBlank() }?.let { json ->
                 val type = TypeToken.getParameterized(Map::class.java, String::class.java, TypeToken.getParameterized(List::class.java, ContinueWatchingItem::class.java).type).type
                 val map: Map<String, List<ContinueWatchingItem>> = gson.fromJson(json, type) ?: emptyMap()
@@ -1760,7 +2191,7 @@ class CloudSyncRepository @Inject constructor(
                     .orEmpty()
 
                 traktTokens.forEach { (profileId, token) ->
-                    if (profileId.isNotBlank() && token.accessToken.isNotBlank()) {
+                    if (profileId.isNotBlank() && !token.accessToken.isNullOrBlank()) {
                         traktProfiles.add(profileId)
                     }
                 }
@@ -1776,9 +2207,17 @@ class CloudSyncRepository @Inject constructor(
                     traktProfiles.add(activeProfileIdLocal)
                 }
 
-                val nonTraktOnly = map.filterKeys { it !in traktProfiles }
-                if (nonTraktOnly.isNotEmpty()) {
-                    traktRepository.importLocalContinueWatchingForProfiles(nonTraktOnly)
+                // MDBList and Simkl have the same percentage-only limitation as
+                // Trakt, so their profiles need the same treatment.
+                val trackedProfiles = traktProfiles + trackerProfileIdsFromPayload(root)
+
+                val untrackedOnly = map.filterKeys { it !in trackedProfiles }
+                if (untrackedOnly.isNotEmpty()) {
+                    traktRepository.importLocalContinueWatchingForProfiles(untrackedOnly)
+                }
+                val trackedOnly = map.filterKeys { it in trackedProfiles }
+                if (trackedOnly.isNotEmpty()) {
+                    traktRepository.mergeLocalContinueWatchingForProfiles(trackedOnly)
                 }
             }
         } catch (e: Exception) {
@@ -1828,10 +2267,11 @@ class CloudSyncRepository @Inject constructor(
         // does not see remote-applied values as fresh local changes (ping-pong guard). If we
         // preserved a newer-local setting, mark dirty so it gets pushed up — safe now that push
         // merges by timestamp and can't revert a peer.
-        if (incomingHasFieldTs) {
+        if (root.has("fieldUpdatedAt")) {
             persistFieldStateFromApplied(root)
             if (preservedLocalSettings) markLocalStateDirty()
         }
+        if (preservedLocalWatchlist) markLocalStateDirty()
 
         System.err.println("[CLOUD-SYNC] Full cloud restore applied successfully")
     }

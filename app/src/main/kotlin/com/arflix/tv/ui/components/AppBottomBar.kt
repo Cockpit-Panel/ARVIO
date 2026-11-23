@@ -1,5 +1,15 @@
 package com.arflix.tv.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.runtime.staticCompositionLocalOf
+import com.arflix.tv.ui.skin.resolveAccentColor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,10 +22,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -41,23 +55,33 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.annotation.StringRes
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.sp
-import androidx.tv.material3.ExperimentalTvMaterial3Api
-import androidx.tv.material3.Icon
-import androidx.tv.material3.Text
-import com.arflix.tv.R
-import com.arflix.tv.ui.theme.ArflixTypography
-import com.arflix.tv.ui.theme.appBackgroundDark
-import com.arflix.tv.ui.theme.TextPrimary
-import com.arflix.tv.ui.theme.TextSecondary
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material3.ripple
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.RectangleShape
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.hazeChild
 import com.arflix.tv.util.LocalDeviceType
+import com.arflix.tv.R
+import com.arflix.tv.navigation.Screen
+import androidx.compose.material3.Icon
+import kotlin.math.roundToInt
 
 internal enum class AppBottomBarMode {
     STANDARD,
-    LANDSCAPE_COMPACT,
+    LANDSCAPE_RAIL,
 }
 
 internal data class AppBottomBarSpec(
@@ -79,37 +103,100 @@ internal fun appBottomBarMode(
     screenHeightDp: Int,
 ): AppBottomBarMode = if (
     isTouchDevice &&
-    smallestScreenWidthDp < 600 &&
     screenWidthDp > screenHeightDp
 ) {
-    AppBottomBarMode.LANDSCAPE_COMPACT
+    AppBottomBarMode.LANDSCAPE_RAIL
 } else {
     AppBottomBarMode.STANDARD
 }
 
 internal fun appBottomBarSpec(mode: AppBottomBarMode): AppBottomBarSpec = when (mode) {
-    AppBottomBarMode.LANDSCAPE_COMPACT -> AppBottomBarSpec(
-        itemHeightDp = 48,
-        rowVerticalPaddingDp = 2,
+    AppBottomBarMode.LANDSCAPE_RAIL -> AppBottomBarSpec(
+        itemHeightDp = 52,
+        rowVerticalPaddingDp = 8,
         itemVerticalPaddingDp = 0,
-        itemSpacingDp = 1,
-        iconHorizontalPaddingDp = 10,
-        iconVerticalPaddingDp = 2,
-        iconSizeDp = 20,
-        indicatorSizeDp = 3,
-        labelFontSizeSp = 8,
+        itemSpacingDp = 0,
+        iconHorizontalPaddingDp = 0,
+        iconVerticalPaddingDp = 0,
+        iconSizeDp = 25,
+        indicatorSizeDp = 4,
+        labelFontSizeSp = 11,
     )
     AppBottomBarMode.STANDARD -> AppBottomBarSpec(
-        itemHeightDp = null,
-        rowVerticalPaddingDp = 6,
-        itemVerticalPaddingDp = 2,
-        itemSpacingDp = 2,
-        iconHorizontalPaddingDp = 14,
-        iconVerticalPaddingDp = 4,
-        iconSizeDp = 24,
+        itemHeightDp = 64,
+        rowVerticalPaddingDp = 0,
+        itemVerticalPaddingDp = 0,
+        itemSpacingDp = 0,
+        iconHorizontalPaddingDp = 0,
+        iconVerticalPaddingDp = 0,
+        iconSizeDp = 25,
         indicatorSizeDp = 4,
-        labelFontSizeSp = 10,
+        labelFontSizeSp = 11,
     )
+}
+
+internal const val LANDSCAPE_RAIL_WIDTH_DP = 64
+
+internal data class AppBottomBarClearance(val scrollInsetDp: Float, val fullHeightDp: Float)
+
+internal fun appBottomBarClearance(
+    mode: AppBottomBarMode,
+    showBottomBar: Boolean,
+    screenHeightDp: Int,
+    measuredHeightDp: Float,
+    navigationInsetDp: Float,
+): AppBottomBarClearance {
+    if (!showBottomBar) return AppBottomBarClearance(0f, 0f)
+    if (mode == AppBottomBarMode.LANDSCAPE_RAIL) {
+        // The rail reserves horizontal space; only the system gesture area remains below content.
+        return AppBottomBarClearance(navigationInsetDp, navigationInsetDp)
+    }
+    // Standard bar measurements already include navigationBarsPadding().
+    val fullHeight = maxOf(measuredHeightDp, (appBottomBarSpec(mode).itemHeightDp ?: 52) + navigationInsetDp)
+    return AppBottomBarClearance(fullHeight, fullHeight)
+}
+
+/** Only interactive navigation avoids a side cutout; full-width screens may draw beneath it. */
+internal fun navigationRailCutoutInsetPx(
+    systemLeftInsetPx: Int,
+    cutoutLeftInsetPx: Int,
+    systemRightInsetPx: Int,
+    cutoutRightInsetPx: Int,
+    layoutDirection: LayoutDirection,
+): Int {
+    val systemStart = if (layoutDirection == LayoutDirection.Ltr) systemLeftInsetPx else systemRightInsetPx
+    val cutoutStart = if (layoutDirection == LayoutDirection.Ltr) cutoutLeftInsetPx else cutoutRightInsetPx
+    return (cutoutStart - systemStart).coerceAtLeast(0)
+}
+
+internal fun mobileContentInsets(
+    systemBars: WindowInsets,
+    showBottomBar: Boolean = false,
+    edgeToEdgeTop: Boolean = false,
+): WindowInsets = systemBars.only(
+    if (edgeToEdgeTop) WindowInsetsSides.Horizontal else WindowInsetsSides.Top + WindowInsetsSides.Horizontal
+)
+
+internal fun shouldShowBottomBar(
+    isMobile: Boolean,
+    currentRoute: String?,
+    isFullscreenRoute: Boolean,
+    isSettingsSubPage: Boolean = false,
+    isTvSubScreen: Boolean = false,
+): Boolean {
+    if (!isMobile || currentRoute == null || isFullscreenRoute) return false
+    val route = currentRoute.substringBefore('?')
+    if (route == "settings" && isSettingsSubPage || route == "tv" && isTvSubScreen) return false
+
+    // Only main screens show the bottom navigation bar; subscreens (Details, Collection, CategoryViewAll, sub-settings, TV group guide, etc.) do not
+    return when {
+        route == Screen.Home.route -> true
+        route == Screen.Search.route -> true
+        route == Screen.Watchlist.route -> true
+        route == "tv" -> true
+        route == "settings" -> true
+        else -> false
+    }
 }
 
 data class BottomBarItem(
@@ -126,126 +213,148 @@ val bottomBarItems = listOf(
     BottomBarItem(R.string.settings, Icons.Default.Settings, "settings")
 )
 
-@OptIn(ExperimentalTvMaterial3Api::class)
+/** Bottom clearance applied inside scrolling content rather than to its viewport. */
+val LocalBottomBarInset = staticCompositionLocalOf { 0.dp }
+
+/** Full height of the bottom bar including system navigation bar insets when visible. */
+val LocalBottomBarHeight = staticCompositionLocalOf { 0.dp }
+
+@Composable
+internal fun currentAppBottomBarMode(): AppBottomBarMode {
+    val config = LocalConfiguration.current
+    return appBottomBarMode(LocalDeviceType.current.isTouchDevice(),
+        config.smallestScreenWidthDp, config.screenWidthDp, config.screenHeightDp)
+}
+
+@Composable
+internal fun currentBottomBarSpec(): AppBottomBarSpec =
+    appBottomBarSpec(currentAppBottomBarMode())
+
 @Composable
 fun AppBottomBar(
     currentRoute: String?,
     onNavigate: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    hazeState: HazeState? = null,
+    currentProfile: com.arflix.tv.data.model.Profile? = null,
+    onSwitchProfile: () -> Unit = {},
 ) {
-    val configuration = LocalConfiguration.current
-    val mode = appBottomBarMode(
-        isTouchDevice = LocalDeviceType.current.isTouchDevice(),
-        smallestScreenWidthDp = configuration.smallestScreenWidthDp,
-        screenWidthDp = configuration.screenWidthDp,
-        screenHeightDp = configuration.screenHeightDp,
-    )
+    val mode = currentAppBottomBarMode()
     val spec = appBottomBarSpec(mode)
+    val isRail = mode == AppBottomBarMode.LANDSCAPE_RAIL
+    val accent = resolveAccentColor(fallback = Color.White)
+    val barHeight = maxOf((spec.itemHeightDp ?: 64).toFloat(), 34f + 28f * androidx.compose.ui.platform.LocalDensity.current.fontScale).dp
+    val surfaceShape = RectangleShape
 
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(appBackgroundDark().copy(alpha = 0.95f))
-            .navigationBarsPadding()
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Color.White.copy(alpha = 0.08f))
-        )
+    // A single dark fade stays readable over artwork without live backdrop blur.
+    val baseModifier = modifier.background(
+        Brush.verticalGradient(0f to Color.Transparent, 0.28f to Color.Black.copy(alpha = 0.9f), 1f to Color.Black)
+    )
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = spec.rowVerticalPaddingDp.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
+    val items = bottomBarItems.filter {
+        com.arflix.tv.util.isNavigationSectionVisible(it.route, NavigationVisibility.hiddenSections, KidsNavigation.hideLiveTv)
+    }
+    if (isRail) {
+        Column(
+            modifier = baseModifier
+                .width(LANDSCAPE_RAIL_WIDTH_DP.dp)
+                .fillMaxHeight()
+                .navigationBarsPadding()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            bottomBarItems.forEach { item ->
-                val isSelected = currentRoute?.contains(item.route, ignoreCase = true) == true
-                var isFocused by remember { mutableStateOf(false) }
-                val label = stringResource(item.labelRes)
-
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .then(
-                            spec.itemHeightDp?.let { heightDp -> Modifier.heightIn(min = heightDp.dp) }
-                                ?: Modifier
-                        )
-                        .clip(RoundedCornerShape(8.dp))
-                        .then(
-                            if (isFocused) Modifier.border(2.dp, Color.White.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
-                            else Modifier
-                        )
-                        .background(if (isFocused) Color.White.copy(alpha = 0.1f) else Color.Transparent)
-                        .focusable()
-                        .onFocusChanged { isFocused = it.isFocused }
-                        .onKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyDown && (event.key == Key.Enter || event.key == Key.DirectionCenter)) {
-                                onNavigate(item.route)
-                                true
-                            } else false
-                        }
-                        .clickable { onNavigate(item.route) }
-                        .padding(vertical = spec.itemVerticalPaddingDp.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(
-                        space = spec.itemSpacingDp.dp,
-                        alignment = Alignment.CenterVertically,
-                    )
-                ) {
+            // Only the upper group scrolls on very short windows. Settings stays pinned below it.
+            Column(
+                modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (currentProfile != null) {
                     Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(
-                                when {
-                                    isFocused -> Color.White.copy(alpha = 0.18f)
-                                    isSelected -> Color.White.copy(alpha = 0.12f)
-                                    else -> Color.Transparent
-                                }
-                            )
-                            .padding(
-                                horizontal = spec.iconHorizontalPaddingDp.dp,
-                                vertical = spec.iconVerticalPaddingDp.dp,
-                            ),
-                        contentAlignment = Alignment.Center
+                        modifier = Modifier.size(48.dp)
+                            .clickable(onClickLabel = stringResource(R.string.switch_profile), onClick = onSwitchProfile),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            imageVector = item.icon,
-                            contentDescription = label,
-                            tint = when {
-                                isFocused -> Color.White
-                                isSelected -> TextPrimary
-                                else -> TextSecondary.copy(alpha = 0.6f)
-                            },
-                            modifier = Modifier.size(spec.iconSizeDp.dp)
-                        )
+                        Box(Modifier.size(32.dp).clip(CircleShape)) {
+                            ProfileAvatarVisual(profile = currentProfile, letterFontSize = 14.sp, iconPadding = 4.dp)
+                        }
                     }
-                    if (isSelected) {
-                        Box(
-                            modifier = Modifier
-                                .size(spec.indicatorSizeDp.dp)
-                                .clip(CircleShape)
-                                .background(if (isFocused) Color.White else TextPrimary)
-                        )
-                    } else {
-                        Spacer(modifier = Modifier.size(spec.indicatorSizeDp.dp))
-                    }
-                    Text(
-                        text = label,
-                        style = ArflixTypography.caption.copy(fontSize = spec.labelFontSizeSp.sp),
-                        color = when {
-                            isFocused -> Color.White
-                            isSelected -> TextPrimary
-                            else -> TextSecondary.copy(alpha = 0.6f)
-                        },
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                    )
+                }
+                items.filter { it.route != "settings" }.forEach { item ->
+                    BottomBarItemButton(item, currentRoute, onNavigate, spec, accent, Modifier.height(48.dp))
                 }
             }
+            items.firstOrNull { it.route == "settings" }?.let { item ->
+                BottomBarItemButton(item, currentRoute, onNavigate, spec, accent, Modifier.height(48.dp))
+            }
+        }
+    } else {
+        Column(
+            modifier = baseModifier.fillMaxWidth()
+                .navigationBarsPadding()
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().height(barHeight),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                items.forEach { item ->
+                    BottomBarItemButton(item, currentRoute, onNavigate, spec, accent, Modifier.weight(1f).fillMaxHeight())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BottomBarItemButton(
+    item: BottomBarItem,
+    currentRoute: String?,
+    onNavigate: (String) -> Unit,
+    spec: AppBottomBarSpec,
+    accent: Color,
+    modifier: Modifier,
+) {
+    val isSelected = currentRoute?.substringBefore('?') == item.route
+    val haptic = LocalHapticFeedback.current
+    var isFocused by remember { mutableStateOf(false) }
+    val label = stringResource(item.labelRes)
+    val iconColor by animateColorAsState(
+        targetValue = if (isSelected || isFocused) accent else Color.White.copy(alpha = 0.55f),
+        animationSpec = tween(180),
+        label = "navigation_icon_color"
+    )
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .semantics { contentDescription = label }
+            .selectable(
+                selected = isSelected,
+                role = Role.Tab,
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(bounded = false, radius = 24.dp),
+                onClick = {
+                    if (!isSelected) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    }
+                    onNavigate(item.route)
+                }
+            )
+            .onFocusChanged { isFocused = it.isFocused }
+            .then(if (isFocused) Modifier.border(1.dp, accent, CircleShape) else Modifier),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Icon(
+            imageVector = item.icon,
+            contentDescription = null,
+            tint = iconColor,
+            modifier = Modifier.size(spec.iconSizeDp.dp)
+        )
+        androidx.compose.material3.Text(label, color = iconColor, fontSize = spec.labelFontSizeSp.sp,
+            lineHeight = 14.sp, maxLines = 2, textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 2.dp))
         }
     }
 }

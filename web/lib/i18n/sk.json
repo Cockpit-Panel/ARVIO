@@ -1,0 +1,9 @@
+{
+  "Play {value0}": "Prehrať {value0}",
+  "Collection": "Kolekcia",
+  "Watching": "Práve sledujem",
+  "Completed": "Dokončené",
+  "Dropped": "Zanechané",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: použite adresu kompatibilnú s Jellyfin. Voliteľný profil: username#ProfileName. Chránený profil: password#PIN.",
+  "None of your enabled addons provide playback sources.": "Žiadny z vašich povolených doplnkov neposkytuje zdroje prehrávania."
+}

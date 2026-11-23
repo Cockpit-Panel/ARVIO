@@ -1,8 +1,11 @@
+import { addonServesOwnMeta, nativeStreamTarget } from "./addonNative";
+import { isYouTubeItem, youTubeStreams } from "./youtubeCollection";
 import { jsonRequest, proxiedUrl } from "./http";
 import { hasResolverConfig } from "./config";
 import { getResolverStreamsProgressive } from "./resolver";
 import { loadStored, saveStored } from "./storage";
 import { isBrowserPlayableStream, isIosPlayableStream } from "./streamCompatibility";
+import { isInformationalAddonStream } from "./addonStreamInfo";
 import type { AddonCatalog, InstalledAddon, MediaItem, StreamSource, SubtitleTrack } from "./types";
 
 const ADDON_KEY = "arvio.web.installed.addons";
@@ -18,6 +21,7 @@ type RawManifest = {
   idPrefixes?: string[];
   catalogs?: AddonCatalog[] | Record<string, unknown>;
   resources?: Array<string | { name?: string; types?: string[]; idPrefixes?: string[] }>;
+  behaviorHints?: { adult?: boolean; p2p?: boolean; configurable?: boolean; configurationRequired?: boolean };
 };
 
 type RawStream = {
@@ -108,6 +112,10 @@ function normalizeResources(resources: unknown) {
   });
 }
 
+function stringList(values: unknown) {
+  return Array.isArray(values) ? values.filter((value): value is string => typeof value === "string") : undefined;
+}
+
 function normalizeCatalogs(catalogs: unknown) {
   return Array.isArray(catalogs) ? catalogs.filter((catalog): catalog is AddonCatalog => Boolean(catalog && typeof catalog === "object")) : [];
 }
@@ -121,11 +129,18 @@ export function normalizeAddon(addon: unknown): InstalledAddon | null {
     logo?: string | null;
     background?: string | null;
     isEnabled?: boolean;
+    manifest?: RawManifest | null;
   };
   const manifestUrl = manifestUrlFor(raw as InstalledAddon);
   if (!manifestUrl) return null;
   const id = typeof raw.id === "string" && raw.id ? raw.id : manifestUrl;
   const enabled = raw.enabled !== false && raw.isEnabled !== false;
+  // Android-installed entries carry catalogs/resources/types/idPrefixes only
+  // inside `manifest`; without this fallback their collections and catalog
+  // rows cannot find the addon on web.
+  const manifest = raw.manifest && typeof raw.manifest === "object" ? raw.manifest : undefined;
+  const pick = <T,>(own: T[] | undefined, fallback: unknown) =>
+    Array.isArray(own) && own.length ? own : Array.isArray(fallback) ? fallback : own;
   return {
     // CRITICAL: preserve every field we don't understand. The Android app's
     // addon entries carry `type`/`url`/`transportUrl`/`isInstalled`/`manifest`
@@ -139,10 +154,10 @@ export function normalizeAddon(addon: unknown): InstalledAddon | null {
     version: typeof raw.version === "string" && raw.version ? raw.version : "1.0.0",
     manifestUrl,
     description: raw.description ?? null,
-    catalogs: normalizeCatalogs(raw.catalogs),
-    resources: normalizeResources(raw.resources),
-    types: Array.isArray(raw.types) ? raw.types.filter((type): type is string => typeof type === "string") : undefined,
-    idPrefixes: Array.isArray(raw.idPrefixes) ? raw.idPrefixes.filter((prefix): prefix is string => typeof prefix === "string") : undefined,
+    catalogs: normalizeCatalogs(pick(raw.catalogs, manifest?.catalogs)),
+    resources: normalizeResources(pick(raw.resources, manifest?.resources)),
+    types: stringList(pick(raw.types, manifest?.types)),
+    idPrefixes: stringList(pick(raw.idPrefixes, manifest?.idPrefixes)),
     logo: raw.logo ?? null,
     background: raw.background ?? null,
     enabled,
@@ -179,30 +194,42 @@ export function saveLocalAddons(addons: InstalledAddon[]) {
   saveStored(ADDON_KEY, normalizeAddons(addons));
 }
 
-export async function installAddon(rawUrl: string) {
-  const manifestUrl = normalizeManifestUrl(rawUrl);
-  const manifest = await addonJsonRequest<RawManifest>(manifestUrl);
+function buildAddonFromManifest(
+  manifestUrl: string,
+  manifest: RawManifest,
+  existing?: Partial<InstalledAddon> & { setupUpdatedAt?: number }
+): InstalledAddon {
+  const now = Date.now();
   const resourceNames = (manifest.resources ?? [])
     .map((resource) => typeof resource === "string" ? resource : (resource as { name?: string } | null)?.name ?? "")
     .filter(Boolean);
   const subtitleOnly = resourceNames.includes("subtitles") && !resourceNames.includes("stream");
+  const enabled = existing?.enabled ?? (manifest.behaviorHints?.configurationRequired !== true);
+  const setupUpdatedAt = existing?.setupUpdatedAt && existing.setupUpdatedAt > 0 ? existing.setupUpdatedAt : now;
+  const resolvedName = typeof existing?.name === "string" && existing.name.trim()
+    ? existing.name
+    : (manifest.name ?? "Unnamed addon");
+
   return normalizeAddon({
-    id: manifest.id ?? manifestUrl,
-    name: manifest.name ?? "Unnamed addon",
-    version: manifest.version ?? "1.0.0",
+    ...(existing as Record<string, unknown>),
+    id: existing?.id || manifest.id || manifestUrl,
+    name: resolvedName,
+    version: manifest.version ?? existing?.version ?? "1.0.0",
     manifestUrl,
-    description: manifest.description ?? null,
+    description: manifest.description ?? existing?.description ?? null,
     catalogs: manifest.catalogs,
     resources: manifest.resources,
     types: manifest.types,
     idPrefixes: manifest.idPrefixes,
-    logo: manifest.logo ?? null,
-    background: manifest.background ?? null,
-    enabled: true,
+    logo: manifest.logo ?? existing?.logo ?? null,
+    background: manifest.background ?? existing?.background ?? null,
+    enabled,
+    setupUpdatedAt,
+    metadataUpdatedAt: now,
     // Android-app compatibility: its Addon model needs these to parse and use
     // a cloud-synced entry (see normalizeAddon comment).
     isInstalled: true,
-    isEnabled: true,
+    isEnabled: enabled,
     type: subtitleOnly ? "SUBTITLE" : "COMMUNITY",
     runtimeKind: "STREMIO",
     installSource: "DIRECT_URL",
@@ -227,11 +254,61 @@ export async function installAddon(rawUrl: string) {
       catalogs: (Array.isArray(manifest.catalogs) ? manifest.catalogs : []).map((catalog) => ({
         type: String((catalog as { type?: string })?.type ?? "movie"),
         id: String((catalog as { id?: string })?.id ?? ""),
-        name: String((catalog as { name?: string })?.name ?? (catalog as { id?: string })?.id ?? "")
+        name: String((catalog as { name?: string })?.name ?? (catalog as { id?: string })?.id ?? ""),
+        extra: catalog.extra,
+        clientDelegate: typeof catalog.clientDelegate === "string" ? catalog.clientDelegate : undefined,
+        clientFilter: typeof catalog.clientFilter === "string" ? catalog.clientFilter : undefined
       })),
-      behaviorHints: {}
+      // Same booleans as Android's AddonBehaviorHints; "configurable" drives the Configure link.
+      behaviorHints: {
+        adult: manifest.behaviorHints?.adult === true,
+        p2p: manifest.behaviorHints?.p2p === true,
+        configurable: manifest.behaviorHints?.configurable === true,
+        configurationRequired: manifest.behaviorHints?.configurationRequired === true
+      }
     }
   })!;
+}
+
+export async function installAddon(rawUrl: string) {
+  const manifestUrl = normalizeManifestUrl(rawUrl);
+  const manifest = await addonJsonRequest<RawManifest>(manifestUrl);
+  return buildAddonFromManifest(manifestUrl, manifest);
+}
+
+/**
+ * Re-fetches manifest metadata while keeping the user's configured URL,
+ * custom name, and enabled state intact.
+ */
+export async function refreshAddonManifest(addon: InstalledAddon): Promise<InstalledAddon> {
+  const manifestUrl = manifestUrlFor(addon);
+  if (!manifestUrl) return addon;
+  const manifest = await addonJsonRequest<RawManifest>(manifestUrl);
+  return buildAddonFromManifest(manifestUrl, manifest, addon);
+}
+
+export async function refreshStaleAddons(
+  addons: InstalledAddon[],
+  maxAgeMs = 15 * 60_000
+): Promise<{ addons: InstalledAddon[]; refreshed: number }> {
+  const now = Date.now();
+  let refreshed = 0;
+  const updated = await Promise.all(addons.map(async (addon) => {
+    if (addon.enabled === false) return addon;
+    const url = manifestUrlFor(addon);
+    if (!url || url === BUILTIN_OPENSUBTITLES.manifestUrl) return addon;
+    const age = now - Number(addon.metadataUpdatedAt || 0);
+    const missingMeta = !addon.metadataUpdatedAt || !Array.isArray(addon.catalogs);
+    if (!missingMeta && age < maxAgeMs) return addon;
+    try {
+      const next = await refreshAddonManifest(addon);
+      refreshed++;
+      return next;
+    } catch {
+      return addon;
+    }
+  }));
+  return { addons: updated, refreshed };
 }
 
 export async function getStreams(addons: InstalledAddon[], item: MediaItem, season?: number, episode?: number) {
@@ -245,20 +322,53 @@ export async function getStreamsProgressive(
   episode?: number,
   onUpdate?: (streams: StreamSource[], batch: StreamSource[]) => void
 ) {
+  const update = onUpdate ? (streams: StreamSource[], batch: StreamSource[]) =>
+    onUpdate(streams.filter(stream => !isInformationalAddonStream(stream)), batch.filter(stream => !isInformationalAddonStream(stream))) : undefined;
+  // A YouTube row video has exactly one source, its YouTube page; no addon knows it.
+  if (isYouTubeItem(item)) {
+    const streams = youTubeStreams(item);
+    onUpdate?.(streams, streams);
+    return streams;
+  }
+  // Native addon items are only known to the addon that serves them, by its own ids.
+  const native = await nativeStreamTarget(item, season, episode);
+  if (native) {
+    if (!native.ids.length) return [];
+    const owners = addons.filter((addon) => addonServesOwnMeta(addon, native.requestType, native.metaId));
+    return getBrowserStreamsProgressive(owners, item, season, episode, onUpdate, native.ids, native.requestType);
+  }
   if (hasResolverConfig()) {
-    const browserPromise = getBrowserStreamsProgressive(addons, item, season, episode, onUpdate)
+    // Two lookups run side by side (this browser and the relay). Each progress
+    // update publishes BOTH lists merged — publishing one path's list alone
+    // replaced the other's rows on screen — and every row, the relay's
+    // included, gets the title's addon subtitles (the relay returns none).
+    let browserLatest: StreamSource[] = [];
+    let resolverLatest: StreamSource[] = [];
+    let subtitles: SubtitleTrack[] = [];
+    const combine = () => sortStreams(dedupeStreams([...browserLatest, ...resolverLatest])
+      .filter((stream) => !isInformationalAddonStream(stream) && (stream.url || stream.infoHash || stream.description || stream.source)))
+      .map((stream) => attachSubtitles(stream, subtitles));
+    const publish = (batch: StreamSource[]) => update?.(combine(), batch.map((stream) => attachSubtitles(stream, subtitles)));
+    const subtitleTask = fetchSubtitlesForItem(addons, item, season, episode).then((found) => {
+      subtitles = found;
+      if (found.length && (browserLatest.length || resolverLatest.length)) publish([]);
+      return found;
+    });
+    const browserPromise = getBrowserStreamsProgressive(addons, item, season, episode, (all, batch) => { browserLatest = all; publish(batch); }, undefined, undefined, subtitleTask)
       .catch((error) => {
         console.warn("ARVIO browser addon lookup failed.", error);
         return [] as StreamSource[];
       });
-    const resolverPromise = getResolverStreamsProgressive(addons, item, season, episode, onUpdate)
+    const resolverPromise = getResolverStreamsProgressive(addons, item, season, episode, (all, batch) => { resolverLatest = all; publish(batch); })
       .catch((error) => {
         console.warn("ARVIO resolver unavailable, using browser addon lookup.", error);
         return [] as StreamSource[];
       });
     const [browserResolved, resolved] = await Promise.all([browserPromise, resolverPromise]);
-    const merged = sortStreams(dedupeStreams([...browserResolved, ...resolved])
-      .filter((stream) => stream.url || stream.infoHash || stream.description || stream.source));
+    browserLatest = browserResolved;
+    resolverLatest = resolved;
+    await subtitleTask;
+    const merged = combine();
     if (merged.length) onUpdate?.(merged, browserResolved);
     return merged;
   }
@@ -271,22 +381,29 @@ async function getBrowserStreamsProgressive(
   item: MediaItem,
   season?: number,
   episode?: number,
-  onUpdate?: (streams: StreamSource[], batch: StreamSource[]) => void
+  onUpdate?: (streams: StreamSource[], batch: StreamSource[]) => void,
+  nativeIds?: string[],
+  // A native item's own type ("tv", "Podcasts"); strict addons route /stream by it.
+  nativeType?: string,
+  // Subtitles already being fetched for this title by the caller (shared, so
+  // they are requested once).
+  subtitleTask?: Promise<SubtitleTrack[]>
 ) {
   const type = item.mediaType === "tv" ? "series" : "movie";
-  const ids = streamIds(item, season, episode);
+  const ids = nativeIds ?? streamIds(item, season, episode);
   const enabled = addons.filter((addon) => addon.enabled !== false && manifestUrlFor(addon) && supportsResource(addon, "stream"));
   const subtitleAddons = addons.filter((addon) => addon.enabled !== false && manifestUrlFor(addon) && supportsResource(addon, "subtitles"));
   // OpenSubtitles is always available as a built-in subtitle source (like the
   // Android app) — most stream addons don't provide subtitles at all. Exact
   // manifest match only: some users carry an OpenSubtitles entry with a broken
-  // base path (…/subtitles/manifest.json) that returns empty results.
-  if (!subtitleAddons.some((addon) => manifestUrlFor(addon) === BUILTIN_OPENSUBTITLES.manifestUrl)) {
+  // base path (…/subtitles/manifest.json) that returns empty results. It only
+  // knows IMDb/TMDB ids, so native addon items skip it.
+  if (!nativeIds && !subtitleAddons.some((addon) => manifestUrlFor(addon) === BUILTIN_OPENSUBTITLES.manifestUrl)) {
     subtitleAddons.push(BUILTIN_OPENSUBTITLES);
   }
   let aggregate: StreamSource[] = [];
   let sharedSubtitles: SubtitleTrack[] = [];
-  const subtitlePromise = queryAllAddonSubtitles(subtitleAddons, type, ids)
+  const subtitlePromise = (subtitleTask ?? queryAllAddonSubtitles(subtitleAddons, type, ids))
     .then((subtitles) => {
       sharedSubtitles = subtitles;
       if (subtitles.length && aggregate.length) {
@@ -298,7 +415,7 @@ async function getBrowserStreamsProgressive(
     .catch(() => [] as SubtitleTrack[]);
 
   await Promise.all(enabled.map(async (addon) => {
-    const batch = await queryAddonStreams(addon, type, ids);
+    const batch = await queryAddonStreams(addon, type, ids, nativeType);
     if (!batch.length) return;
     const withSubtitles = batch.map((stream) => attachSubtitles(stream, sharedSubtitles));
     aggregate = sortStreams(dedupeStreams([...aggregate, ...withSubtitles])
@@ -310,15 +427,16 @@ async function getBrowserStreamsProgressive(
   return aggregate;
 }
 
-async function queryAddonStreams(addon: InstalledAddon, type: "movie" | "series", ids: string[]) {
+async function queryAddonStreams(addon: InstalledAddon, type: "movie" | "series", ids: string[], preferredType?: string) {
   const { base, query } = addonBaseUrl(manifestUrlFor(addon));
   for (const id of ids) {
     if (!addonSupportsId(addon, id)) continue;
-    for (const requestType of streamRequestTypes(addon, type)) {
-      const url = `${base}/stream/${requestType}/${encodeURIComponent(id)}.json${query ? `?${query}` : ""}`;
+    for (const requestType of streamRequestTypes(addon, type, preferredType)) {
+      const url = `${base}/stream/${encodeURIComponent(requestType)}/${encodeURIComponent(id)}.json${query ? `?${query}` : ""}`;
       try {
         const payload = await addonJsonRequest<{ streams?: RawStream[] }>(url);
-        const streams = (payload.streams ?? []).map((stream) => normalizeStream(stream, addon));
+        const streams = (payload.streams ?? []).map((stream) => normalizeStream(stream, addon))
+          .filter(stream => !isInformationalAddonStream(stream));
         if (streams.length > 0) return streams;
       } catch {
         // Try the next compatible type/ID form. Torrentio and similar addons often
@@ -406,9 +524,11 @@ function streamIds(item: MediaItem, season?: number, episode?: number) {
   return Array.from(new Set(ids));
 }
 
-function streamRequestTypes(addon: InstalledAddon, requestedType: "movie" | "series") {
+function streamRequestTypes(addon: InstalledAddon, requestedType: "movie" | "series", preferredType?: string) {
   const aliases = requestedType === "series" ? ["series", "tv", "show"] : ["movie", "film"];
-  return aliases.filter((type) => addonSupportsType(addon, type));
+  // A native item is asked for by its own type first: a live channel ("tv") is shown as a
+  // movie, but its addon may declare no movie type at all.
+  return [...new Set([...(preferredType ? [preferredType] : []), ...aliases.filter((type) => addonSupportsType(addon, type))])];
 }
 
 function addonSupportsType(addon: InstalledAddon, requestedType: string) {
@@ -441,26 +561,36 @@ function addonSupportsId(addon: InstalledAddon, id: string) {
   );
 }
 
+function streamText(value: unknown) {
+  return typeof value === "string" ? value : undefined;
+}
+
 function normalizeStream(stream: RawStream, addon: InstalledAddon): StreamSource {
-  const text = [stream.title, stream.name, stream.description, stream.size].filter(Boolean).join(" ");
+  const name = streamText(stream.name);
+  const title = streamText(stream.title);
+  const description = streamText(stream.description);
+  const size = streamText(stream.size);
+  const addonName = streamText(addon.name) ?? "Source";
+  const text = [title, name, description, size].filter(Boolean).join(" ");
   const url = streamUrl(stream);
   const normalized: StreamSource = {
-    source: stream.name ?? stream.title ?? addon.name,
-    addonName: addon.name,
+    source: name ?? title ?? addonName,
+    addonName,
     addonId: addon.id,
     quality: detectQuality(text),
-    size: stream.size ?? sizeLabel(stream.sizeBytes ?? stream.behaviorHints?.videoSize ?? null),
+    size: size ?? sizeLabel(stream.sizeBytes ?? stream.behaviorHints?.videoSize ?? null),
     sizeBytes: stream.sizeBytes ?? stream.behaviorHints?.videoSize ?? null,
     url,
     infoHash: stream.infoHash ?? null,
     fileIdx: stream.fileIdx ?? null,
     behaviorHints: {
       ...(stream.behaviorHints ?? {}),
+      filename: streamText(stream.behaviorHints?.filename) ?? null,
       notWebReady: !url && Boolean(stream.infoHash || stream.ytId || stream.behaviorHints?.videoHash)
     },
     subtitles: stream.subtitles ?? [],
     sources: stream.sources ?? [],
-    description: stream.description ?? stream.title ?? null
+    description: description ?? title ?? null
   };
   normalized.behaviorHints = {
     ...(normalized.behaviorHints ?? {}),

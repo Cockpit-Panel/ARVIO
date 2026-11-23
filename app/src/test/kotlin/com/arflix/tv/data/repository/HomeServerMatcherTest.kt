@@ -9,6 +9,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeServerMatcherTest {
+    @Test fun `exact series title without year or provider metadata can match`() {
+        val score = HomeServerMatcher.score("Example Show", null, "tt42", 42, null,
+            HomeServerCandidateInfo("Example Show", null, emptyMap()))
+        assertTrue(HomeServerMatcher.isAcceptable(score))
+    }
+
+    @Test fun `exact title does not override conflicting provider identity`() {
+        val score = HomeServerMatcher.score("Example Show", null, null, 42, null,
+            HomeServerCandidateInfo("Example Show", null, mapOf("tmdb" to "99")))
+        assertFalse(HomeServerMatcher.isAcceptable(score))
+    }
+
     @Test
     fun `home server library types select the provider media filter`() {
         assertEquals(MediaType.MOVIE, homeServerCatalogMediaType("movie"))

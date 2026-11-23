@@ -1,13 +1,20 @@
 package com.arflix.tv.data.model
 
+import androidx.annotation.StringRes
 import java.io.Serializable
 
 enum class CatalogSourceType {
     PREINSTALLED,
     TRAKT,
+    SIMKL,
     MDBLIST,
+    // A TMDB page added by its URL: list, collection, company, network,
+    // person, keyword or genre.
+    TMDB,
     ADDON,
-    HOME_SERVER
+    HOME_SERVER,
+    // The user's own YouTube videos, kept in the catalog itself (see YouTubeCollection).
+    YOUTUBE
 }
 
 enum class CatalogKind {
@@ -53,7 +60,16 @@ enum class CollectionSourceKind {
     // to complete curated franchise rows with community-maintained extras
     // (upcoming titles, spin-offs) without requiring the user to have any
     // Stremio addon installed — the endpoint is anonymous and cache-friendly.
-    MDBLIST_PUBLIC
+    MDBLIST_PUBLIC,
+    // Generic TMDB /discover query built from `discoverParams` (raw TMDB query
+    // keys such as with_companies / with_networks / primary_release_date.gte).
+    // Lets imported collections (e.g. Nuvio exports) describe any discover
+    // filter without a dedicated source kind per filter.
+    TMDB_DISCOVER,
+    // Public TMDB v3 list (`/list/{id}`), mixed movies and series in list order.
+    TMDB_LIST,
+    // Public Trakt list by numeric id or slug (`trakt.tv/lists/{id}`).
+    TRAKT_LIST
 }
 
 data class CollectionSourceConfig(
@@ -62,8 +78,10 @@ data class CollectionSourceConfig(
     val addonId: String? = null,
     val addonCatalogType: String? = null,
     val addonCatalogId: String? = null,
+    val addonGenre: String? = null,
     val tmdbGenreId: Int? = null,
     val tmdbPersonId: Int? = null,
+    val tmdbCreditRole: String? = null,
     val tmdbCollectionId: Int? = null,
     val tmdbKeywordId: Int? = null,
     val tmdbWatchProviderId: Int? = null,
@@ -74,7 +92,10 @@ data class CollectionSourceConfig(
     val curatedRefs: List<String>? = null,
     // Path component after /lists/, e.g. "jxduffy/star-wars-chronological-order".
     // Resolved against the public mdblist JSON endpoint at runtime.
-    val mdblistSlug: String? = null
+    val mdblistSlug: String? = null,
+    val discoverParams: Map<String, String>? = null,
+    val tmdbListId: Int? = null,
+    val traktListId: String? = null
 ) : Serializable
 
 data class CatalogConfig(
@@ -102,16 +123,29 @@ data class CatalogConfig(
     val collectionSources: List<CollectionSourceConfig> = emptyList(),
     val requiredAddonUrls: List<String> = emptyList(),
     val packId: String? = null,
-    val packName: String? = null
+    val packName: String? = null,
+    // Rail grouping key for user-imported collections. Built-in collections leave
+    // it null and group by `collectionGroup`; imported ones get one rail per
+    // imported collection, so they can't be squeezed into the fixed enum.
+    val collectionRailKey: String? = null,
+    val clientDelegate: String? = null,
+    val clientFilter: String? = null
 ) : Serializable
+
+/** Key that ties collection tiles to their rail: the imported rail key, else the built-in group. */
+val CatalogConfig.collectionRailKeyOrGroup: String?
+    get() = collectionRailKey ?: collectionGroup?.name
 
 val CatalogConfig.effectivePackId: String
     get() = packId ?: when (sourceType) {
         CatalogSourceType.PREINSTALLED -> "system"
         CatalogSourceType.ADDON -> "addon"
         CatalogSourceType.TRAKT -> "trakt"
+        CatalogSourceType.SIMKL -> "simkl"
         CatalogSourceType.MDBLIST -> "mdblist"
+        CatalogSourceType.TMDB -> "tmdb"
         CatalogSourceType.HOME_SERVER -> "home_server"
+        CatalogSourceType.YOUTUBE -> "youtube"
     }
 
 val CatalogConfig.effectivePackName: String
@@ -119,8 +153,11 @@ val CatalogConfig.effectivePackName: String
         CatalogSourceType.PREINSTALLED -> "System Catalogs"
         CatalogSourceType.ADDON -> "Addon Catalogs"
         CatalogSourceType.TRAKT -> "Trakt Catalogs"
+        CatalogSourceType.SIMKL -> "SIMKL Catalogs"
         CatalogSourceType.MDBLIST -> "MDBlist Catalogs"
+        CatalogSourceType.TMDB -> "TMDB Catalogs"
         CatalogSourceType.HOME_SERVER -> "Home Server Catalogs"
+        CatalogSourceType.YOUTUBE -> "YouTube"
     }
 
 val CatalogConfig.isBulkDeletablePack: Boolean
@@ -128,7 +165,9 @@ val CatalogConfig.isBulkDeletablePack: Boolean
             packId != "system" &&
             packId != "addon" &&
             packId != "trakt" &&
+            packId != "simkl" &&
             packId != "mdblist" &&
+            packId != "tmdb" &&
             packId != "home_server" &&
             packId != "individual"
 
@@ -150,7 +189,8 @@ data class CatalogValidationResult(
     val isValid: Boolean,
     val normalizedUrl: String? = null,
     val sourceType: CatalogSourceType? = null,
-    val error: String? = null
+    /** Resource of the validation error; resolved where it is displayed. */
+    @param:StringRes val errorRes: Int? = null
 )
 
 data class CatalogPackManifest(

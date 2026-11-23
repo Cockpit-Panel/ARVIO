@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="partner_link_loading">Titeldetails openen…</string>
+    <string name="partner_link_failed">Deze titel kon niet worden gevonden of geladen. Probeer opnieuw of open een andere link.</string>
     <string name="home">Start</string>
     <string name="search">Zoeken</string>
     <string name="watchlist">Kijklijst</string>
@@ -61,4 +63,6 @@
     <string name="add_later">Voeg films en series toe om later te kijken</string>
     <string name="sources_available">bronnen beschikbaar</string>
     <string name="ends_at">Eindigt om</string>
+    <string name="watchlist_on_home">Watchlist op startscherm</string>
+    <string name="watchlist_on_home_desc">Toon je watchlist onder Verder kijken.</string>
 </resources>

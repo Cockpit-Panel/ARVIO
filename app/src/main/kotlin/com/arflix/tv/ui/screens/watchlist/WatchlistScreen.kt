@@ -1,1465 +1,982 @@
 package com.arflix.tv.ui.screens.watchlist
 
-import android.os.SystemClock
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.*
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.res.stringResource
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Sort
-import androidx.compose.material.icons.outlined.Bookmark
-import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.filled.BookmarkBorder
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.Movie
-import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Tv
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Icon
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.focus.*
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onKeyEvent
-import androidx.compose.ui.input.key.type
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.unit.LayoutDirection
+import com.arflix.tv.ui.focus.mirrorHorizontalForRtl
+import com.arflix.tv.ui.focus.arvioDpadFocusGroup
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import com.arflix.tv.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.*
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.tv.material3.ExperimentalTvMaterial3Api
-import androidx.tv.material3.Text
-import com.arflix.tv.R
-import com.arflix.tv.data.model.CatalogSourceType
-import com.arflix.tv.data.model.MediaItem
-import com.arflix.tv.data.model.MediaType
-import com.arflix.tv.data.repository.HomeServerCatalogCandidate
-import com.arflix.tv.data.repository.HomeServerKind
-import com.arflix.tv.data.repository.HomeServerLibrarySort
-import com.arflix.tv.ui.components.AppTopBar
-import com.arflix.tv.ui.components.AppTopBarHeight
-import com.arflix.tv.ui.components.CardLayoutMode
-import com.arflix.tv.ui.components.LoadingIndicator
-import com.arflix.tv.ui.components.MediaCard
-import com.arflix.tv.ui.components.SidebarItem
-import com.arflix.tv.ui.components.TextInputModal
-import com.arflix.tv.ui.components.Toast
-import com.arflix.tv.ui.components.ToastType as ComponentToastType
-import com.arflix.tv.ui.components.rememberCardLayoutMode
-import com.arflix.tv.ui.components.topBarFocusedItem
-import com.arflix.tv.ui.components.topBarMaxIndex
-import com.arflix.tv.ui.theme.ArflixTypography
-import com.arflix.tv.ui.theme.Pink
-import com.arflix.tv.ui.theme.TextPrimary
-import com.arflix.tv.ui.theme.appBackgroundDark
+import coil.compose.AsyncImage
+import com.arflix.tv.data.model.*
+import com.arflix.tv.data.repository.*
+import com.arflix.tv.ui.components.*
+import com.arflix.tv.ui.skin.resolveAccentColor
 import com.arflix.tv.util.LocalDeviceType
 import com.arflix.tv.util.tr
+import com.arflix.tv.ui.screens.watchlist.calendar.*
+import com.arflix.tv.ui.screens.collections.CollectionBackdrop
+import com.arflix.tv.ui.screens.collections.CollectionSpotlight
+import com.arflix.tv.ui.screens.collections.collectionSpotlightHeight
 import kotlinx.coroutines.delay
+import com.arflix.tv.ui.theme.BackgroundCard
+import com.arflix.tv.ui.theme.BackgroundDark
+import com.arflix.tv.ui.theme.BackgroundElevated
+import java.time.LocalDate
 
-private enum class WatchlistFocusZone {
-    TOP_BAR,
-    PROVIDERS,
-    LIBRARIES,
-    FILTERS,
-    CONTENT
+internal enum class LibrarySection(val label: String) { WATCHLISTS("Watchlists"), LISTS("My lists"), SERVERS("Homeserver"), CALENDAR("Calendar") }
+internal val LibraryTabsTopInset = AppTopBarHeight - 8.dp
+@OptIn(ExperimentalFoundationApi::class)
+private object LibraryTvBringIntoViewSpec : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = 0f
 }
+internal fun libraryColumns(width: Int, poster: Boolean, collections: Boolean = false): Int =
+    if (collections) (width / 270).coerceIn(1, 3) else if (poster) (width / 115).coerceIn(2, 8) else (width / 180).coerceIn(2, 4)
+internal fun WatchlistSourceItem.isPersonalCollection(): Boolean = this is WatchlistSourceItem.Catalog ||
+    (this is WatchlistSourceItem.TrackerList && (provider == TrackerLibraryProvider.MDBLIST ||
+        (provider == TrackerLibraryProvider.WETRAKR && listKey.startsWith(com.arflix.tv.data.repository.wetrakr.WeTrakrLists.LIST_KEY_PREFIX)) ||
+        (provider == TrackerLibraryProvider.TRAKT && listKey !in setOf("__watchlist__", "watchlist", "collection", "watched"))))
+internal fun librarySources(sources: List<WatchlistSourceItem>, section: LibrarySection): List<WatchlistSourceItem> =
+    sources.filter { when (section) {
+        LibrarySection.WATCHLISTS -> it is WatchlistSourceItem.MyWatchlist || (it is WatchlistSourceItem.TrackerList && !it.isPersonalCollection())
+        LibrarySection.LISTS -> it.isPersonalCollection()
+        LibrarySection.SERVERS -> it is WatchlistSourceItem.HomeServer
+        LibrarySection.CALENDAR -> false
+    } }
 
-private data class LibraryFilter(
-    val label: String,
-    val isSort: Boolean = false,
-    val isSearch: Boolean = false,
-    val isRefresh: Boolean = false,
-    val iconOnly: Boolean = false
-)
-
-private data class LibraryProviderOption(
-    val id: String,
-    val label: String,
-    val homeServerKind: HomeServerKind? = null,
-    val trackerSources: List<WatchlistSourceItem> = emptyList()
-) {
-    val isWatchlist: Boolean get() = id == WATCHLIST_PROVIDER_ID
-    val isHomeServer: Boolean get() = homeServerKind != null
-    val isTracker: Boolean get() = trackerSources.isNotEmpty()
-}
-
-private fun WatchlistSourceItem.trackerProviderLabel(): String? {
-    return when (this) {
-        is WatchlistSourceItem.TrackerList -> provider.displayName
-        is WatchlistSourceItem.Catalog -> {
-            val url = config.sourceUrl.orEmpty()
-            val identity = listOf(config.id, config.title, config.addonName.orEmpty(), url).joinToString(" ")
-            when {
-                config.sourceType == CatalogSourceType.TRAKT || identity.contains("trakt", ignoreCase = true) -> "Trakt"
-                identity.contains("simkl", ignoreCase = true) -> "Simkl"
-                else -> null
-            }
-        }
-        else -> null
-    }
-}
-
-private fun WatchlistSourceItem.asSidebarLibrary(providerLabel: String): HomeServerCatalogCandidate {
-    return HomeServerCatalogCandidate(
-        title = title,
-        sourceRef = id,
-        serverName = providerLabel,
-        collectionName = title,
-        collectionType = "mixed",
-        serverKind = HomeServerKind.UNKNOWN,
-        connectionId = "tracker:${providerLabel.lowercase()}"
-    )
-}
-
-private const val WATCHLIST_PROVIDER_ID = "provider:watchlist"
-
-@OptIn(ExperimentalTvMaterial3Api::class)
+@OptIn(androidx.tv.material3.ExperimentalTvMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun WatchlistScreen(
     viewModel: WatchlistViewModel = hiltViewModel(),
-    currentProfile: com.arflix.tv.data.model.Profile? = null,
+    currentProfile: Profile? = null,
     onNavigateToDetails: (MediaType, Int) -> Unit = { _, _ -> },
-    onNavigateToHome: () -> Unit = {},
-    onNavigateToSearch: () -> Unit = {},
-    onNavigateToTv: () -> Unit = {},
-    onNavigateToSettings: (String) -> Unit = {},
-    onSwitchProfile: () -> Unit = {},
-    onBack: () -> Unit = {}
+    onNavigateToHome: () -> Unit = {}, onNavigateToSearch: () -> Unit = {},
+    onNavigateToTv: () -> Unit = {}, onNavigateToSettings: (String?) -> Unit = {},
+    onSwitchProfile: () -> Unit = {}, onBack: () -> Unit = {},
+    calendarStateOverride: ReleaseCalendarUiState? = null,
+    onCalendarSelectDate: (LocalDate) -> Unit = {},
+    onCalendarChangeMonth: (Long) -> Unit = {},
+    onCalendarSelectSource: (String) -> Unit = {},
+    onCalendarRefresh: () -> Unit = {},
+    calendarViewModel: ReleaseCalendarViewModel? = null,
+    onCalendarOpenRelease: ((com.arflix.tv.data.model.CalendarRelease) -> Unit)? = null,
+    openCalendar: Boolean = false
 ) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val libraryState by viewModel.libraryState.collectAsStateWithLifecycle()
-    val logoUrls by viewModel.logoUrls.collectAsStateWithLifecycle()
-    val isMobile = LocalDeviceType.current.isTouchDevice()
-    val usePosterCards = rememberCardLayoutMode() == CardLayoutMode.POSTER
-    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
-    val cardWidth: Dp = if (usePosterCards) {
-        if (isMobile) ((screenWidth - 62.dp) / 2).coerceIn(112.dp, 150.dp) else 110.dp
-    } else {
-        if (isMobile) ((screenWidth - 62.dp) / 2).coerceIn(138.dp, 210.dp) else 210.dp
-    }
-    val libraryCardWidth = if (!isMobile && !usePosterCards) 160.dp else cardWidth
-    val libraryColumns = if (isMobile) 2 else if (usePosterCards) 6 else 4
+    val rawState by viewModel.uiState.collectAsStateWithLifecycle()
+    val rawServers by viewModel.libraryState.collectAsStateWithLifecycle()
+    val kidsFilterState by viewModel.kidsFilterState.collectAsStateWithLifecycle()
+    // A kids profile sees its lists age-filtered; any other profile gets them unchanged.
+    val state = remember(rawState, kidsFilterState) { viewModel.applyKidsFilter(rawState, kidsFilterState) }
+    val servers = remember(rawServers, kidsFilterState) { viewModel.applyKidsFilter(rawServers, kidsFilterState) }
+    val logos by viewModel.logoUrls.collectAsStateWithLifecycle()
+    val touch = LocalDeviceType.current.isTouchDevice()
+    val haptic = LocalHapticFeedback.current
     val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    val rootFocusRequester = remember { FocusRequester() }
-    val hasProfile = currentProfile != null
-    val maxSidebarIndex = topBarMaxIndex(hasProfile)
-    var sidebarFocusIndex by remember { mutableIntStateOf(if (hasProfile) 3 else 2) }
-    var focusZone by remember { mutableStateOf(WatchlistFocusZone.CONTENT) }
-    var providerFocusIndex by remember { mutableIntStateOf(0) }
-    var libraryFocusIndex by remember { mutableIntStateOf(0) }
-    var filterFocusIndex by remember { mutableIntStateOf(0) }
-    var focusedSectionIndex by remember { mutableIntStateOf(0) }
-    var focusedItemIndex by remember { mutableIntStateOf(0) }
-    var enterKeyDownTimeMs by remember { mutableLongStateOf(-1L) }
-    var showSearchModal by remember { mutableStateOf(false) }
-    var showSortMenu by remember { mutableStateOf(false) }
-    var sortFocusIndex by remember { mutableIntStateOf(0) }
-    var selectedProviderId by remember { mutableStateOf(WATCHLIST_PROVIDER_ID) }
-    var trackerSearchQuery by remember { mutableStateOf("") }
-    val longPressThresholdMs = 500L
-    val watchlistColumnState = rememberLazyListState()
-    val libraryGridState = rememberLazyGridState()
-
-    val trackerGroups = remember(uiState.sources) {
-        uiState.sources
-            .mapNotNull { source -> source.trackerProviderLabel()?.let { label -> label to source } }
-            .groupBy(keySelector = { it.first }, valueTransform = { it.second })
+    val poster = rememberCardLayoutMode() == CardLayoutMode.POSTER
+    val scrollScope = rememberCoroutineScope()
+    var section by rememberSaveable(openCalendar) { mutableStateOf(if (openCalendar) LibrarySection.CALENDAR else LibrarySection.WATCHLISTS) }
+    val calendarMode = section == LibrarySection.CALENDAR
+    val calendarTab = remember { FocusRequester() }
+    var openedList by rememberSaveable { mutableStateOf<String?>(null) }
+    var query by rememberSaveable { mutableStateOf("") }
+    var sort by rememberSaveable { mutableStateOf(HomeServerLibrarySort.RECENTLY_ADDED) }
+    var mediaFilter by rememberSaveable { mutableStateOf<MediaType?>(null) }
+    var filters by remember { mutableStateOf(false) }
+    var search by remember { mutableStateOf(false) }
+    var sourcesOpen by remember { mutableStateOf(false) }
+    var topFocused by remember { mutableStateOf(false) }
+    var topIndex by remember { mutableIntStateOf(com.arflix.tv.ui.components.topBarSelectedIndex(SidebarItem.WATCHLIST, currentProfile != null).coerceAtLeast(0)) }
+    com.arflix.tv.ui.components.ReconcileTopBarFocus(topIndex, currentProfile != null) { topIndex = it }
+    val firstTab = remember { FocusRequester() }
+    var initialFocusPlaced by remember { mutableStateOf(false) }
+    val filterButton = remember { FocusRequester() }
+    val topFocus = remember { FocusRequester() }
+    val scopeSources = remember(state.sources, servers.libraries, section) { if(section == LibrarySection.SERVERS) servers.libraries.map { WatchlistSourceItem.HomeServer(it) } else librarySources(state.sources, section) }
+    val collections = section == LibrarySection.LISTS && openedList == null
+    val serverMode = section == LibrarySection.SERVERS
+    val selectedId = if (serverMode) "server_${servers.selectedSourceRef}" else state.selectedSourceId
+    val savedItems = remember(state.movies, state.series, state.selectedSourceId) {
+        val combined = state.movies + state.series
+        if(state.selectedSourceId == WatchlistSourceItem.MyWatchlist.id) combined.sortedByDescending { it.addedAt } else combined
     }
-    val providers = remember(libraryState.providers, trackerGroups) {
-        buildList {
-            add(LibraryProviderOption(id = WATCHLIST_PROVIDER_ID, label = "My Watchlist"))
-            libraryState.providers.forEach { kind ->
-                val label = when (kind) {
-                    HomeServerKind.PLEX -> "Plex"
-                    HomeServerKind.JELLYFIN -> "Jellyfin"
-                    HomeServerKind.EMBY -> "Emby"
-                    HomeServerKind.UNKNOWN -> "Server"
+    val rawItems = if (serverMode) servers.items else savedItems
+    val items = remember(rawItems, query, sort, mediaFilter, serverMode) {
+        val filtered = rawItems.filter { (mediaFilter == null || it.mediaType == mediaFilter) && (serverMode || it.title.contains(query, true)) }
+        if (serverMode) filtered else sortLibraryItems(filtered, sort)
+    }
+    val loading = if (serverMode) servers.isLoading else state.isLoading
+    val error = if (serverMode) servers.error else state.error
+    val sourceKey = if (collections) "collections" else "$section:$selectedId:$query:$sort:$mediaFilter"
+    val viewports = rememberSaveable(saver = mapSaver(
+        save = { states: MutableMap<String, LazyGridState> -> states.mapValues { (_, grid) -> arrayListOf(grid.firstVisibleItemIndex, grid.firstVisibleItemScrollOffset) } },
+        restore = { saved -> saved.mapValues { (_, value) -> val position = value as List<*>; LazyGridState(position[0] as Int, position[1] as Int) }.toMutableMap() }
+    )) { mutableMapOf<String, LazyGridState>() }
+    val grid = remember(sourceKey) { viewports.getOrPut(sourceKey) { LazyGridState() } }
+    var revealJob by remember(grid) { mutableStateOf<Job?>(null) }
+    var focusedGridRow by remember(grid) { mutableStateOf<Pair<Int, Int>?>(null) }
+    DisposableEffect(grid) {
+        onDispose { revealJob?.cancel() }
+    }
+    fun revealCard(index: Int, columns: Int) {
+        if (touch) return
+        val row = columns to index / columns
+        // Sideways focus must not cancel or restart the current row's reveal.
+        if (focusedGridRow == row) return
+        focusedGridRow = row
+        revealJob?.cancel()
+        revealJob = scrollScope.launch {
+            withFrameNanos { }
+            val layout = grid.layoutInfo
+            val card = layout.visibleItemsInfo.firstOrNull { it.index == index }
+            if (card == null) grid.animateScrollToItem(index / columns * columns) else {
+                val delta = libraryRowAnchorScrollDelta(card.offset.y, card.size.height,
+                    layout.viewportStartOffset + layout.beforeContentPadding,
+                    layout.viewportEndOffset - layout.afterContentPadding)
+                if (delta != 0) grid.animateScrollBy(delta.toFloat(), tween(160))
+            }
+        }
+    }
+    var focusedPreviewKey by rememberSaveable(currentProfile?.id, sourceKey) { mutableStateOf<String?>(null) }
+    val touchPreviewIndex by remember(grid) { derivedStateOf { (grid.firstVisibleItemIndex - 1).coerceAtLeast(0) } }
+    val previewCandidate = if (touch) items.getOrNull(touchPreviewIndex.coerceAtMost(items.lastIndex.coerceAtLeast(0)))
+        else items.firstOrNull { libraryPreviewKey(it) == focusedPreviewKey } ?: items.firstOrNull()
+    var readyPreview by remember(currentProfile?.id, sourceKey) { mutableStateOf<LibraryPreview?>(null) }
+    val activePreview = readyPreview ?: previewCandidate?.let { LibraryPreview(it) }
+    val previewItem = activePreview?.item
+    LaunchedEffect(currentProfile?.id, sourceKey, previewCandidate?.let(::libraryPreviewKey), calendarMode, collections) {
+        if (!calendarMode && !collections) {
+            val item = previewCandidate
+            if (item == null) {
+                readyPreview = null
+                return@LaunchedEffect
+            }
+            delay(100)
+            viewModel.ensureLogo(item)
+            // Swap complete previews together; never clear the description between cards.
+            val preview = viewModel.loadLibraryPreview(item)
+            readyPreview = preview
+            if (item.isHomeServer) {
+                viewModel.loadLibraryImdbRating(item)?.let { rating ->
+                    readyPreview = preview.copy(item = preview.item.copy(imdbRating = rating))
                 }
-                add(LibraryProviderOption(id = "provider:home:${kind.name}", label = label, homeServerKind = kind))
-            }
-            listOf("Trakt", "Simkl").forEach { label ->
-                trackerGroups[label]?.takeIf { it.isNotEmpty() }?.let { sources ->
-                    add(
-                        LibraryProviderOption(
-                            id = "provider:tracker:${label.lowercase()}",
-                            label = label,
-                            trackerSources = sources
-                        )
-                    )
-                }
             }
         }
     }
-    val activeProvider = providers.firstOrNull { it.id == selectedProviderId } ?: providers.first()
-    val selectedProviderIndex = providers.indexOfFirst { it.id == activeProvider.id }.coerceAtLeast(0)
-    val isHomeServerMode = activeProvider.isHomeServer
-    val isTrackerMode = activeProvider.isTracker
-    val providerLibraries = remember(
-        libraryState.libraries,
-        activeProvider.id,
-        activeProvider.trackerSources
-    ) {
-        when {
-            activeProvider.isHomeServer -> libraryState.libraries.filter {
-                it.serverKind == activeProvider.homeServerKind
-            }
-            activeProvider.isTracker -> activeProvider.trackerSources.map {
-                it.asSidebarLibrary(activeProvider.label)
-            }
-            else -> emptyList()
+    fun selectSource(source: WatchlistSourceItem) {
+        if (source is WatchlistSourceItem.HomeServer) {
+            viewModel.selectLibraryProvider(source.candidate.serverKind)
+            viewModel.selectLibrary(source.candidate.sourceRef)
+        } else viewModel.selectSource(source.id)
+        sourcesOpen = false
+    }
+    fun selectSection(next: LibrarySection) {
+        section = next; openedList = null; query = ""; mediaFilter = null
+        search = false; sourcesOpen = false; filters = false
+        if (next == LibrarySection.WATCHLISTS) viewModel.selectSource(WatchlistSourceItem.MyWatchlist.id)
+        if (next == LibrarySection.SERVERS && servers.selectedSourceRef == null) {
+            servers.libraries.firstOrNull()?.let { viewModel.selectLibraryProvider(it.serverKind); viewModel.selectLibrary(it.sourceRef) }
         }
     }
-    val trackerItems = remember(uiState.allItems, trackerSearchQuery, activeProvider.id) {
-        val query = trackerSearchQuery.trim()
-        if (!isTrackerMode || query.isBlank()) uiState.allItems else uiState.allItems.filter { item ->
-            item.title.contains(query, ignoreCase = true) ||
-                item.overview.contains(query, ignoreCase = true)
+    BackHandler(!search && !filters && !sourcesOpen) {
+        when { openedList != null -> openedList = null; !touch && !topFocused -> topFocus.requestFocus(); else -> onBack() }
+    }
+    BackHandler(search && touch) {
+        search = false
+    }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle, viewModel) {
+        val observer = LifecycleEventObserver { _, event -> if(event == Lifecycle.Event.ON_RESUME) viewModel.refreshAfterResume() }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(serverMode, query) { if (serverMode) viewModel.setLibrarySearch(query) }
+    LaunchedEffect(serverMode, servers.libraries, servers.selectedSourceRef) {
+        if (serverMode && servers.selectedSourceRef == null) {
+            servers.libraries.firstOrNull()?.let { selectSource(WatchlistSourceItem.HomeServer(it)) }
         }
     }
-    val activeLibraryState = when {
-        isHomeServerMode -> libraryState
-        isTrackerMode -> HomeLibraryUiState(
-            selectedSourceRef = uiState.selectedSourceId,
-            items = trackerItems,
-            isLoading = uiState.isLoading,
-            isLoadingMore = uiState.isLoadingMore,
-            hasMore = uiState.hasMore,
-            searchQuery = trackerSearchQuery,
-            error = uiState.error
-        )
-        else -> HomeLibraryUiState()
-    }
-    val selectedLibraryIndex = providerLibraries.indexOfFirst { it.sourceRef == activeLibraryState.selectedSourceRef }
-        .coerceAtLeast(0)
-    val filters = if (isHomeServerMode) {
-        listOf(
-            LibraryFilter(tr("Sort"), isSort = true),
-            LibraryFilter(tr("Search"), isSearch = true, iconOnly = true),
-            LibraryFilter(tr("Refresh"), isRefresh = true, iconOnly = true)
-        )
-    } else {
-        listOf(
-            LibraryFilter(tr("Search"), isSearch = true, iconOnly = true),
-            LibraryFilter(tr("Refresh"), isRefresh = true, iconOnly = true)
-        )
-    }
-    val sortOptions = listOf(
-        tr("Recently added") to HomeServerLibrarySort.RECENTLY_ADDED,
-        tr("Highest rated") to HomeServerLibrarySort.RATING,
-        tr("Title A-Z") to HomeServerLibrarySort.TITLE
-    )
-    val watchlistSections = listOf(
-        "movies" to uiState.movies,
-        "series" to uiState.series
-    ).filter { it.second.isNotEmpty() }
-    val watchlistTotal = uiState.movies.size + uiState.series.size
-    val isLibraryMode = isHomeServerMode || isTrackerMode
-    val visibleLibraryItems = activeLibraryState.items
-
-    fun moveToContent() {
-        focusZone = WatchlistFocusZone.CONTENT
-        focusedItemIndex = focusedItemIndex.coerceIn(
-            0,
-            ((if (isLibraryMode) visibleLibraryItems.size else watchlistSections.firstOrNull()?.second?.size) ?: 1) - 1
-        ).coerceAtLeast(0)
-    }
-
-    fun activateProvider(index: Int) {
-        providerFocusIndex = index.coerceIn(0, (providers.size - 1).coerceAtLeast(0))
-        val provider = providers[providerFocusIndex]
-        selectedProviderId = provider.id
-        trackerSearchQuery = ""
-        when {
-            provider.isWatchlist -> {
-                viewModel.selectLibraryProvider(null)
-                viewModel.selectSource(WatchlistSourceItem.MyWatchlist.id)
-            }
-            provider.isHomeServer -> viewModel.selectLibraryProvider(provider.homeServerKind)
-            provider.isTracker -> {
-                viewModel.selectLibraryProvider(null)
-                provider.trackerSources.firstOrNull()?.let { viewModel.selectSource(it.id) }
-            }
-        }
-        libraryFocusIndex = 0
-        focusedSectionIndex = 0
-        focusedItemIndex = 0
-    }
-
-    fun activateFilter(index: Int) {
-        val filter = filters.getOrNull(index) ?: return
-        when {
-            filter.isSearch -> showSearchModal = true
-            filter.isRefresh -> if (isHomeServerMode) viewModel.refreshLibrary() else viewModel.refresh()
-            filter.isSort -> {
-                sortFocusIndex = sortOptions.indexOfFirst { it.second == libraryState.sort }.coerceAtLeast(0)
-                showSortMenu = true
-            }
-        }
-        focusedItemIndex = 0
-    }
-
-    BackHandler(enabled = showSortMenu) {
-        showSortMenu = false
-        focusZone = WatchlistFocusZone.FILTERS
-    }
-    BackHandler(enabled = !showSearchModal && !showSortMenu) {
-        if (focusZone == WatchlistFocusZone.TOP_BAR) onBack() else focusZone = WatchlistFocusZone.TOP_BAR
-    }
-
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        var initialResumeHandled = false
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                if (initialResumeHandled) viewModel.refreshAfterResume() else initialResumeHandled = true
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    LaunchedEffect(Unit) { rootFocusRequester.requestFocus() }
-    LaunchedEffect(providers.map { it.id }) {
-        if (providers.none { it.id == selectedProviderId }) {
-            selectedProviderId = WATCHLIST_PROVIDER_ID
-            viewModel.selectLibraryProvider(null)
-            viewModel.selectSource(WatchlistSourceItem.MyWatchlist.id)
-        }
-    }
-    LaunchedEffect(selectedProviderIndex) { providerFocusIndex = selectedProviderIndex }
-    LaunchedEffect(selectedLibraryIndex) { libraryFocusIndex = selectedLibraryIndex }
-    LaunchedEffect(
-        activeLibraryState.selectedSourceRef,
-        activeLibraryState.sort,
-        activeLibraryState.searchQuery
-    ) {
-        focusedItemIndex = 0
-        if (isLibraryMode) libraryGridState.scrollToItem(0)
-    }
-    LaunchedEffect(watchlistSections.size, uiState.movies.size, uiState.series.size) {
-        if (watchlistSections.isNotEmpty() && focusedSectionIndex >= watchlistSections.size) {
-            focusedSectionIndex = 0
-            focusedItemIndex = 0
-        }
-    }
-    LaunchedEffect(focusedSectionIndex, watchlistSections.size, focusZone) {
-        if (!isLibraryMode && focusZone == WatchlistFocusZone.CONTENT && watchlistSections.isNotEmpty()) {
-            watchlistColumnState.animateScrollToItem(focusedSectionIndex)
-        }
-    }
-    LaunchedEffect(focusedItemIndex, isLibraryMode, visibleLibraryItems.size) {
-        if (isLibraryMode && visibleLibraryItems.isNotEmpty()) {
-            val safe = focusedItemIndex.coerceIn(0, visibleLibraryItems.lastIndex)
-            libraryGridState.animateScrollToItem(safe)
-            if (safe >= visibleLibraryItems.size - libraryColumns * 2) {
-                if (isHomeServerMode) viewModel.loadMoreLibrary() else viewModel.loadMoreActiveSource()
+    LaunchedEffect(serverMode, sort) { if (serverMode) viewModel.setLibrarySort(sort) }
+    val loadingMore = if(serverMode) servers.isLoadingMore else state.isLoadingMore
+    val hasMore = if(serverMode) servers.hasMore else state.hasMore
+    LaunchedEffect(grid, sourceKey, items.size, rawItems.size, error, loading, loadingMore, hasMore) {
+        snapshotFlow { grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }.collect { last ->
+            if (!calendarMode && !collections && error == null && !loading && !loadingMore && hasMore && (items.isEmpty() || last >= items.size - 16)) {
+                if (serverMode) viewModel.loadMoreLibrary() else viewModel.loadMoreActiveSource()
             }
         }
     }
-    LaunchedEffect(
-        libraryGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index,
-        isMobile,
-        activeLibraryState.hasMore
-    ) {
-        val last = libraryGridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        if (isMobile && last >= visibleLibraryItems.size - libraryColumns * 2) {
-            if (isHomeServerMode) viewModel.loadMoreLibrary() else viewModel.loadMoreActiveSource()
+    LaunchedEffect(grid, sourceKey, items, poster) {
+        if (!calendarMode && !poster && !collections) snapshotFlow { grid.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }.collect { last ->
+            val first = grid.firstVisibleItemIndex
+            viewModel.prefetchLogos(items.subList(first.coerceAtMost(items.size), (last + 17).coerceAtMost(items.size)))
         }
     }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(appBackgroundDark())
-            .focusRequester(rootFocusRequester)
-            .focusable()
-            .onKeyEvent { event ->
-                if (showSearchModal) return@onKeyEvent false
-                val effectiveKey = when (event.key) {
-                    Key.DirectionLeft -> if (isRtl) Key.DirectionRight else Key.DirectionLeft
-                    Key.DirectionRight -> if (isRtl) Key.DirectionLeft else Key.DirectionRight
-                    else -> event.key
-                }
-                if (showSortMenu) {
-                    if (event.type != KeyEventType.KeyDown) return@onKeyEvent true
-                    return@onKeyEvent when (effectiveKey) {
-                        Key.Back, Key.Escape -> {
-                            showSortMenu = false
-                            focusZone = WatchlistFocusZone.FILTERS
-                            true
-                        }
-                        Key.DirectionUp, Key.DirectionLeft -> {
-                            sortFocusIndex = (sortFocusIndex - 1).coerceAtLeast(0)
-                            true
-                        }
-                        Key.DirectionDown, Key.DirectionRight -> {
-                            sortFocusIndex = (sortFocusIndex + 1).coerceAtMost(sortOptions.lastIndex)
-                            true
-                        }
-                        Key.Enter, Key.DirectionCenter -> {
-                            sortOptions.getOrNull(sortFocusIndex)?.second?.let(viewModel::setLibrarySort)
-                            showSortMenu = false
-                            focusZone = WatchlistFocusZone.FILTERS
-                            true
-                        }
-                        else -> true
-                    }
-                }
-                if (event.type == KeyEventType.KeyDown) {
-                    when (effectiveKey) {
-                        Key.Back, Key.Escape -> {
-                            if (focusZone == WatchlistFocusZone.TOP_BAR) onBack() else focusZone = WatchlistFocusZone.TOP_BAR
-                            true
-                        }
-                        Key.DirectionLeft -> {
-                            when (focusZone) {
-                                WatchlistFocusZone.TOP_BAR -> sidebarFocusIndex = (sidebarFocusIndex - 1).coerceAtLeast(0)
-                                WatchlistFocusZone.PROVIDERS -> providerFocusIndex = (providerFocusIndex - 1).coerceAtLeast(0)
-                                WatchlistFocusZone.LIBRARIES -> Unit
-                                WatchlistFocusZone.FILTERS -> {
-                                    if (filterFocusIndex == 0) {
-                                        providerFocusIndex = providers.lastIndex.coerceAtLeast(0)
-                                        focusZone = WatchlistFocusZone.PROVIDERS
-                                    } else {
-                                        filterFocusIndex = (filterFocusIndex - 1).coerceAtLeast(0)
-                                    }
-                                }
-                                WatchlistFocusZone.CONTENT -> {
-                                    if (isLibraryMode) {
-                                        if (focusedItemIndex % libraryColumns > 0) focusedItemIndex--
-                                        else if (providerLibraries.isNotEmpty()) focusZone = WatchlistFocusZone.LIBRARIES
-                                    } else if (focusedItemIndex > 0) focusedItemIndex--
-                                }
+    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black).testTag("oled-library")) {
+        val compact = touch && (maxWidth < 700.dp || maxHeight < 500.dp)
+        val queryChipMaxWidth = (maxWidth * 0.32f).coerceAtMost(160.dp)
+        val sideWidth = if (touch) 160.dp else 126.dp
+            if (!touch) {
+                Box(Modifier.fillMaxWidth().height(AppTopBarContentTopInset).focusRequester(topFocus).onFocusChanged { topFocused = it.isFocused }
+                    .onKeyEvent { event ->
+                        // The top bar's index runs left-to-right, but Compose mirrors
+                        // the row in an RTL locale, so the physical key has to be
+                        // mirrored back before it reaches index arithmetic written
+                        // against an LTR layout — otherwise the menu walks the wrong way.
+                        if (event.type != KeyEventType.KeyDown) false else when(event.key.mirrorHorizontalForRtl(isRtl)) {
+                            Key.DirectionLeft -> { topIndex = (topIndex - 1).coerceAtLeast(0); true }
+                            Key.DirectionRight -> { topIndex = (topIndex + 1).coerceAtMost(topBarMaxIndex(currentProfile != null)); true }
+                            Key.DirectionDown -> { firstTab.requestFocus(); true }
+                            Key.Enter, Key.DirectionCenter, Key.NumPadEnter -> {
+                                when(topBarFocusedItem(topIndex, currentProfile != null)) {
+                                    SidebarItem.HOME -> onNavigateToHome(); SidebarItem.SEARCH -> onNavigateToSearch()
+                                    SidebarItem.TV -> onNavigateToTv(); SidebarItem.SETTINGS -> onNavigateToSettings(null)
+                                    SidebarItem.WATCHLIST -> firstTab.requestFocus(); null -> onSwitchProfile()
+                                }; true
                             }
-                            true
+                            else -> false
                         }
-                        Key.DirectionRight -> {
-                            when (focusZone) {
-                                WatchlistFocusZone.TOP_BAR -> sidebarFocusIndex = (sidebarFocusIndex + 1).coerceAtMost(maxSidebarIndex)
-                                WatchlistFocusZone.PROVIDERS -> {
-                                    if (isLibraryMode && providerFocusIndex >= providers.lastIndex) {
-                                        filterFocusIndex = 0
-                                        focusZone = WatchlistFocusZone.FILTERS
-                                    } else {
-                                        providerFocusIndex = (providerFocusIndex + 1).coerceAtMost(providers.lastIndex)
-                                    }
-                                }
-                                WatchlistFocusZone.LIBRARIES -> focusZone = WatchlistFocusZone.FILTERS
-                                WatchlistFocusZone.FILTERS -> filterFocusIndex = (filterFocusIndex + 1).coerceAtMost(filters.lastIndex)
-                                WatchlistFocusZone.CONTENT -> {
-                                    val max = if (isLibraryMode) visibleLibraryItems.lastIndex else watchlistSections.getOrNull(focusedSectionIndex)?.second?.lastIndex ?: -1
-                                    if (focusedItemIndex < max) focusedItemIndex++
-                                }
-                            }
-                            true
-                        }
-                        Key.DirectionUp -> {
-                            when (focusZone) {
-                                WatchlistFocusZone.TOP_BAR -> Unit
-                                WatchlistFocusZone.PROVIDERS -> focusZone = WatchlistFocusZone.TOP_BAR
-                                WatchlistFocusZone.LIBRARIES -> {
-                                    if (libraryFocusIndex > 0) libraryFocusIndex-- else focusZone = WatchlistFocusZone.PROVIDERS
-                                }
-                                WatchlistFocusZone.FILTERS -> focusZone = WatchlistFocusZone.TOP_BAR
-                                WatchlistFocusZone.CONTENT -> {
-                                    if (isLibraryMode) {
-                                        if (focusedItemIndex >= libraryColumns) focusedItemIndex -= libraryColumns else focusZone = WatchlistFocusZone.FILTERS
-                                    } else if (focusedSectionIndex > 0) {
-                                        focusedSectionIndex--
-                                        focusedItemIndex = 0
-                                    } else {
-                                        focusZone = WatchlistFocusZone.PROVIDERS
-                                    }
-                                }
-                            }
-                            true
-                        }
-                        Key.DirectionDown -> {
-                            when (focusZone) {
-                                WatchlistFocusZone.TOP_BAR -> focusZone = WatchlistFocusZone.PROVIDERS
-                                WatchlistFocusZone.PROVIDERS -> {
-                                    focusZone = if (isLibraryMode && providerLibraries.isNotEmpty()) WatchlistFocusZone.LIBRARIES else WatchlistFocusZone.CONTENT
-                                }
-                                WatchlistFocusZone.LIBRARIES -> {
-                                    if (libraryFocusIndex < providerLibraries.lastIndex) libraryFocusIndex++
-                                }
-                                WatchlistFocusZone.FILTERS -> if (visibleLibraryItems.isNotEmpty()) moveToContent()
-                                WatchlistFocusZone.CONTENT -> {
-                                    if (isLibraryMode) {
-                                        val next = focusedItemIndex + libraryColumns
-                                        if (next < visibleLibraryItems.size) focusedItemIndex = next
-                                    } else if (focusedSectionIndex < watchlistSections.lastIndex) {
-                                        focusedSectionIndex++
-                                        focusedItemIndex = 0
-                                    }
-                                }
-                            }
-                            true
-                        }
-                        Key.Enter, Key.DirectionCenter -> {
-                            when (focusZone) {
-                                WatchlistFocusZone.TOP_BAR -> {
-                                    if (hasProfile && sidebarFocusIndex == 0) {
-                                        onSwitchProfile()
-                                    } else {
-                                        when (topBarFocusedItem(sidebarFocusIndex, hasProfile)) {
-                                            SidebarItem.SEARCH -> onNavigateToSearch()
-                                            SidebarItem.HOME -> onNavigateToHome()
-                                            SidebarItem.WATCHLIST -> Unit
-                                            SidebarItem.TV -> onNavigateToTv()
-                                            SidebarItem.SETTINGS -> onNavigateToSettings("")
-                                            null -> Unit
-                                        }
-                                    }
-                                }
-                                WatchlistFocusZone.PROVIDERS -> activateProvider(providerFocusIndex)
-                                WatchlistFocusZone.LIBRARIES -> providerLibraries.getOrNull(libraryFocusIndex)?.let { library ->
-                                    if (isHomeServerMode) {
-                                        viewModel.selectLibrary(library.sourceRef)
-                                    } else {
-                                        viewModel.selectSource(library.sourceRef)
-                                    }
-                                    focusedItemIndex = 0
-                                }
-                                WatchlistFocusZone.FILTERS -> activateFilter(filterFocusIndex)
-                                WatchlistFocusZone.CONTENT -> enterKeyDownTimeMs = SystemClock.elapsedRealtime()
-                            }
-                            true
-                        }
-                        else -> false
-                    }
-                } else if (event.type == KeyEventType.KeyUp && effectiveKey in listOf(Key.Enter, Key.DirectionCenter)) {
-                    if (focusZone == WatchlistFocusZone.CONTENT && enterKeyDownTimeMs >= 0L) {
-                        val holdMs = SystemClock.elapsedRealtime() - enterKeyDownTimeMs
-                        val item = if (isLibraryMode) {
-                            visibleLibraryItems.getOrNull(focusedItemIndex)
-                        } else {
-                            watchlistSections.getOrNull(focusedSectionIndex)?.second?.getOrNull(focusedItemIndex)
-                        }
-                        if (item != null) {
-                            if (!isLibraryMode && holdMs >= longPressThresholdMs) viewModel.removeFromWatchlist(item)
-                            else onNavigateToDetails(item.mediaType, item.id)
-                        }
-                        enterKeyDownTimeMs = -1L
-                    }
-                    true
-                } else {
-                    false
+                    }.focusable()) {
+                    AppTopBar(SidebarItem.WATCHLIST, topFocused, topIndex, profile = currentProfile)
                 }
             }
-    ) {
-        if (!isMobile) {
-            AppTopBar(
-                selectedItem = SidebarItem.WATCHLIST,
-                isFocused = focusZone == WatchlistFocusZone.TOP_BAR,
-                focusedIndex = sidebarFocusIndex,
-                profile = currentProfile
-            )
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = if (isMobile) 0.dp else AppTopBarHeight - 10.dp)
-        ) {
-            if (isMobile) {
-                Text(
-                    text = stringResource(R.string.nav_library),
-                    style = ArflixTypography.heroTitle.copy(fontSize = 28.sp),
-                    color = TextPrimary,
-                    modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp, bottom = 12.dp)
-                )
-            }
-
-            ProviderTabs(
-                providers = providers,
-                selectedIndex = selectedProviderIndex,
-                focusedIndex = if (focusZone == WatchlistFocusZone.PROVIDERS) providerFocusIndex else -1,
-                libraryState = activeLibraryState,
-                filters = filters,
-                focusedFilterIndex = if (focusZone == WatchlistFocusZone.FILTERS) filterFocusIndex else -1,
-                showLibraryControls = isLibraryMode,
-                isMobile = isMobile,
-                onSelect = ::activateProvider,
-                onFilterSelect = { index ->
-                    filterFocusIndex = index
-                    activateFilter(index)
+        Column(Modifier.fillMaxSize()
+            .then(if (compact && search) Modifier.imePadding() else Modifier)
+            .padding(top = if (touch) 0.dp else LibraryTabsTopInset)
+            .padding(horizontal = if (compact) 16.dp else 26.dp)) {
+            if (touch) Text(stringResource(R.string.nav_library), color = Color.White, fontSize = 24.sp,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 12.dp))
+            Row(Modifier.fillMaxWidth().testTag("library-section-tabs").then(if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
+                .heightIn(min = 48.dp)
+                .padding(bottom = if(compact) 10.dp else 6.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
+                LibrarySection.entries.forEachIndexed { index, entry ->
+                    OledControl(tr(entry.label), selected = section == entry,
+                        modifier = (if(index == 0) Modifier.focusRequester(firstTab).onGloballyPositioned {
+                            if(!touch && !initialFocusPlaced) { initialFocusPlaced = true; firstTab.requestFocus() }
+                        } else if (entry == LibrarySection.CALENDAR) Modifier.focusRequester(calendarTab) else Modifier), compact = compact,
+                        onClick = { selectSection(entry) })
                 }
-            )
-
-            if (isLibraryMode) {
-                HomeLibraryContent(
-                    state = activeLibraryState,
-                    logoUrls = logoUrls,
-                    libraries = providerLibraries,
-                    selectedLibraryIndex = selectedLibraryIndex,
-                    focusedLibraryIndex = if (focusZone == WatchlistFocusZone.LIBRARIES) libraryFocusIndex else -1,
-                    focusedItemIndex = if (focusZone == WatchlistFocusZone.CONTENT) focusedItemIndex else -1,
-                    gridState = libraryGridState,
-                    columns = libraryColumns,
-                    cardWidth = libraryCardWidth,
-                    isLandscape = !usePosterCards,
-                    isMobile = isMobile,
-                    onLibrarySelect = { index, library ->
-                        libraryFocusIndex = index
-                        if (isHomeServerMode) {
-                            viewModel.selectLibrary(library.sourceRef)
-                        } else {
-                            viewModel.selectSource(library.sourceRef)
-                        }
-                        focusedItemIndex = 0
-                    },
-                    onItemFocused = { focusedItemIndex = it },
-                    onItemVisible = viewModel::ensureLogo,
-                    onItemClick = { onNavigateToDetails(it.mediaType, it.id) },
-                    onLoadMore = {
-                        if (isHomeServerMode) viewModel.loadMoreLibrary() else viewModel.loadMoreActiveSource()
-                    }
-                )
+                if (!compact && !calendarMode) {
+                    Spacer(Modifier.weight(1f))
+                    val serverTotal = servers.totalCount.takeIf { serverMode && mediaFilter == null }
+                    Text(if(collections) "${scopeSources.size} ${tr("lists")}" else "${serverTotal ?: items.size}${if(serverTotal == null && hasMore) "+" else ""} ${tr("titles")}", color = Color.LightGray, fontSize = 13.sp)
+                    OledControl("⌕", onClick = { sourcesOpen = false; filters = false; search = true })
+                    if(collections) OledControl("+ " + tr("New list"), onClick = { onNavigateToSettings("catalogs") })
+                    OledControl(tr("Filters"), modifier = Modifier.focusRequester(filterButton), onClick = { sourcesOpen = false; filters = true })
+                }
+            }
+            if (calendarMode) {
+                if (calendarStateOverride != null) LibraryCalendarPane(
+                    state = calendarStateOverride, onSelectDate = onCalendarSelectDate,
+                    onChangeMonth = onCalendarChangeMonth, onSelectSource = onCalendarSelectSource,
+                    onRefresh = onCalendarRefresh, onOpenDetails = onNavigateToDetails, onOpenRelease = onCalendarOpenRelease,
+                    modifier = Modifier.weight(1f), onExitUp = { calendarTab.requestFocus() })
+                else LibraryCalendarRoute(onOpenDetails = onNavigateToDetails, onOpenRelease = onCalendarOpenRelease,
+                    modifier = Modifier.weight(1f), onExitUp = { calendarTab.requestFocus() },
+                    viewModel = calendarViewModel ?: hiltViewModel())
             } else {
-                WatchlistContent(
-                    uiState = uiState,
-                    sections = watchlistSections,
-                    logoUrls = logoUrls,
-                    cardWidth = cardWidth,
-                    isLandscape = !usePosterCards,
-                    isMobile = isMobile,
-                    focusedSectionIndex = if (focusZone == WatchlistFocusZone.CONTENT) focusedSectionIndex else -1,
-                    focusedItemIndex = if (focusZone == WatchlistFocusZone.CONTENT) focusedItemIndex else -1,
-                    listState = watchlistColumnState,
-                    onItemFocused = { index -> focusedItemIndex = index },
-                    onItemClick = { onNavigateToDetails(it.mediaType, it.id) },
-                    onItemLongPress = viewModel::removeFromWatchlist
-                )
-            }
-        }
-
-        uiState.toastMessage?.let { message ->
-            Toast(
-                message = message,
-                type = when (uiState.toastType) {
-                    ToastType.SUCCESS -> ComponentToastType.SUCCESS
-                    ToastType.ERROR -> ComponentToastType.ERROR
-                    ToastType.INFO -> ComponentToastType.INFO
-                },
-                isVisible = true,
-                onDismiss = viewModel::dismissToast
-            )
-        }
-
-        TextInputModal(
-            isVisible = showSearchModal,
-            title = tr("Search library"),
-            hint = tr("Movie or series title"),
-            initialValue = activeLibraryState.searchQuery,
-            onConfirm = {
-                showSearchModal = false
-                if (isHomeServerMode) {
-                    viewModel.setLibrarySearch(it.trim())
-                } else {
-                    trackerSearchQuery = it.trim()
-                }
-                focusZone = WatchlistFocusZone.FILTERS
-            },
-            onCancel = {
-                showSearchModal = false
-                focusZone = WatchlistFocusZone.FILTERS
-            }
-        )
-
-        if (showSortMenu) {
-            SortSelectionOverlay(
-                options = sortOptions,
-                selectedSort = activeLibraryState.sort,
-                focusedIndex = sortFocusIndex,
-                isMobile = isMobile,
-                onFocus = { sortFocusIndex = it },
-                onSelect = { sort ->
-                    viewModel.setLibrarySort(sort)
-                    showSortMenu = false
-                    focusZone = WatchlistFocusZone.FILTERS
-                },
-                onDismiss = {
-                    showSortMenu = false
-                    focusZone = WatchlistFocusZone.FILTERS
-                }
-            )
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun ProviderTabs(
-    providers: List<LibraryProviderOption>,
-    selectedIndex: Int,
-    focusedIndex: Int,
-    libraryState: HomeLibraryUiState,
-    filters: List<LibraryFilter>,
-    focusedFilterIndex: Int,
-    showLibraryControls: Boolean,
-    isMobile: Boolean,
-    onSelect: (Int) -> Unit,
-    onFilterSelect: (Int) -> Unit
-) {
-    LazyRow(
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 1.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp)
-    ) {
-        itemsIndexed(providers, key = { _, provider -> provider.id }) { index, provider ->
-            val accent = when {
-                provider.isHomeServer -> providerAccent(provider.homeServerKind)
-                provider.label == "Trakt" -> Color(0xFFED1C24)
-                provider.label == "Simkl" -> Color(0xFF00A7B5)
-                else -> Color.White
-            }
-            SelectablePill(
-                label = provider.label,
-                selected = index == selectedIndex,
-                focused = index == focusedIndex,
-                accent = accent,
-                modifier = Modifier.clickable(enabled = isMobile) { onSelect(index) },
-                leading = if (provider.isWatchlist) null else accent,
-                compact = true
-            )
-        }
-        if (showLibraryControls) {
-            itemsIndexed(filters, key = { index, filter -> "library-control-$index-${filter.label}" }) { index, filter ->
-                LibraryFilterControl(
-                    state = libraryState,
-                    filter = filter,
-                    index = index,
-                    focusedFilterIndex = focusedFilterIndex,
-                    isMobile = isMobile,
-                    onSelect = { onFilterSelect(index) }
-                )
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun ColumnScope.HomeLibraryContent(
-    state: HomeLibraryUiState,
-    logoUrls: Map<String, String>,
-    libraries: List<HomeServerCatalogCandidate>,
-    selectedLibraryIndex: Int,
-    focusedLibraryIndex: Int,
-    focusedItemIndex: Int,
-    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
-    columns: Int,
-    cardWidth: Dp,
-    isLandscape: Boolean,
-    isMobile: Boolean,
-    onLibrarySelect: (Int, HomeServerCatalogCandidate) -> Unit,
-    onItemFocused: (Int) -> Unit,
-    onItemVisible: (MediaItem) -> Unit,
-    onItemClick: (MediaItem) -> Unit,
-    onLoadMore: () -> Unit
-) {
-    if (isMobile && libraries.isNotEmpty()) {
-        MobileLibrarySelector(
-            libraries = libraries,
-            selectedIndex = selectedLibraryIndex,
-            onSelect = onLibrarySelect
-        )
-    }
-
-    if (isMobile) {
-        LibraryResults(
-            state = state,
-            logoUrls = logoUrls,
-            focusedItemIndex = focusedItemIndex,
-            gridState = gridState,
-            columns = columns,
-            cardWidth = cardWidth,
-            isLandscape = isLandscape,
-            isMobile = true,
-            onItemFocused = onItemFocused,
-            onItemVisible = onItemVisible,
-            onItemClick = onItemClick,
-            onLoadMore = onLoadMore
-        )
-    } else {
-        Row(
-            modifier = Modifier.fillMaxWidth().weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            LibrarySidebar(
-                libraries = libraries,
-                selectedIndex = selectedLibraryIndex,
-                focusedIndex = focusedLibraryIndex,
-                onSelect = onLibrarySelect
-            )
-            Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                LibraryResults(
-                    state = state,
-                    logoUrls = logoUrls,
-                    focusedItemIndex = focusedItemIndex,
-                    gridState = gridState,
-                    columns = columns,
-                    cardWidth = cardWidth,
-                    isLandscape = isLandscape,
-                    isMobile = false,
-                    onItemFocused = onItemFocused,
-                    onItemVisible = onItemVisible,
-                    onItemClick = onItemClick,
-                    onLoadMore = onLoadMore
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun MobileLibrarySelector(
-    libraries: List<HomeServerCatalogCandidate>,
-    selectedIndex: Int,
-    onSelect: (Int, HomeServerCatalogCandidate) -> Unit
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val selected = libraries.getOrNull(selectedIndex) ?: libraries.first()
-    Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 1.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-                .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(6.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(6.dp))
-                .clickable { expanded = true }
-                .padding(horizontal = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(Color.White.copy(alpha = 0.7f), RoundedCornerShape(2.dp))
-            )
-            Column(modifier = Modifier.padding(start = 10.dp).weight(1f)) {
-                Text(
-                    text = selected.collectionName.ifBlank { selected.title },
-                    style = ArflixTypography.body.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
-                    color = Color.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = selected.serverName,
-                    style = ArflixTypography.caption.copy(fontSize = 10.sp),
-                    color = Color.White.copy(alpha = 0.45f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            Icon(Icons.Outlined.ArrowDropDown, contentDescription = tr("Choose library"), tint = Color.White.copy(alpha = 0.72f))
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            modifier = Modifier.background(Color(0xFF151719)).width(280.dp)
-        ) {
-            libraries.forEachIndexed { index, library ->
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = library.collectionName.ifBlank { library.title },
-                            color = if (index == selectedIndex) Color.White else Color.White.copy(alpha = 0.72f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    onClick = {
-                        expanded = false
-                        onSelect(index, library)
-                    },
-                    leadingIcon = {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(Color.White.copy(alpha = 0.7f), RoundedCornerShape(2.dp))
-                        )
+            if (compact) {
+                if (search) {
+                    val searchFocus = remember { FocusRequester() }
+                    val keyboard = LocalSoftwareKeyboardController.current
+                    val focusManager = LocalFocusManager.current
+                    fun finishSearch() {
+                        keyboard?.hide()
+                        focusManager.clearFocus()
+                        search = false
                     }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun LibrarySidebar(
-    libraries: List<HomeServerCatalogCandidate>,
-    selectedIndex: Int,
-    focusedIndex: Int,
-    onSelect: (Int, HomeServerCatalogCandidate) -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .width(184.dp)
-            .fillMaxHeight()
-            .padding(start = 24.dp, bottom = 24.dp)
-    ) {
-        val activeServerName = libraries.getOrNull(selectedIndex)?.serverName
-            ?: libraries.firstOrNull()?.serverName
-            ?: tr("Home server")
-        Text(
-            text = activeServerName,
-            style = ArflixTypography.body.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
-            color = Color.White.copy(alpha = 0.92f),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            lineHeight = 16.sp,
-            modifier = Modifier.padding(start = 10.dp, top = 6.dp, end = 8.dp)
-        )
-        Text(
-            text = tr("Libraries"),
-            style = ArflixTypography.caption.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
-            color = Color.White.copy(alpha = 0.4f),
-            modifier = Modifier.padding(start = 10.dp, top = 2.dp, bottom = 7.dp)
-        )
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            itemsIndexed(libraries, key = { _, item -> item.sourceRef }) { index, library ->
-                val selected = index == selectedIndex
-                val focused = index == focusedIndex
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(44.dp)
-                        .background(
-                            when {
-                                selected -> Color.White.copy(alpha = if (focused) 0.14f else 0.1f)
-                                focused -> Color.White.copy(alpha = 0.06f)
-                                else -> Color.Transparent
-                            },
-                            RoundedCornerShape(6.dp)
-                        )
-                        .border(
-                            if (focused) 2.dp else 1.dp,
-                            when {
-                                focused -> Color.White
-                                selected -> Color.White.copy(alpha = 0.3f)
-                                else -> Color.Transparent
-                            },
-                            RoundedCornerShape(6.dp)
-                        )
-                        .clickable(enabled = false) { onSelect(index, library) }
-                        .padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = if (library.collectionType.lowercase().let { "movie" in it || "film" in it }) {
-                            Icons.Outlined.Movie
-                        } else {
-                            Icons.Outlined.Tv
-                        },
-                        contentDescription = null,
-                        tint = Color.White.copy(alpha = if (selected || focused) 0.92f else 0.62f),
-                        modifier = Modifier.size(17.dp)
-                    )
-                    Text(
-                        text = library.collectionName.ifBlank { library.title },
-                        style = ArflixTypography.body.copy(fontSize = 14.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium),
-                        color = Color.White.copy(alpha = if (selected || focused) 1f else 0.66f),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 16.sp,
-                        modifier = Modifier.padding(start = 10.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LibraryFilterControl(
-    state: HomeLibraryUiState,
-    filter: LibraryFilter,
-    index: Int,
-    focusedFilterIndex: Int,
-    isMobile: Boolean,
-    onSelect: () -> Unit
-) {
-    val selected = when {
-        filter.isSort -> true
-        filter.isSearch -> state.searchQuery.isNotBlank()
-        else -> false
-    }
-    val label = when {
-        filter.isSort -> when (state.sort) {
-            HomeServerLibrarySort.RECENTLY_ADDED -> tr("Recently added")
-            HomeServerLibrarySort.RATING -> tr("Highest rated")
-            HomeServerLibrarySort.TITLE -> tr("Title A-Z")
-        }
-        filter.isSearch && state.searchQuery.isNotBlank() -> state.searchQuery
-        else -> filter.label
-    }
-    SelectablePill(
-        label = label,
-        selected = selected,
-        focused = index == focusedFilterIndex,
-        accent = Color.White,
-        compact = true,
-        iconOnly = filter.iconOnly,
-        icon = when {
-            filter.isSort -> Icons.AutoMirrored.Outlined.Sort
-            filter.isSearch -> Icons.Outlined.Search
-            filter.isRefresh -> Icons.Outlined.Refresh
-            else -> null
-        },
-        modifier = Modifier.clickable(enabled = isMobile) { onSelect() }
-    )
-}
-
-@Composable
-private fun SortSelectionOverlay(
-    options: List<Pair<String, HomeServerLibrarySort>>,
-    selectedSort: HomeServerLibrarySort,
-    focusedIndex: Int,
-    isMobile: Boolean,
-    onFocus: (Int) -> Unit,
-    onSelect: (HomeServerLibrarySort) -> Unit,
-    onDismiss: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.62f))
-            .clickable(enabled = isMobile) { onDismiss() },
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .width(if (isMobile) 304.dp else 330.dp)
-                .background(Color(0xFF151719), RoundedCornerShape(8.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(8.dp))
-                .clickable(enabled = isMobile) { }
-                .padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp)
-        ) {
-            Text(
-                text = tr("Sort library"),
-                style = ArflixTypography.sectionTitle.copy(fontSize = 18.sp),
-                color = Color.White,
-                modifier = Modifier.padding(start = 10.dp, top = 4.dp, bottom = 7.dp)
-            )
-            options.forEachIndexed { index, (label, sort) ->
-                val focused = index == focusedIndex
-                val selected = sort == selectedSort
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(46.dp)
-                        .background(
-                            when {
-                                selected -> Color.White.copy(alpha = if (focused) 0.15f else 0.1f)
-                                focused -> Color.White.copy(alpha = 0.06f)
-                                else -> Color.Transparent
-                            },
-                            RoundedCornerShape(6.dp)
-                        )
-                        .border(
-                            if (focused) 2.dp else 1.dp,
-                            if (focused) Color.White else Color.Transparent,
-                            RoundedCornerShape(6.dp)
-                        )
-                        .clickable(enabled = isMobile) {
-                            onFocus(index)
-                            onSelect(sort)
-                        }
-                        .padding(horizontal = 13.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = label,
-                        style = ArflixTypography.body.copy(fontSize = 14.sp),
-                        color = Color.White.copy(alpha = if (focused || selected) 1f else 0.7f),
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (selected) {
+                    LaunchedEffect(searchFocus) {
+                        searchFocus.requestFocus()
+                        // Let Android attach the new field's input connection before showing the IME.
+                        withFrameNanos { }
+                        keyboard?.show()
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp)
+                            .heightIn(min = 48.dp)
+                            .clip(CircleShape)
+                            .background(BackgroundElevated)
+                            .padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Icon(
-                            imageVector = Icons.Outlined.Check,
-                            contentDescription = tr("Selected"),
-                            tint = Color.White,
+                            Icons.Outlined.Search,
+                            contentDescription = tr("Search library"),
+                            tint = resolveAccentColor(Color.White),
                             modifier = Modifier.size(18.dp)
                         )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ColumnScope.LibraryResults(
-    state: HomeLibraryUiState,
-    logoUrls: Map<String, String>,
-    focusedItemIndex: Int,
-    gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
-    columns: Int,
-    cardWidth: Dp,
-    isLandscape: Boolean,
-    isMobile: Boolean,
-    onItemFocused: (Int) -> Unit,
-    onItemVisible: (MediaItem) -> Unit,
-    onItemClick: (MediaItem) -> Unit,
-    onLoadMore: () -> Unit
-) {
-    when {
-        state.isLoading && state.items.isEmpty() -> CenteredLoading()
-        state.error != null && state.items.isEmpty() -> LibraryMessage(
-            title = tr("Library unavailable"),
-            subtitle = state.error
-        )
-        state.items.isEmpty() -> LibraryMessage(
-            title = if (state.searchQuery.isBlank()) tr("This library is empty") else tr("No matching titles"),
-            subtitle = if (state.searchQuery.isBlank()) tr("Choose another library") else tr("Try a different search")
-        )
-        else -> {
-            val contentAlpha by animateFloatAsState(
-                targetValue = if (state.isLoading) 0.56f else 1f,
-                animationSpec = tween(durationMillis = 140),
-                label = "library-content-alpha"
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(columns),
-                    state = gridState,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer { alpha = contentAlpha }
-                        .padding(horizontal = 24.dp),
-                    contentPadding = PaddingValues(top = 6.dp, bottom = 24.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(15.dp),
-                    userScrollEnabled = isMobile && !state.isLoading
-                ) {
-                    gridItemsIndexed(
-                        items = state.items,
-                        key = { index, item -> watchlistItemKey(item, index) },
-                        contentType = { _, item -> "library-${item.mediaType}" }
-                    ) { index, item ->
-                        LaunchedEffect(watchlistLogoKey(item)) {
-                            onItemVisible(item)
-                        }
-                        MediaCard(
-                            item = item,
-                            width = cardWidth,
-                            isLandscape = isLandscape,
-                            logoImageUrl = logoUrls[watchlistLogoKey(item)],
-                            showTitle = true,
-                            titleMaxLines = 2,
-                            isFocusedOverride = index == focusedItemIndex,
-                            enableSystemFocus = false,
-                            onFocused = { onItemFocused(index) },
-                            onClick = { onItemClick(item) }
+                        BasicTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            modifier = Modifier.weight(1f).focusRequester(searchFocus).testTag("library-search-field"),
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                            cursorBrush = SolidColor(resolveAccentColor(Color.White)),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = { finishSearch() }),
+                            decorationBox = { innerTextField ->
+                                if (query.isEmpty()) {
+                                    Text(tr("Search library…"), color = Color.Gray, fontSize = 14.sp)
+                                }
+                                innerTextField()
+                            }
                         )
-                    }
-                    if (state.isLoadingMore) {
-                        item(key = "library-loading-more", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                LoadingIndicator(color = Pink, size = 34.dp)
+                        if (query.isNotEmpty()) {
+                            IconButton(onClick = { query = "" },
+                                modifier = Modifier.size(48.dp).testTag("library-search-clear")) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = tr("Clear search"),
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
+                        TextButton(
+                            onClick = { finishSearch() },
+                            modifier = Modifier.heightIn(min = 48.dp).testTag("library-search-done")
+                        ) {
+                            Text(
+                                tr("Done"),
+                                color = resolveAccentColor(Color.White),
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
-                }
-                if (state.isLoading) {
-                    Box(
-                        modifier = Modifier.align(Alignment.TopEnd).padding(top = 12.dp, end = 34.dp),
-                        contentAlignment = Alignment.Center
+                } else {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        LoadingIndicator(color = Color.White, size = 25.dp)
+                        if (!collections) OledControl(
+                            label = scopeSources.firstOrNull { it.id == selectedId }?.title ?: tr("Choose library"),
+                            modifier = Modifier.weight(1f).testTag("library-source-picker"),
+                            compact = true,
+                            trailingIcon = Icons.Outlined.KeyboardArrowDown,
+                            onClick = { sourcesOpen = true }
+                        ) else OledControl(
+                            "+ " + tr("New list"),
+                            modifier = Modifier.weight(1f),
+                            compact = true,
+                            onClick = { onNavigateToSettings("catalogs") }
+                        )
+                        if (query.isNotEmpty()) {
+                            OledControl(
+                                label = "\"$query\"",
+                                modifier = Modifier.widthIn(max = queryChipMaxWidth),
+                                compact = true,
+                                selected = true,
+                                trailingIcon = Icons.Default.Close,
+                                trailingIconDescription = tr("Clear search"),
+                                onClick = { query = "" }
+                            )
+                        } else {
+                            OledControl(
+                                "⌕",
+                                compact = true,
+                                onClick = { sourcesOpen = false; filters = false; search = true }
+                            )
+                        }
+                        val hasActiveFilters = mediaFilter != null || sort != HomeServerLibrarySort.RECENTLY_ADDED
+                        OledControl(
+                            label = tr("Filters"),
+                            compact = true,
+                            selected = hasActiveFilters,
+                            hasActiveBadge = hasActiveFilters,
+                            modifier = Modifier.focusRequester(filterButton),
+                            onClick = { sourcesOpen = false; filters = true }
+                        )
                     }
                 }
             }
-            LaunchedEffect(gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index) {
-                val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-                if (last >= state.items.size - columns * 2) onLoadMore()
+            if (openedList != null) Row(Modifier.padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                OledControl("‹ ${tr("My lists")}", onClick = { openedList = null })
+                Text(state.selectedSource.title, color = Color.White, fontSize = 15.sp, modifier = Modifier.padding(start = 12.dp))
+            }
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                if (!compact && !collections && openedList == null) {
+                    OledSources(scopeSources, selectedId, Modifier.width(sideWidth), ::selectSource, onNavigateToSettings)
+                }
+                BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
+                    val columns = libraryColumns(maxWidth.value.toInt(), poster, collections)
+                    val width = (maxWidth - 12.dp * (columns - 1)) / columns
+                    if (serverMode) LibraryArtworkPrefetch(grid, items, width - 12.dp, columns, poster)
+                    val previewCatalog = remember(sourceKey, state.selectedSource.title, scopeSources, selectedId) {
+                        CatalogConfig(sourceKey, scopeSources.firstOrNull { it.id == selectedId }?.title
+                            ?: state.selectedSource.title, CatalogSourceType.PREINSTALLED)
+                    }
+                    val spotlightItem = previewItem
+                    val compactSpotlight = compact || maxHeight < 440.dp
+                    val showSpotlight = !collections && items.isNotEmpty()
+                    if (showSpotlight) CollectionBackdrop(previewCatalog, spotlightItem, touch,
+                        collectionSpotlightHeight(touch, compactSpotlight) + 150.dp,
+                        background = Color.Black)
+                    Column(Modifier.fillMaxSize()) {
+                    if (showSpotlight && !touch) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .then(if (touch && spotlightItem != null) Modifier.clickable {
+                                    onNavigateToDetails(spotlightItem.mediaType, spotlightItem.id)
+                                } else Modifier)
+                        ) {
+                            CollectionSpotlight(previewCatalog, spotlightItem, touch, compactSpotlight, {},
+                                providerLogoUrl = activePreview?.providerLogoUrl ?: spotlightItem?.primaryNetworkLogo,
+                                clearLogoUrl = previewItem?.let { logos[watchlistLogoKey(it)] },
+                                horizontalInset = 6.dp, showBackButton = false, topInset = 16.dp)
+                        }
+                    }
+                    // Row anchoring keeps the previous row entirely outside this viewport.
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().clipToBounds()) {
+                    val rowHeight by remember(grid) { derivedStateOf {
+                        grid.layoutInfo.visibleItemsInfo.maxOfOrNull { it.size.height } ?: 0
+                    } }
+                    val minimumBottomPadding = 16.dp + LocalBottomBarInset.current
+                    val bottomPadding = if (touch || collections) minimumBottomPadding else with(LocalDensity.current) {
+                        libraryGridBottomPadding(maxHeight.roundToPx(), rowHeight,
+                            8.dp.roundToPx(), minimumBottomPadding.roundToPx()).toDp()
+                    }
+                    // Touch keeps native scrolling; TV moves once per row, never per column.
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides
+                        if (touch || collections) LocalBringIntoViewSpec.current else LibraryTvBringIntoViewSpec) {
+                    if (collections) {
+                        val lists = scopeSources.filter { it.title.contains(query, true) }
+                        if (lists.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 24.dp, vertical = 24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(68.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.White.copy(alpha = 0.08f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = if (query.isNotEmpty()) Icons.Outlined.Search else Icons.Default.BookmarkBorder,
+                                            contentDescription = null,
+                                            tint = resolveAccentColor(Color.White),
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                    }
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = if (query.isNotEmpty()) tr("No matching lists") else tr("No lists yet"),
+                                            color = Color.White,
+                                            fontSize = 19.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = if (query.isNotEmpty()) tr("No lists found matching \"%s\"").format(query)
+                                                else tr("Your custom catalogs and personal lists appear here."),
+                                            color = Color.Gray,
+                                            fontSize = 13.sp,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.widthIn(max = 280.dp)
+                                        )
+                                    }
+                                    if (query.isNotEmpty()) {
+                                        OledControl(
+                                            label = tr("Clear search"),
+                                            compact = touch,
+                                            onClick = { query = "" }
+                                        )
+                                    } else {
+                                        OledControl(
+                                            label = "+ " + tr("New list"),
+                                            compact = touch,
+                                            selected = true,
+                                            onClick = { onNavigateToSettings("catalogs") }
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            LazyVerticalGrid(GridCells.Fixed(columns), state = grid, modifier = Modifier.fillMaxSize(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(18.dp),
+                                contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp + LocalBottomBarInset.current)) {
+                                items(lists, key = { it.id }) { source ->
+                                    var cover by remember(source) { mutableStateOf<String?>((source as? WatchlistSourceItem.Catalog)?.config?.collectionCoverImageUrl) }
+                                    LaunchedEffect(source) { cover = viewModel.collectionCover(source) }
+                                    OledCollection(source, cover, width) { openedList = source.id; viewModel.selectSource(source.id) }
+                                }
+                            }
+                        }
+                    } else if (loading && items.isEmpty()) {
+                        CircularProgressIndicator(Modifier.align(Alignment.Center), color = resolveAccentColor(Color.White))
+                    } else if (items.isEmpty()) {
+                        Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                            val disconnected = touch && serverMode && scopeSources.isEmpty() && error == null
+                            OledMessage(if (disconnected) stringResource(R.string.mobile_server_disconnected) else if(error != null) tr("Library unavailable") else tr("No titles found"),
+                                if (disconnected) stringResource(R.string.mobile_server_disconnected_hint) else error ?: tr("Choose a source or add titles to your watchlist."))
+                            if (disconnected) OledControl(stringResource(R.string.mobile_connect_server), onClick = { onNavigateToSettings("home_server") })
+                            if(error != null) OledControl(tr("Retry"), onClick = { if(serverMode) viewModel.refreshLibrary() else viewModel.refresh() })
+                        }
+                    } else LazyVerticalGrid(GridCells.Fixed(columns), state = grid,
+                        modifier = Modifier.fillMaxSize().arvioDpadFocusGroup(enableFocusRestorer = false)
+                            .clipToBounds().testTag("library-grid"),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = PaddingValues(top = 8.dp, bottom = bottomPadding)) {
+                        if (touch && showSpotlight) item("mobile-spotlight", span = { GridItemSpan(maxLineSpan) }) {
+                            CollectionSpotlight(previewCatalog, spotlightItem, true, compactSpotlight, {},
+                                providerLogoUrl = activePreview?.providerLogoUrl ?: spotlightItem?.primaryNetworkLogo,
+                                clearLogoUrl = previewItem?.let { logos[watchlistLogoKey(it)] },
+                                horizontalInset = 6.dp, showBackButton = false, topInset = 8.dp)
+                        }
+                        itemsIndexed(items, key = { index, item -> watchlistItemKey(item, index) }) { index, item ->
+                            LaunchedEffect(watchlistLogoKey(item), poster) { if(!poster) viewModel.ensureLogo(item) }
+                            Box(Modifier.padding(6.dp).testTag("library-card-frame-$index")) {
+                            MediaCard(item, width = width - 12.dp, isLandscape = !poster, logoImageUrl = logos[watchlistLogoKey(item)],
+                                focusedScale = 1.025f, titleMaxLines = 1, showTitle = true,
+                                modifier = Modifier.testTag("library-card-$index"),
+                                onFocused = { focusedPreviewKey = libraryPreviewKey(item); viewModel.saveFocusState(0, index); revealCard(index, columns) },
+                                onClick = { onNavigateToDetails(item.mediaType, item.id) },
+                                onLongClick = if(state.selectedSourceId == WatchlistSourceItem.MyWatchlist.id && !serverMode) ({
+                                    if (touch) haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    viewModel.removeFromWatchlist(item)
+                                }) else null)
+                            }
+                        }
+                        if (if(serverMode) servers.isLoadingMore else state.isLoadingMore) item("loading-more", span = { GridItemSpan(maxLineSpan) }) {
+                            Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(Modifier.size(24.dp), color = resolveAccentColor(Color.White))
+                            }
+                        }
+                        if(error != null) item("retry-page", span = { GridItemSpan(maxLineSpan) }) {
+                            OledControl(tr("Could not update this source. Retry"), onClick = { if(serverMode) viewModel.refreshLibrary() else viewModel.refresh() })
+                        }
+                    }
+                    }
+                    }
+                    }
+                }
+            }
             }
         }
+        state.toastMessage?.let { message ->
+            Toast(message = message, isVisible = true, onDismiss = viewModel::dismissToast)
+        }
+        TextInputModal(search && !compact, tr("Search library"), initialValue = query,
+            onConfirm = { query = it.trim(); search = false }, onCancel = { search = false })
     }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun ColumnScope.WatchlistContent(
-    uiState: WatchlistUiState,
-    sections: List<Pair<String, List<MediaItem>>>,
-    logoUrls: Map<String, String>,
-    cardWidth: Dp,
-    isLandscape: Boolean,
-    isMobile: Boolean,
-    focusedSectionIndex: Int,
-    focusedItemIndex: Int,
-    listState: androidx.compose.foundation.lazy.LazyListState,
-    onItemFocused: (Int) -> Unit,
-    onItemClick: (MediaItem) -> Unit,
-    onItemLongPress: (MediaItem) -> Unit
-) {
-    val totalItems = uiState.movies.size + uiState.series.size
-    when {
-        uiState.isLoading -> CenteredLoading()
-        totalItems == 0 -> {
-            Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Outlined.Bookmark,
-                        contentDescription = null,
-                        tint = Color.White.copy(alpha = 0.2f),
-                        modifier = Modifier.size(80.dp)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = tr("Your watchlist is empty"),
-                        style = ArflixTypography.body,
-                        color = Color.White.copy(alpha = 0.5f),
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = tr("Add movies and shows for later"),
-                        style = ArflixTypography.caption,
-                        color = Color.White.copy(alpha = 0.3f),
-                        textAlign = TextAlign.Center
+    if(sourcesOpen) OledDrawer(tr("Sources"), { sourcesOpen = false }) {
+        OledSources(scopeSources, selectedId, Modifier.fillMaxWidth(), ::selectSource, onNavigateToSettings, inDrawer = true)
+    }
+    if(filters) OledDrawer(tr("Filters"), { filters = false; if(!touch) filterButton.requestFocus() }) {
+        Text(tr("Sort"), color = Color.LightGray, modifier = Modifier.padding(top = 8.dp, bottom = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+        listOf("Recently added" to HomeServerLibrarySort.RECENTLY_ADDED, "Title A-Z" to HomeServerLibrarySort.TITLE,
+            "Highest rated" to HomeServerLibrarySort.RATING, "Newest release" to HomeServerLibrarySort.RELEASE_DATE_NEWEST,
+            "Oldest release" to HomeServerLibrarySort.RELEASE_DATE_OLDEST).forEach { (label, value) ->
+            OledControl(
+                tr(label),
+                selected = sort == value,
+                trailingIcon = if (sort == value) Icons.Outlined.Check else null,
+                compact = touch,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                onClick = {
+                    sort = value
+                    if (touch) filters = false
+                }
+            )
+        }
+        if(!collections) {
+            Text(tr("Type"), color = Color.LightGray, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("All" to null, "Movies" to MediaType.MOVIE, "Series" to MediaType.TV).forEach { (label, value) ->
+                    OledControl(
+                        tr(label),
+                        selected = mediaFilter == value,
+                        compact = true,
+                        icon = when(value) {
+                            MediaType.MOVIE -> Icons.Outlined.Movie
+                            MediaType.TV -> Icons.Outlined.Tv
+                            else -> null
+                        },
+                        modifier = Modifier.weight(1f),
+                        onClick = { mediaFilter = value }
                     )
                 }
             }
-        }
-        else -> {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(start = 24.dp, end = 48.dp),
-                contentPadding = PaddingValues(top = 10.dp, bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(if (isMobile) 24.dp else 16.dp),
-                userScrollEnabled = isMobile
-            ) {
-                itemsIndexed(sections, key = { _, item -> item.first }) { sectionIdx, (sectionType, items) ->
-                    WatchlistItemsSection(
-                        title = if (sectionType == "movies") tr("Movies") else tr("Series"),
-                        items = items,
-                        logoUrls = logoUrls,
-                        cardWidth = cardWidth,
-                        isLandscape = isLandscape,
-                        isMobile = isMobile,
-                        focusedItemIndex = if (focusedSectionIndex == sectionIdx) focusedItemIndex else -1,
-                        onItemFocused = onItemFocused,
-                        onItemClick = onItemClick,
-                        onItemLongPress = onItemLongPress
+            Spacer(Modifier.height(16.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (mediaFilter != null || sort != HomeServerLibrarySort.RECENTLY_ADDED) {
+                    OledControl(
+                        tr("Reset"),
+                        compact = touch,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            sort = HomeServerLibrarySort.RECENTLY_ADDED
+                            mediaFilter = null
+                        }
                     )
                 }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun SelectablePill(
-    label: String,
-    selected: Boolean,
-    focused: Boolean,
-    accent: Color,
-    modifier: Modifier = Modifier,
-    leading: Color? = null,
-    compact: Boolean = false,
-    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
-    iconOnly: Boolean = false
-) {
-    val shape = RoundedCornerShape(6.dp)
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.018f else 1f,
-        animationSpec = tween(durationMillis = 110),
-        label = "pill-focus-scale"
-    )
-    val background = when {
-        selected -> Color.White.copy(alpha = if (focused) 0.16f else 0.11f)
-        focused -> Color.White.copy(alpha = 0.065f)
-        else -> Color.White.copy(alpha = 0.045f)
-    }
-    val foreground = if (selected || focused) Color.White else Color.White.copy(alpha = 0.66f)
-    Row(
-        modifier = modifier
-            .height(if (compact) 34.dp else 40.dp)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
-            .background(background, shape)
-            .border(
-                width = if (focused) 2.dp else if (selected) 1.dp else 0.5.dp,
-                color = when {
-                    focused -> Color.White
-                    selected -> accent.copy(alpha = 0.62f)
-                    else -> Color.White.copy(alpha = 0.08f)
-                },
-                shape = shape
-            )
-            .padding(horizontal = if (iconOnly) 9.dp else if (compact) 12.dp else 15.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        if (leading != null) {
-            Box(modifier = Modifier.size(7.dp).background(leading, RoundedCornerShape(2.dp)))
-        }
-        if (icon != null) {
-            Icon(icon, contentDescription = if (iconOnly) label else null, tint = foreground, modifier = Modifier.size(16.dp))
-        }
-        if (!iconOnly) {
-            Text(
-                text = label,
-                color = foreground,
-                fontSize = if (compact) 13.sp else 14.sp,
-                fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-private fun providerAccent(provider: HomeServerKind?): Color = when (provider) {
-    HomeServerKind.PLEX -> Color(0xFFE5A00D)
-    HomeServerKind.JELLYFIN -> Color(0xFF9B5DE5)
-    HomeServerKind.EMBY -> Color(0xFF52B54B)
-    else -> Color.White
-}
-
-@Composable
-private fun CenteredLoading() {
-    Box(modifier = Modifier.fillMaxWidth().fillMaxSize(), contentAlignment = Alignment.Center) {
-        LoadingIndicator(color = Pink, size = 56.dp)
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun LibraryMessage(title: String, subtitle: String) {
-    Box(modifier = Modifier.fillMaxWidth().fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = title, style = ArflixTypography.sectionTitle, color = TextPrimary)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(text = subtitle, style = ArflixTypography.caption, color = Color.White.copy(alpha = 0.45f))
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun WatchlistItemsSection(
-    title: String,
-    items: List<MediaItem>,
-    logoUrls: Map<String, String>,
-    cardWidth: Dp,
-    isLandscape: Boolean,
-    isMobile: Boolean = false,
-    focusedItemIndex: Int = -1,
-    onItemFocused: (Int) -> Unit = {},
-    onItemClick: (MediaItem) -> Unit,
-    onItemLongPress: (MediaItem) -> Unit = {}
-) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = title,
-            style = ArflixTypography.sectionTitle,
-            color = TextPrimary,
-            modifier = Modifier.padding(start = 8.dp, bottom = 8.dp)
-        )
-
-        val lazyListState = rememberLazyListState()
-        LaunchedEffect(focusedItemIndex) {
-            if (focusedItemIndex < 0) return@LaunchedEffect
-            val safe = focusedItemIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
-            val first = lazyListState.firstVisibleItemIndex
-            val last = lazyListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: first
-            if (safe < first || safe > last) lazyListState.scrollToItem(safe)
-            else if (safe != first) lazyListState.animateScrollToItem(safe)
-        }
-
-        LazyRow(
-            state = lazyListState,
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-            contentPadding = PaddingValues(start = 8.dp, end = 16.dp, top = 4.dp, bottom = 4.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            itemsIndexed(
-                items = items,
-                key = { index, item -> watchlistItemKey(item, index) },
-                contentType = { _, item -> "${item.mediaType.name}_card" }
-            ) { index, item ->
-                MediaCard(
-                    item = item,
-                    width = cardWidth,
-                    isLandscape = isLandscape,
-                    logoImageUrl = logoUrls[watchlistLogoKey(item)],
-                    showTitle = true,
-                    titleMaxLines = 2,
-                    isFocusedOverride = index == focusedItemIndex && focusedItemIndex >= 0,
-                    enableSystemFocus = false,
-                    onFocused = { onItemFocused(index) },
-                    onClick = { onItemClick(item) },
-                    onLongClick = { onItemLongPress(item) }
+                OledControl(
+                    tr("Refresh"),
+                    compact = touch,
+                    modifier = if (mediaFilter != null || sort != HomeServerLibrarySort.RECENTLY_ADDED) Modifier.weight(1f) else Modifier.fillMaxWidth(),
+                    onClick = { if(serverMode) viewModel.refreshLibrary() else viewModel.refresh() }
                 )
             }
         }
+    }
+}
+
+@Composable
+internal fun OledControl(
+    label: String,
+    modifier: Modifier = Modifier,
+    selected: Boolean = false,
+    compact: Boolean = false,
+    icon: ImageVector? = null,
+    trailingIcon: ImageVector? = null,
+    trailingIconDescription: String? = null,
+    hasActiveBadge: Boolean = false,
+    maxLines: Int = 1,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val touch = LocalDeviceType.current.isTouchDevice()
+    val accent = resolveAccentColor(Color.White)
+    // Phone/tablet (compact): selected tab is a white pill with black text.
+    // TV keeps the elevated dark treatment; focus uses the accent color.
+    val isPhoneSelected = selected && compact
+    val foreground = if(focused) { if(accent.luminance() > .4f) Color.Black else Color.White } else if(isPhoneSelected) Color.Black else Color.White
+    val haptic = LocalHapticFeedback.current
+    val background by animateColorAsState(if(focused) accent else if(isPhoneSelected) Color.White else if(selected) BackgroundElevated else Color.Transparent, tween(120), label = "library-control")
+    Box(
+        modifier
+            .then(if (touch) Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp) else Modifier)
+            .onFocusChanged { focused = it.isFocused }
+            .clip(if(compact) CircleShape else RoundedCornerShape(8.dp))
+            .background(background)
+            .clickable {
+                if (compact && !selected) {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                }
+                onClick()
+            }
+            .padding(horizontal = if(compact) 10.dp else 12.dp, vertical = if(compact) 8.dp else 11.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        if(label == "⌕") {
+            Icon(Icons.Outlined.Search, contentDescription = tr("Search library"), tint = foreground, modifier = Modifier.size(20.dp))
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if(icon != null) {
+                    Icon(icon, contentDescription = null, tint = foreground, modifier = Modifier.size(18.dp))
+                }
+                Text(
+                    label,
+                    modifier = if (touch && (trailingIcon != null || hasActiveBadge)) Modifier.weight(1f, fill = false) else Modifier,
+                    color = foreground,
+                    fontSize = if(compact) 13.sp else 14.sp,
+                    fontWeight = if(selected || focused) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = maxLines,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (hasActiveBadge) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .background(if (isPhoneSelected) Color.Black else accent, CircleShape)
+                    )
+                }
+                if (trailingIcon != null) {
+                    Icon(trailingIcon, contentDescription = trailingIconDescription, tint = foreground, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OledSources(
+    sources: List<WatchlistSourceItem>,
+    selectedId: String,
+    modifier: Modifier,
+    select: (WatchlistSourceItem) -> Unit,
+    settings: (String) -> Unit,
+    inDrawer: Boolean = false
+) {
+    val touch = LocalDeviceType.current.isTouchDevice()
+    val groups = sources.groupBy { when(it) {
+        is WatchlistSourceItem.MyWatchlist -> tr("Saved")
+        is WatchlistSourceItem.HomeServer -> it.candidate.serverName
+        else -> it.subtitle ?: tr("Lists")
+    } }
+    val header: @Composable (String, WatchlistSourceItem?) -> Unit = { group, first ->
+        Column(Modifier.padding(top = if (touch) 10.dp else 24.dp, bottom = 6.dp, start = 8.dp)) {
+            val provider = (first as? WatchlistSourceItem.TrackerList)?.provider
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                when (provider) {
+                    TrackerLibraryProvider.TRAKT -> Icon(painterResource(R.drawable.ic_trakt), contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                    TrackerLibraryProvider.SIMKL -> Icon(painterResource(R.drawable.ic_simkl), contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                    TrackerLibraryProvider.MDBLIST -> Icon(painterResource(R.drawable.ic_mdblist), contentDescription = null, tint = Color.White, modifier = Modifier.size(13.dp))
+                    else -> Unit
+                }
+                Text(
+                    group.uppercase(),
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = if (provider != null) 9.sp else 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp,
+                    maxLines = 1
+                )
+            }
+            (first as? WatchlistSourceItem.HomeServer)?.let { Text(it.candidate.serverKind.name.lowercase().replaceFirstChar(Char::titlecase), color = Color.Gray, fontSize = 11.sp) }
+        }
+    }
+    val row: @Composable (WatchlistSourceItem) -> Unit = { source ->
+        OledControl(
+            label = tr(source.title),
+            selected = source.id == selectedId,
+            compact = touch,
+            trailingIcon = if (source.id == selectedId) Icons.Outlined.Check else null,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp).testTag("library-source-${source.id}"),
+            icon = (source as? WatchlistSourceItem.HomeServer)?.let { if(it.candidate.collectionType.contains("movie", true)) Icons.Outlined.Movie else Icons.Outlined.Tv },
+            onClick = { select(source) }
+        )
+    }
+    val showConnect = sources.isEmpty() || sources.any { it is WatchlistSourceItem.HomeServer }
+    val connect: @Composable () -> Unit = {
+        OledControl(
+            label = "+ ${tr("Connect server")}",
+            compact = touch,
+            modifier = Modifier.padding(top = 16.dp).fillMaxWidth(),
+            maxLines = 2,
+            onClick = { settings("home_server") }
+        )
+    }
+    if (inDrawer) {
+        // The drawer scrolls the header and the sources together.
+        Column(modifier.testTag("library-sources"), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            groups.forEach { (group, entries) ->
+                header(group, entries.firstOrNull())
+                entries.forEach { source -> key(source.id) { row(source) } }
+            }
+            if (showConnect) connect()
+        }
+    } else {
+        LazyColumn(modifier.testTag("library-sources"), verticalArrangement = Arrangement.spacedBy(4.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
+            groups.forEach { (group, entries) ->
+                item("group:$group") { header(group, entries.firstOrNull()) }
+                items(entries, key = { it.id }) { row(it) }
+            }
+            if (showConnect) item("connect") { connect() }
+        }
+    }
+}
+
+@Composable
+private fun OledCollection(source: WatchlistSourceItem, cover: String?, width: Dp, onClick: () -> Unit) {
+    var focused by remember { mutableStateOf(false) }
+    val accent = resolveAccentColor(Color.White)
+    Column(Modifier.width(width).onFocusChanged { focused = it.isFocused }.clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick)) {
+        Box(Modifier.fillMaxWidth().padding(top = 5.dp)) {
+            Box(Modifier.padding(horizontal = 10.dp).offset(y = (-5).dp).fillMaxWidth().height(8.dp).background(BackgroundElevated, RoundedCornerShape(8.dp)))
+            AsyncImage(cover, source.title, modifier = Modifier.fillMaxWidth().aspectRatio(2.2f).clip(RoundedCornerShape(8.dp)).background(BackgroundCard), contentScale = ContentScale.Crop)
+        }
+        Column(Modifier.fillMaxWidth().background(if(focused) accent else Color.Black).padding(10.dp)) {
+            val ink = if(focused && accent.luminance() > .4f) Color.Black else Color.White
+            Text(source.title, color = ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(source.subtitle ?: tr("Personal list"), color = ink.copy(alpha = .7f), fontSize = 13.sp, maxLines = 1)
+        }
+    }
+}
+
+@Composable private fun OledMessage(title: String, detail: String) {
+    Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(title, color = Color.White, fontSize = 19.sp)
+        Text(detail, color = Color.Gray, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp))
+    }
+}
+
+@Composable
+private fun OledDrawer(title: String, close: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    val initial = remember { FocusRequester() }
+    val touch = LocalDeviceType.current.isTouchDevice()
+    Dialog(
+        onDismissRequest = close,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .testTag("library-drawer-root")
+        ) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .pointerInput(close) {
+                        detectTapGestures { close() }
+                    }
+            )
+            Column(
+                Modifier
+                    .then(
+                        if (touch) {
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .heightIn(max = 560.dp)
+                                .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                                .background(BackgroundDark)
+                                .pointerInput(Unit) {
+                                    detectTapGestures { }
+                                }
+                                .padding(horizontal = 20.dp, vertical = 14.dp)
+                                .navigationBarsPadding()
+                        } else {
+                            Modifier
+                                .align(Alignment.CenterEnd)
+                                .fillMaxHeight()
+                                .widthIn(max = 340.dp)
+                                .fillMaxWidth()
+                                .background(BackgroundDark)
+                                .pointerInput(Unit) {
+                                    detectTapGestures { }
+                                }
+                                .padding(24.dp)
+                        }
+                    )
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (touch) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            Modifier
+                                .width(36.dp)
+                                .height(4.dp)
+                                .background(Color.White.copy(alpha = 0.35f), CircleShape)
+                        )
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        title,
+                        color = Color.White,
+                        fontSize = if (touch) 20.sp else 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(vertical = if (touch) 4.dp else 12.dp)
+                    )
+                    if (touch) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.12f))
+                                .testTag("library-drawer-close")
+                                .clickable(onClick = close),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = tr("Close"),
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    } else {
+                        OledControl(
+                            tr("Close"),
+                            icon = Icons.Default.Close,
+                            modifier = Modifier.testTag("library-drawer-close").focusRequester(initial),
+                            onClick = close
+                        )
+                    }
+                }
+                content()
+            }
+        }
+        LaunchedEffect(Unit) { if (!touch) initial.requestFocus() }
     }
 }

@@ -88,7 +88,7 @@ object AppLogger {
     }
 
     /**
-     * Add a privacy-safe diagnostic breadcrumb for Sentry/Crashlytics.
+     * Add a privacy-safe diagnostic breadcrumb for Crashlytics.
      *
      * Use this for app state transitions and recoverable failures, not for raw
      * user input, stream URLs, account tokens, or provider response bodies.
@@ -176,7 +176,7 @@ object AppLogger {
     /**
      * Sanitize a message by removing/masking PII.
      */
-    private fun sanitize(message: String): String {
+    internal fun sanitize(message: String): String {
         var result = message
 
         result = URL_PATTERN.replace(result, "[URL]")

@@ -1,0 +1,11 @@
+{
+  "Play {value0}": "播放{value0}",
+  "Connect Trakt, Simkl, or MDBList in Settings to remove watchlist items.": "請在設定中連接 Trakt、Simkl 或 MDBList，以移除待看清單中的項目。",
+  "Connect Trakt, Simkl, or MDBList in Settings to use Watchlist.": "請在設定中連接 Trakt、Simkl 或 MDBList，以使用待看清單。",
+  "Collection": "收藏集",
+  "Watching": "正在觀看",
+  "Completed": "已看完",
+  "Dropped": "已棄劇",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: 使用相容 Jellyfin 的位址. 可選個人資料: username#ProfileName. 受保護的個人資料: password#PIN.",
+  "None of your enabled addons provide playback sources.": "您已啟用的附加元件均未提供播放來源。"
+}

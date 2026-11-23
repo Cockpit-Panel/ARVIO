@@ -73,15 +73,55 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
     lateinit var watchlistRepository: WatchlistRepository
     @Inject
     lateinit var appUsageAnalyticsRepository: AppUsageAnalyticsRepository
+    @Inject
+    lateinit var kidsStarterCatalogs: com.arflix.tv.data.repository.KidsStarterCatalogs
+
+    /**
+     * [OkHttpProvider.init] must run before *anything* first touches [OkHttpProvider.client]:
+     * the client is built once, lazily, and keeps whatever cache it had at that moment — with no
+     * app context there is no disk cache, for the whole process lifetime.
+     *
+     * `onCreate()` is too late. Hilt performs this Application's field injection inside
+     * `super.onCreate()`, and those injected repositories construct Retrofit — and therefore the
+     * OkHttpClient — before the first line of our own `onCreate()` body runs. `attachBaseContext`
+     * is the first callback where a context exists, so the cache is configured from here.
+     */
+    override fun attachBaseContext(base: android.content.Context) {
+        super.attachBaseContext(base)
+        OkHttpProvider.init(this)
+    }
 
     override fun onCreate() {
+        // The bound thumbnail process owns no application services. Deliberately skip
+        // Hilt's generated super.onCreate injection here: it would start another sync,
+        // player repository and analytics stack alongside the native worker.
+        if (currentProcessName()?.endsWith(":seek_preview") == true) return
+        val crashProcess = currentProcessName()?.endsWith(":crash") == true
+        if (!crashProcess) DiagnosticsManager.initialize(this)
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val prefs = getSharedPreferences("arvio_crash_store", android.content.Context.MODE_PRIVATE)
+                val reference = java.util.UUID.randomUUID().toString()
+                AppLogger.setCrashContext("arvio_report_id", reference)
+                prefs.edit()
+                    .putString("last_crash_id", reference)
+                    .putString("last_crash_provider", "firebase")
+                    .putString("last_crash_msg", AppLogger.sanitize("${throwable::class.java.simpleName}: ${throwable.message.orEmpty()}").take(200))
+                    .putLong("last_crash_time", System.currentTimeMillis())
+                    .putString("last_crash_version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+                    .putBoolean("has_pending_crash_report", true)
+                    .commit()
+            } catch (_: Throwable) {
+            } finally {
+                defaultHandler?.uncaughtException(thread, throwable)
+                    ?: android.os.Process.killProcess(android.os.Process.myPid())
+            }
+        }
+        com.arflix.tv.network.initializeNetworkPlatform(this)
         super.onCreate()
         instance = this
-
-        // OkHttpProvider.init(context) just stashes the app context; it does
-        // not build the OkHttpClient. Safe to keep on the main thread — it's
-        // a single volatile assignment.
-        OkHttpProvider.init(this)
+        if (crashProcess) return
 
         // Initialize global DNS provider and user agent from DataStore before network calls.
         appScope.launch(Dispatchers.IO) {
@@ -95,36 +135,32 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
             val savedUserAgent = prefs[uaKey].orEmpty()
             OkHttpProvider.setCustomUserAgent(savedUserAgent)
 
-            runCatching { OkHttpProvider.dns.lookup("image.tmdb.org") }
-        }
-
-        DiagnosticsManager.initialize(this)
-
-        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
-                val prefs = getSharedPreferences("arvio_crash_store", android.content.Context.MODE_PRIVATE)
-                val fallbackId = java.util.UUID.randomUUID().toString()
-                prefs.edit()
-                    .putString("last_crash_id", fallbackId)
-                    .putString("last_crash_msg", "${throwable::class.java.simpleName}: ${throwable.message?.take(200) ?: ""}")
-                    .putLong("last_crash_time", System.currentTimeMillis())
-                    .putString("last_crash_version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
-                    .putBoolean("has_pending_crash_report", true)
-                    .commit()
-            } catch (_: Throwable) {
-            } finally {
-                defaultHandler?.uncaughtException(thread, throwable) ?: android.os.Process.killProcess(android.os.Process.myPid())
+                OkHttpProvider.dns.lookup("image.tmdb.org")
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                AppLogger.recordException(e)
             }
         }
+
         // Initialize active profile asynchronously to avoid blocking cold start.
         // Wire realtime push notification when realtime is enabled.
         cloudSyncRepository.onPushCompleted = { realtimeSyncManager.markPush() }
 
         appScope.launch {
-            runCatching { profileManager.initialize() }
+            try {
+                profileManager.initialize()
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                AppLogger.recordException(e)
+            }
             // Preload watchlist cache in background for instant display
-            runCatching { watchlistRepository.getWatchlistItems() }
+            try {
+                watchlistRepository.getWatchlistItems()
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                AppLogger.recordException(e)
+            }
             delay(2_500L)
             cloudSyncCoordinator.start()
             if (!authRepository.getCurrentUserId().isNullOrBlank()) {
@@ -134,8 +170,16 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
                 // Pull early enough that reopening the app feels like an actual
                 // sync, while still letting the first frame and profile bootstrap land.
                 delay(3_000L)
-                runCatching { cloudSyncRepository.pullFromCloud() }
+                try {
+                    cloudSyncRepository.pullFromCloud()
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    AppLogger.recordException(e)
+                }
             }
+            // After the first cloud pull: a kids profile synced from another device brings its
+            // "starter rows added" flag along, so rows removed there are not added back here.
+            kidsStarterCatalogs.start()
         }
 
         appScope.launch {
@@ -162,7 +206,12 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
                             if (BuildConfig.ENABLE_REALTIME_CLOUD_SYNC) {
                                 realtimeSyncManager.start()
                             }
-                            runCatching { cloudSyncRepository.pullFromCloud() }
+                            try {
+                                cloudSyncRepository.pullFromCloud()
+                            } catch (e: Exception) {
+                                if (e is kotlinx.coroutines.CancellationException) throw e
+                                AppLogger.recordException(e)
+                            }
                         }
                     }
                     AuthState.NotAuthenticated -> {
@@ -194,13 +243,13 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
                     // image budget instead of a percent of largeHeap memory so
                     // low-RAM TVs do not drift into zram pressure while rows
                     // are being scrolled.
-                    .maxSizeBytes(
+                    .maxSizeBytes(minOf(com.arflix.tv.util.playbackMemoryBudget(this).artworkBytes,
                         when {
                             isTvDevice && isLowRamDevice -> 32 * 1024 * 1024
                             isTvDevice -> 48 * 1024 * 1024
                             else -> 64 * 1024 * 1024
                         }
-                    )
+                    ))
                     .build()
             }
             .diskCache {
@@ -231,6 +280,13 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
             .also { appImageLoader = it }
     }
 
+    private fun currentProcessName(): String? = if (Build.VERSION.SDK_INT >= 28) {
+        getProcessName()
+    } else {
+        (getSystemService(ACTIVITY_SERVICE) as? ActivityManager)?.runningAppProcesses
+            ?.firstOrNull { it.pid == android.os.Process.myPid() }?.processName
+    }
+
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         if (
@@ -238,19 +294,34 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
             level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE
         ) {
             clearImageMemoryCaches()
+            if (currentProcessName()?.endsWith(":seek_preview") != true) {
+                if (level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+                    com.arflix.tv.ui.components.TrailerPlaybackPool.background()
+                } else com.arflix.tv.ui.components.TrailerPlaybackPool.releaseIdle()
+            }
         }
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
         clearImageMemoryCaches()
+        if (currentProcessName()?.endsWith(":seek_preview") != true) {
+            com.arflix.tv.ui.components.TrailerPlaybackPool.releaseIdle()
+        }
     }
 
     private fun clearImageMemoryCaches() {
+        // The thumbnail worker has no Coil UI. Do not create a loader when Android
+        // asks that lightweight process to release memory.
+        if (currentProcessName()?.endsWith(":seek_preview") == true) return
         appImageLoader?.memoryCache?.clear()
         // Settings can replace Coil's global loader after DNS changes; clear the
         // active loader too so memory-pressure callbacks always affect what UI uses.
-        runCatching { imageLoader.memoryCache?.clear() }
+        try {
+            imageLoader.memoryCache?.clear()
+        } catch (e: Exception) {
+            AppLogger.recordException(e)
+        }
     }
 
     private fun isLowRamDevice(): Boolean {

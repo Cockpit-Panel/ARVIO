@@ -1,0 +1,10 @@
+{
+  "Play {value0}": "Odtwórz {value0}",
+  "server": "serwer",
+  "Collection": "Kolekcja",
+  "Watching": "W trakcie oglądania",
+  "Completed": "Ukończone",
+  "Dropped": "Porzucone",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: użyj adresu zgodnego z Jellyfin. Profil opcjonalny: username#ProfileName. Profil chroniony: password#PIN.",
+  "None of your enabled addons provide playback sources.": "Żaden z włączonych dodatków nie udostępnia źródeł odtwarzania."
+}

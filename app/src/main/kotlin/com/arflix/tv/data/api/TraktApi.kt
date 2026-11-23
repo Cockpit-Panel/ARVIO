@@ -15,6 +15,16 @@ import retrofit2.Response
  */
 interface TraktApi {
 
+    /** Public episode metadata; no tracking account is required. */
+    @GET("shows/{id}/seasons/{season}")
+    suspend fun getCalendarSeasonEpisodes(
+        @Header("trakt-api-key") clientId: String,
+        @Path("id") showId: Int,
+        @Path("season") season: Int,
+        @Header("trakt-api-version") version: String = "2",
+        @Query("extended") extended: String = "full"
+    ): List<TraktCalendarEpisode>
+
     // ========== Authentication ==========
 
     @POST("oauth/device/code")
@@ -75,8 +85,24 @@ interface TraktApi {
         @Header("trakt-api-version") version: String = "2",
         @Query("type") type: String? = null,
         @Query("page") page: Int? = null,
-        @Query("limit") limit: Int? = null
+        @Query("limit") limit: Int? = null,
+        @Query("extended") extended: String? = null
     ): List<TraktPlaybackItem>
+
+    /**
+     * What this account is scrobbling right now. Trakt moves an item out of
+     * sync/playback for the whole duration of a scrobble session, so this is the
+     * only place an actively-playing title can be read from. Returns 204 with an
+     * empty body when nothing is playing, hence the raw [retrofit2.Response].
+     */
+    @GET("users/me/watching")
+    @retrofit2.http.Headers("Content-Type: application/json")
+    suspend fun getWatchingNow(
+        @Header("Authorization") auth: String,
+        @Header("trakt-api-key") clientId: String,
+        @Header("trakt-api-version") version: String = "2",
+        @Query("extended") extended: String? = null
+    ): retrofit2.Response<TraktWatchingItem>
 
     @DELETE("sync/playback/{id}")
     suspend fun removePlaybackItem(
@@ -381,8 +407,8 @@ interface TraktApi {
         @Query("page") page: Int? = null
     ): List<TraktHiddenItem>
 
-    @GET("users/hidden/progress_watched_reset")
-    suspend fun getHiddenProgressResetShows(
+    @GET("users/hidden/dropped")
+    suspend fun getDroppedShows(
         @Header("Authorization") auth: String,
         @Header("trakt-api-key") clientId: String,
         @Header("trakt-api-version") version: String = "2",
@@ -407,6 +433,27 @@ interface TraktApi {
         @Header("trakt-api-key") clientId: String,
         @Header("trakt-api-version") version: String = "2"
     ): List<TraktSearchList>
+
+    /** Adds titles to one of the user's own lists; same body shape as the watchlist. */
+    @POST("users/me/lists/{listId}/items")
+    @retrofit2.http.Headers("Content-Type: application/json")
+    suspend fun addToMyList(
+        @Header("Authorization") auth: String,
+        @Header("trakt-api-key") clientId: String,
+        @Header("trakt-api-version") version: String = "2",
+        @Path("listId") listId: String,
+        @Body body: TraktWatchlistBody
+    ): TraktSyncResponse
+
+    @POST("users/me/lists/{listId}/items/remove")
+    @retrofit2.http.Headers("Content-Type: application/json")
+    suspend fun removeFromMyList(
+        @Header("Authorization") auth: String,
+        @Header("trakt-api-key") clientId: String,
+        @Header("trakt-api-version") version: String = "2",
+        @Path("listId") listId: String,
+        @Body body: TraktWatchlistBody
+    ): TraktSyncResponse
 
     @GET("users/me/lists/{listId}/items/{type}")
     suspend fun getMyListItems(
@@ -437,7 +484,9 @@ interface TraktApi {
         @Path("type") type: String,
         @Query("extended") extended: String = "full",
         @Query("page") page: Int = 1,
-        @Query("limit") limit: Int = 100
+        @Query("limit") limit: Int = 100,
+        /** See listFreshnessMarker: keeps a day-long cache lifetime from hiding list edits. */
+        @Query("_") freshness: Long? = null
     ): List<TraktPublicListItem>
 
     @GET("lists/{listId}")
@@ -455,7 +504,9 @@ interface TraktApi {
         @Path("type") type: String,
         @Query("extended") extended: String = "full",
         @Query("page") page: Int = 1,
-        @Query("limit") limit: Int = 100
+        @Query("limit") limit: Int = 100,
+        /** See listFreshnessMarker: keeps a day-long cache lifetime from hiding list edits. */
+        @Query("_") freshness: Long? = null
     ): List<TraktPublicListItem>
 
     // ========== User Profile ==========
@@ -644,7 +695,31 @@ data class TraktPlaybackItem(
 data class TraktMovieInfo(
     val title: String,
     val year: Int?,
-    val ids: TraktIds
+    val ids: TraktIds,
+    /** Minutes; only populated with extended=full. */
+    val runtime: Int? = null
+)
+
+/**
+ * A live scrobble session. Trakt reports no progress here, only the window the
+ * session covers: [startedAt] plus the title's runtime equals [expiresAt], so
+ * the elapsed share of that window is the progress.
+ */
+data class TraktWatchingItem(
+    @SerializedName("expires_at") val expiresAt: String?,
+    @SerializedName("started_at") val startedAt: String?,
+    val action: String?,
+    val type: String?,
+    val movie: TraktMovieInfo?,
+    val episode: TraktEpisodeInfo?,
+    val show: TraktShowInfo?
+)
+
+data class TraktCalendarEpisode(
+    val season: Int = 0,
+    val number: Int = 0,
+    val title: String? = null,
+    @SerializedName("first_aired") val firstAired: String? = null
 )
 
 data class TraktShowInfo(
@@ -663,7 +738,9 @@ data class TraktEpisodeInfo(
     val season: Int,
     val number: Int,
     val title: String?,
-    val ids: TraktIds
+    val ids: TraktIds,
+    /** Minutes; only populated with extended=full. */
+    val runtime: Int? = null
 )
 
 data class TraktWatchlistItem(

@@ -1,0 +1,9 @@
+{
+  "Play {value0}": "เล่น {value0}",
+  "Collection": "คอลเลกชัน",
+  "Watching": "กำลังดู",
+  "Completed": "ดูจบแล้ว",
+  "Dropped": "เลิกดู",
+  "Silo: use the Jellyfin-compatible address. Optional profile: username#ProfileName. Protected profile: password#PIN.": "Silo: ใช้ที่อยู่ที่รองรับ Jellyfin. โปรไฟล์เสริม: username#ProfileName. โปรไฟล์ที่ป้องกัน: password#PIN.",
+  "None of your enabled addons provide playback sources.": "ไม่มีส่วนเสริมที่เปิดใช้งานของคุณให้แหล่งเล่นสื่อ"
+}

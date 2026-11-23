@@ -1,128 +1,79 @@
 "use client";
 
-import { ExternalLink, Puzzle, Settings, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { useApp } from "@/lib/store";
+import { Plus, Puzzle, Server, Tv, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "@/lib/i18n";
+import { useAppPick } from "@/lib/store";
+import { requestSourceSettings, sourceSetupState } from "@/lib/sourceSetup";
+import { isSourcePromptDismissed, isSourcePromptExpected, setSourcePromptDismissed, setSourcePromptExpected, SOURCE_PROMPT_EVENT } from "@/lib/sourcePrompt";
 
-const ADDON_DIRECTORY_URL = "https://stremio-addons.net/";
-const DISMISS_KEY_PREFIX = "arvio.web.noAddonsPrompt.v1:";
-
-export function NoAddonsPrompt() {
-  const {
-    view,
-    section,
-    setSection,
-    activeProfile,
-    addons,
-    addonsReady,
-    closeDetails
-  } = useApp();
-  const [dismissal, setDismissal] = useState<{ profileId: string; dismissed: boolean } | null>(null);
-  const browseRef = useRef<HTMLAnchorElement>(null);
+/**
+ * Per-profile dismissal of the "Add a source" banner. It persists in localStorage
+ * (sessionStorage was cleared on every launch of an iPhone home-screen app, so
+ * the banner came back each time) and is shared between the banner and the
+ * quieter "Add a source" entry point on Home.
+ */
+function useSourcePrompt() {
+  const { view, section, activeProfile, addons, addonsReady, settings } = useAppPick("view", "section", "activeProfile", "addons", "addonsReady", "settings");
   const profileId = activeProfile?.id ?? "";
+  const [dismissal, setDismissal] = useState<{ profileId: string; dismissed: boolean } | null>(null);
 
   useEffect(() => {
-    if (!profileId) {
-      setDismissal(null);
-      return;
-    }
-    let dismissed = false;
-    try {
-      dismissed = window.sessionStorage.getItem(`${DISMISS_KEY_PREFIX}${profileId}`) === "1";
-    } catch {
-      // A blocked session store should not prevent onboarding from rendering.
-    }
-    setDismissal({ profileId, dismissed });
+    const read = () => setDismissal({ profileId, dismissed: isSourcePromptDismissed(profileId) });
+    read();
+    window.addEventListener(SOURCE_PROMPT_EVENT, read);
+    return () => window.removeEventListener(SOURCE_PROMPT_EVENT, read);
   }, [profileId]);
 
-  const visible =
-    view === "app" &&
-    Boolean(profileId) &&
-    addonsReady &&
-    addons.length === 0 &&
-    section !== "addons" &&
-    dismissal?.profileId === profileId &&
-    !dismissal.dismissed;
+  const sources = sourceSetupState(addons, settings);
+  // Until the cloud addon pull lands, trust the last answer for this profile
+  // (no late layout shift); afterwards record the real one for next launch.
+  const expected = useMemo(() => isSourcePromptExpected(profileId), [profileId]);
+  useEffect(() => {
+    if (addonsReady && profileId) setSourcePromptExpected(profileId, !sources.hasAny);
+  }, [addonsReady, profileId, sources.hasAny]);
+  const eligible = view === "app" && section === "home" && Boolean(profileId) && (addonsReady || expected) && !sources.hasAny &&
+    dismissal?.profileId === profileId;
+  const setDismissed = useCallback((dismissed: boolean) => {
+    setSourcePromptDismissed(profileId, dismissed);
+    setDismissal({ profileId, dismissed });
+  }, [profileId]);
+  return { eligible, dismissed: Boolean(dismissal?.dismissed), sources, setDismissed };
+}
 
-  const dismiss = () => {
-    if (!profileId) return;
-    try {
-      window.sessionStorage.setItem(`${DISMISS_KEY_PREFIX}${profileId}`, "1");
-    } catch {
-      // Keep the in-memory dismissal when browser storage is unavailable.
-    }
-    setDismissal({ profileId, dismissed: true });
+export function NoAddonsPrompt() {
+  const translateUi = useTranslation();
+  const { setSection } = useAppPick("setSection");
+  const { eligible, dismissed, sources, setDismissed } = useSourcePrompt();
+  if (!eligible || dismissed) return null;
+
+  const openSettings = (target: "homeserver" | "tv") => {
+    requestSourceSettings(target);
+    setSection("settings");
   };
 
-  useEffect(() => {
-    if (!visible) return undefined;
-    const focusTimer = window.setTimeout(() => browseRef.current?.focus(), 0);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") dismiss();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.clearTimeout(focusTimer);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [visible, profileId]);
-
-  if (!visible) return null;
-
-  return (
-    <div className="modal-scrim no-addons-scrim" onClick={dismiss}>
-      <section
-        className="no-addons-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="no-addons-title"
-        aria-describedby="no-addons-description"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button type="button" className="no-addons-close" onClick={dismiss} aria-label="Close" title="Close">
-          <X size={20} />
-        </button>
-
-        <div className="no-addons-heading">
-          <span className="no-addons-icon" aria-hidden="true"><Puzzle size={26} /></span>
-          <div>
-            <p className="eyebrow">Sources required</p>
-            <h2 id="no-addons-title">Add an addon to start watching</h2>
-          </div>
-        </div>
-
-        <p id="no-addons-description" className="no-addons-copy">
-          ARVIO does not host or provide any media. It connects to addons you choose and configure.
-          You can browse both free and paid community addons on stremio-addons.net.
-        </p>
-        <p className="no-addons-disclaimer">
-          This is an independent third-party directory. ARVIO is not affiliated with its addons;
-          availability and legality can vary by provider and location.
-        </p>
-
-        <div className="no-addons-actions">
-          <button
-            type="button"
-            className="secondary no-addons-settings"
-            onClick={() => {
-              dismiss();
-              closeDetails();
-              setSection("addons");
-            }}
-          >
-            <Settings size={17} /> Addon settings
-          </button>
-          <a
-            ref={browseRef}
-            className="primary no-addons-browse"
-            href={ADDON_DIRECTORY_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Browse addons <ExternalLink size={16} />
-          </a>
-        </div>
-      </section>
+  return <aside className="source-setup-card" aria-labelledby="source-setup-title">
+    <div className="source-setup-copy">
+      <h2 id="source-setup-title"><Puzzle size={20} aria-hidden />{translateUi("Add a source to start watching")}</h2>
+      <p>{translateUi("ARVIO plays from your own Plex, Jellyfin or Emby server, your IPTV playlist, or addons from services you are authorized to use. Sources you added in the ARVIO Android app sync here automatically.")}</p>
+      {sources.catalogOnly && <p className="source-setup-warning">{translateUi("None of your enabled addons provide playback sources.")}</p>}
     </div>
-  );
+    <div className="source-setup-actions">
+      <button type="button" className="primary" onClick={() => setSection("addons")}><Puzzle size={17} aria-hidden />{translateUi("Add an addon")}</button>
+      <button type="button" className="secondary" onClick={() => openSettings("homeserver")}><Server size={17} aria-hidden />{translateUi("Connect home server")}</button>
+      <button type="button" className="secondary" onClick={() => openSettings("tv")}><Tv size={17} aria-hidden />{translateUi("Add IPTV")}</button>
+    </div>
+    <button type="button" className="no-addons-close" onClick={() => setDismissed(true)} aria-label={translateUi("Close")}><X size={20} /></button>
+  </aside>;
+}
+
+/** The quiet entry point that replaces a dismissed banner: reopens it. */
+export function AddSourceChip() {
+  const translateUi = useTranslation();
+  const { eligible, dismissed, setDismissed } = useSourcePrompt();
+  if (!eligible || !dismissed) return null;
+  return <button type="button" className="add-source-chip" onClick={() => {
+    setDismissed(false);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }}><Plus size={16} aria-hidden />{translateUi("Add a source")}</button>;
 }

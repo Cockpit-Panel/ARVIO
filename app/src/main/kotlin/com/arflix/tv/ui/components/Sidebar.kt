@@ -77,12 +77,12 @@ fun Sidebar(
     onItemSelected: (SidebarItem) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val centerItems = listOf(SidebarItem.SEARCH, SidebarItem.HOME, SidebarItem.WATCHLIST, SidebarItem.TV)
+    val centerItems = visibleNavigationItems().filter { it != SidebarItem.SETTINGS }
     val bottomItem = SidebarItem.SETTINGS
     val hasProfile = profile != null
-    // With profile: index 0 = profile, 1-4 = center items, 5 = settings. Without: 0-3 = center, 4 = settings.
-    val centerFocusedIndex = if (hasProfile) focusedIndex - 1 else focusedIndex
-    val settingsFocused = if (hasProfile) focusedIndex == 5 else focusedIndex == 4
+    val safeFocusedIndex = focusedIndex.coerceAtMost(topBarMaxIndex(hasProfile))
+    val centerFocusedIndex = if (hasProfile) safeFocusedIndex - 1 else safeFocusedIndex
+    val settingsFocused = safeFocusedIndex == topBarMaxIndex(hasProfile)
 
     // Sidebar: subtle transparent gradient so backdrop shows through
     Box(
@@ -154,7 +154,7 @@ private fun SidebarProfileAvatar(
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.12f else 1f,
         animationSpec = tween(
-            durationMillis = AnimationConstants.DURATION_FAST,
+            durationMillis = if (isFocused) AnimationConstants.DURATION_FAST else 0,
             easing = AnimationConstants.EaseOut
         ),
         label = "profile_scale"
@@ -162,7 +162,7 @@ private fun SidebarProfileAvatar(
     val indicatorAlpha by animateFloatAsState(
         targetValue = if (isFocused) 1f else 0f,
         animationSpec = tween(
-            durationMillis = AnimationConstants.DURATION_FAST,
+            durationMillis = if (isFocused) AnimationConstants.DURATION_FAST else 0,
             easing = AnimationConstants.EaseOut
         ),
         label = "profile_indicator"
@@ -179,7 +179,7 @@ private fun SidebarProfileAvatar(
                     .align(Alignment.CenterStart)
                     .width(3.dp)
                     .height(22.dp)
-                    .clip(RoundedCornerShape(999.dp))
+                    .clip(CircleShape)
                     .background(ArvioSkin.colors.focusOutline.copy(alpha = indicatorAlpha))
             )
         }
@@ -222,7 +222,7 @@ private fun SidebarIcon(
             else -> Color(0xFF444444)  // Darker grey when unfocused
         },
         animationSpec = tween(
-            durationMillis = AnimationConstants.DURATION_FAST,
+            durationMillis = if (isFocused) AnimationConstants.DURATION_FAST else 0,
             easing = AnimationConstants.EaseOut
         ),
         label = "icon_color"
@@ -232,7 +232,7 @@ private fun SidebarIcon(
     val scale by animateFloatAsState(
         targetValue = if (isFocused) 1.12f else 1f,
         animationSpec = tween(
-            durationMillis = AnimationConstants.DURATION_FAST,
+            durationMillis = if (isFocused) AnimationConstants.DURATION_FAST else 0,
             easing = AnimationConstants.EaseOut
         ),
         label = "icon_scale"
@@ -245,7 +245,7 @@ private fun SidebarIcon(
             else -> Color.Transparent
         },
         animationSpec = tween(
-            durationMillis = AnimationConstants.DURATION_FAST,
+            durationMillis = if (isFocused) AnimationConstants.DURATION_FAST else 0,
             easing = AnimationConstants.EaseOut
         ),
         label = "sidebar_chip_bg"
@@ -254,7 +254,7 @@ private fun SidebarIcon(
     val indicatorAlpha by animateFloatAsState(
         targetValue = if (isFocused) 1f else 0f,
         animationSpec = tween(
-            durationMillis = AnimationConstants.DURATION_FAST,
+            durationMillis = if (isFocused) AnimationConstants.DURATION_FAST else 0,
             easing = AnimationConstants.EaseOut
         ),
         label = "sidebar_indicator_alpha"
@@ -273,7 +273,7 @@ private fun SidebarIcon(
                     .align(Alignment.CenterStart)
                     .width(3.dp)
                     .height(22.dp)
-                    .clip(RoundedCornerShape(999.dp))
+                    .clip(CircleShape)
                     .background(ArvioSkin.colors.focusOutline.copy(alpha = indicatorAlpha))
             )
         }
@@ -282,7 +282,7 @@ private fun SidebarIcon(
             modifier = Modifier
                 .align(Alignment.Center)
                 .size(30.dp)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(RoundedCornerShape(12.dp))
                 .background(chipBackground),
             contentAlignment = Alignment.Center
         ) {

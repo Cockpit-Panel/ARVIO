@@ -1,37 +1,54 @@
 "use client";
+import "@/app/premium.css";
+import { useTranslation } from "@/lib/i18n";
 
-import { BadgeCheck, Check, ExternalLink, Loader2, LogOut, Sparkles } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+
+import { ArrowRight } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { config } from "@/lib/config";
-import { HttpError } from "@/lib/http";
 import {
   cachedEntitlement,
   fetchEntitlement,
-  kofiSubscribeUrl,
-  linkKofiEmail,
-  startTrial,
   type EntitlementState
 } from "@/lib/entitlement";
-import { authClient, useApp } from "@/lib/store";
+import { authClient, useAppPick } from "@/lib/store";
 import { capturePremiumAttribution, trackPremiumEvent, trackPremiumMilestone, TRIAL_INTENT_KEY } from "@/lib/premiumAnalytics";
+import { currentEntitlement, entitlementCheckDelay } from "@/lib/entitlementPolicy";
+import { EntitlementContext } from "@/lib/entitlementContext";
+import { ENTITLEMENT_REFRESH_EVENT } from "@/lib/entitlement";
+import { MembershipCheckout } from "./MembershipCheckout";
+import { WebFeaturePreview } from "./WebFeaturePreview";
+import { PremiumOffer } from "./PremiumOffer";
+import { MemberNotices } from "./MemberNotices";
+import { setPremiumGate, type PremiumIntent } from "@/lib/premiumGate";
+import { clearStreamTicket, refreshStreamTicket } from "@/lib/streamTicket";
+import { captureReferralCode, claimPendingReferral } from "@/lib/referral";
 
-// Three-day free trial: enabled — enough time to use ARVIO Web on normal days,
-// blind $2.99 ask. One trial per account (trialUsed is stamped server-side).
-const SHOW_TRIAL = true;
-
-// Gate that stands between profile selection and the app when the paywall is
-// enabled. Fails OPEN on backend errors (a paying user is never locked out by a
-// hiccup) and CLOSED on a confirmed non-entitled state.
+// Explore mode. Signed-in accounts use ARVIO Web freely; Premium is asked for
+// only when they start something that plays (see lib/premiumGate.ts). A
+// still-valid cached membership survives transient backend errors, and access
+// ending mid-film never stops the film: the next play asks again.
 export function EntitlementGate({ children }: { children: React.ReactNode }) {
-  const { auth, signOut, goToLogin } = useApp();
+  const { auth } = useAppPick("auth");
   const accountId = auth?.userId ?? null;
   const [state, setState] = useState<EntitlementState | null>(() => cachedEntitlement(authClient));
   const [status, setStatus] = useState<"loading" | "ready" | "error">(state ? "ready" : "loading");
+  const [retry, setRetry] = useState(0);
+  const [stateAccountId, setStateAccountId] = useState(accountId);
+  const [offer, setOffer] = useState<{ intent: PremiumIntent; resume?: () => void } | null>(null);
+  const lastVerifiedAt = useRef(Date.now());
+  const lastRefreshAt = useRef(0);
+
+  // Invite links opened while already signed in.
+  useEffect(() => { if (config.paywallEnabled) captureReferralCode(); }, []);
 
   useEffect(() => {
     if (!config.paywallEnabled) return;
     const cached = cachedEntitlement(authClient);
+    setStateAccountId(accountId);
     setState(cached);
+    setOffer(null);
+    clearStreamTicket();
     if (!accountId) {
       setStatus("ready");
       return;
@@ -39,198 +56,169 @@ export function EntitlementGate({ children }: { children: React.ReactNode }) {
     setStatus(cached ? "ready" : "loading");
     let active = true;
     void fetchEntitlement(authClient)
-      .then((next) => { if (active) { setState(next); setStatus("ready"); } })
+      .then((next) => { if (active) { lastVerifiedAt.current = Date.now(); setState(next); setStatus("ready"); } })
       .catch(() => { if (active) setStatus("error"); });
     return () => { active = false; };
-  }, [accountId]);
+  }, [accountId, retry]);
 
-  // Paywall off, or entitled → app. On a backend error with no cached "not
-  // entitled", fail open so we never lock out a paying user over a hiccup.
+  useEffect(() => {
+    if (!config.paywallEnabled || !accountId) return;
+    let active = true;
+    let refreshing = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const refreshAccess = (scheduleRetry = false) => {
+      if (!active || refreshing || document.visibilityState === "hidden") return;
+      if (scheduleRetry && Date.now() - lastRefreshAt.current < 1000) return;
+      refreshing = true;
+      lastRefreshAt.current = Date.now();
+      let refreshedState = state;
+      let failed = false;
+      void fetchEntitlement(authClient)
+        .then((next) => {
+          if (!active) return;
+          lastVerifiedAt.current = Date.now();
+          refreshedState = next;
+          setState(next);
+          setStatus("ready");
+          if (!next.entitled && scheduleRetry) {
+            if (retryTimer) clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => refreshAccess(false), 3000);
+          }
+        })
+        .catch(() => { failed = true; if (active) setStatus("error"); })
+        .finally(() => {
+          refreshing = false;
+          if (active) {
+            if (expiryTimer) clearTimeout(expiryTimer);
+            const nextDelay = failed ? 15 * 60_000 : entitlementCheckDelay(refreshedState);
+            if (nextDelay !== null) expiryTimer = setTimeout(() => refreshAccess(false), nextDelay);
+          }
+        });
+    };
+
+    const delay = entitlementCheckDelay(state);
+    if (delay !== null) expiryTimer = setTimeout(() => refreshAccess(false), delay);
+
+    const onFocus = () => refreshAccess(true);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") refreshAccess(true);
+    };
+    window.addEventListener("focus", onFocus);
+    window.addEventListener(ENTITLEMENT_REFRESH_EVENT, onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      active = false;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (expiryTimer) clearTimeout(expiryTimer);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener(ENTITLEMENT_REFRESH_EVENT, onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [accountId, state?.entitled, state?.reason, state?.expiresAt, retry]);
+
+  const access = stateAccountId === accountId ? currentEntitlement(state) : null;
+  const entitledNow = Boolean(access?.entitled) && (status !== "error" || Date.now() - lastVerifiedAt.current < 6 * 60 * 60_000);
+  const gate = useRef({ entitledNow, accountId });
+  gate.current = { entitledNow, accountId };
+
+  // Register the gate the store and details screen ask before anything plays.
+  useEffect(() => {
+    if (!config.paywallEnabled) return;
+    setPremiumGate((intent, resume) => {
+      if (gate.current.entitledNow) return true;
+      setOffer({ intent, resume });
+      if (gate.current.accountId) void trackPremiumEvent(authClient, "paywall_view", { entry: `explore_${intent}`, flow_version: "explore_v1" }, true);
+      return false;
+    });
+    return () => setPremiumGate(null);
+  }, []);
+
+  // Paid while the offer was open (or the check finished): continue where the
+  // member left off.
+  useEffect(() => {
+    if (!offer || !entitledNow) return;
+    const resume = offer.resume;
+    setOffer(null);
+    // Fetch the stream ticket first (bounded), so the resumed playback's relay
+    // URLs carry it.
+    let done = false;
+    const go = () => { if (!done) { done = true; resume?.(); } };
+    const timer = setTimeout(go, 2500);
+    void refreshStreamTicket(authClient).finally(() => { clearTimeout(timer); go(); });
+  }, [entitledNow, offer]);
+
+  // Premium stream tickets for the media relay, and invites to claim.
+  useEffect(() => {
+    if (!config.paywallEnabled || !accountId) return;
+    if (!entitledNow) { clearStreamTicket(); return; }
+    void refreshStreamTicket(authClient);
+    // Tabs and home-screen apps stay open for days: keep the ticket fresh.
+    const timer = window.setInterval(() => { void refreshStreamTicket(authClient); }, 6 * 60 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [accountId, entitledNow]);
+  useEffect(() => {
+    if (!config.paywallEnabled || !accountId || status !== "ready" || !access) return;
+    void claimPendingReferral(authClient, Boolean(access.everPaid || access.entitled));
+  }, [accountId, status, access?.everPaid, access?.entitled]);
+
   if (!config.paywallEnabled) return <>{children}</>;
-  if (state?.entitled) return <>{children}</>;
-  if (status === "error" && !state) return <>{children}</>;
-  if (status === "loading") {
-    return (
-      <main className="paywall-boot">
-        <Loader2 className="paywall-spinner" size={40} />
-      </main>
-    );
-  }
-
-  return (
-    <PaywallScreen
-      state={state}
-      isSignedIn={Boolean(auth)}
-      onEntitled={(next) => setState(next)}
-      onConnect={goToLogin}
-      onSignOut={signOut}
-    />
-  );
+  return <EntitlementContext.Provider value={access}>
+    {children}
+    <MemberNotices state={access} account={accountId} />
+    {offer && accountId && <PremiumOffer
+      intent={offer.intent}
+      state={access}
+      status={status}
+      account={accountId}
+      onClose={() => setOffer(null)}
+      onRetry={() => setRetry((value) => value + 1)}
+      onEntitled={(next) => {
+        if (authClient.session?.userId !== accountId) return;
+        lastVerifiedAt.current = Date.now(); setStateAccountId(accountId); setState(next); setStatus("ready");
+      }}
+    />}
+  </EntitlementContext.Provider>;
 }
 
-function PaywallScreen({
+export function PaywallScreen({
   state,
+  accountId,
   isSignedIn,
   onEntitled,
   onConnect,
   onSignOut
 }: {
   state: EntitlementState | null;
+  accountId: string | null;
   isSignedIn: boolean;
   onEntitled: (next: EntitlementState) => void;
   onConnect: () => void;
   onSignOut: () => void;
 }) {
-  const [busy, setBusy] = useState<"trial" | "link" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [linkOpen, setLinkOpen] = useState(false);
-  const [kofiEmail, setKofiEmail] = useState("");
-  const trialAvailable = state?.trialAvailable ?? true;
-  const trialDays = state?.trialDurationDays ?? 3;
-  const expired = state?.reason === "expired" || state?.status === "cancelled";
+  const translateUi = useTranslation();
+  const expired = state?.source !== "trial" && (state?.reason === "expired" || state?.status === "cancelled");
 
   useEffect(() => {
     capturePremiumAttribution();
+    captureReferralCode();
+    // Old bookmarks and stored intents must never create a free entitlement.
+    try { localStorage.removeItem(TRIAL_INTENT_KEY); } catch { /* storage is optional */ }
     if (!isSignedIn) return;
-    void trackPremiumEvent(authClient, "paywall_view", {}, true);
+    void trackPremiumEvent(authClient, "paywall_view", { flow_version: "paid_only_v1" }, true);
     void trackPremiumMilestone(authClient, "account_connected");
-  }, [isSignedIn]);
+  }, [isSignedIn, accountId]);
 
-  const beginTrial = useCallback(async () => {
-    if (!isSignedIn) {
-      capturePremiumAttribution();
-      try { localStorage.setItem(TRIAL_INTENT_KEY, "1"); } catch { /* storage is optional */ }
-      onConnect();
-      return;
-    }
-    void trackPremiumEvent(authClient, "trial_requested");
-    setBusy("trial"); setError(null);
-    try {
-      const next = await startTrial(authClient);
-      if (next.entitled) {
-        try { localStorage.removeItem(TRIAL_INTENT_KEY); } catch { /* storage is optional */ }
-        onEntitled(next);
-      }
-      else setError("Your free trial has already been used.");
-    } catch (err) {
-      // startTrial already refreshed + retried on a stale token; reaching this
-      // catch means the session is genuinely dead, the trial was consumed, or
-      // the backend hiccuped — say which, and give the dead-session case a way
-      // out (the generic message left users stuck with no next step).
-      const status = err instanceof HttpError ? err.status : null;
-      if (status === 401) {
-        onConnect();
-        return;
-      } else if (status === 409) {
-        try { localStorage.removeItem(TRIAL_INTENT_KEY); } catch { /* storage is optional */ }
-        setError("Your free trial has already been used.");
-      } else setError("Could not start the trial — please try again in a moment.");
-      void trackPremiumEvent(authClient, "trial_start_failed", { status: status || 0 });
-    } finally {
-      setBusy(null);
-    }
-  }, [isSignedIn, onConnect, onEntitled]);
-
-  useEffect(() => {
-    if (!isSignedIn || busy !== null || !trialAvailable || expired) return;
-    let pending = false;
-    try { pending = localStorage.getItem(TRIAL_INTENT_KEY) === "1"; } catch { pending = false; }
-    if (pending) {
-      try { localStorage.removeItem(TRIAL_INTENT_KEY); } catch { /* storage is optional */ }
-      void beginTrial();
-    }
-  }, [beginTrial, busy, expired, isSignedIn, trialAvailable]);
-
-  const link = useCallback(async () => {
-    if (!kofiEmail.trim()) return;
-    void trackPremiumEvent(authClient, "membership_link_started");
-    setBusy("link"); setError(null);
-    try {
-      const next = await linkKofiEmail(authClient, kofiEmail.trim());
-      if (next.entitled) {
-        void trackPremiumEvent(authClient, "membership_linked");
-        onEntitled(next);
-      }
-      else setError("No active membership was found for that email.");
-    } catch {
-      void trackPremiumEvent(authClient, "membership_link_failed");
-      setError("No active membership was found for that email.");
-    } finally {
-      setBusy(null);
-    }
-  }, [kofiEmail, onEntitled]);
-
+  // Shown to signed-out visitors only: signing in opens ARVIO Web in explore
+  // mode, and Premium is offered when they press Play.
   return (
-    <main className="paywall">
-      <div className="paywall-card">
-        <div className="paywall-brand">
-          <img src="/arvio-logo.svg" alt="" className="paywall-logo" />
-          <img src="/arvio-wordmark.svg" alt="ARVIO" className="paywall-wordmark" />
-        </div>
-
-        <h1>{expired ? "Your ARVIO Web membership has ended" : "ARVIO Web is a members feature"}</h1>
-        <p className="paywall-sub">
-          Take your existing ARVIO setup to Windows, Mac, iPhone, iPad and smart-TV browsers.
-          Your profiles, libraries, addons and progress stay connected through ARVIO Cloud.
-        </p>
-
-        <div className="paywall-benefits" aria-label="ARVIO Web benefits">
-          <span><Check size={15} /> Same profiles, libraries and watch progress</span>
-          <span><Check size={15} /> Watch or download directly on Windows, Mac and mobile</span>
-          <span><Check size={15} /> Browser playback and one-click VLC</span>
-          <span><Check size={15} /> Android and TV app remains completely free</span>
-        </div>
-
-        <div className="paywall-price">
-          <span className="paywall-amount">$2.99</span>
-          <span className="paywall-period">/ month</span>
-        </div>
-
-        <a
-          className="paywall-primary"
-          href={kofiSubscribeUrl()}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={() => { void trackPremiumEvent(authClient, "checkout_opened"); }}
-        >
-          <BadgeCheck size={18} /> Subscribe on Ko-fi <ExternalLink size={15} />
-        </a>
-
-        {SHOW_TRIAL && trialAvailable && !expired && (
-          <button type="button" className="paywall-trial" onClick={() => void beginTrial()} disabled={busy !== null}>
-            {busy === "trial" ? <Loader2 className="paywall-spinner" size={16} /> : <Sparkles size={16} />}
-            {isSignedIn ? `Start ${trialDays}-day free trial` : `Connect to Cloud for ${trialDays}-day trial`}
-          </button>
-        )}
-
-        <button type="button" className="paywall-link-toggle" onClick={() => setLinkOpen((v) => !v)}>
-          Already subscribed? Link your Ko-fi email
+    <WebFeaturePreview isSignedIn={isSignedIn} expired={expired} onConnect={onConnect} onSignOut={onSignOut} checkout={
+        isSignedIn ? <MembershipCheckout className="paywall-primary" entry="feature_preview" onEntitled={onEntitled} showEmailHint>
+          {translateUi("Subscribe on Ko-fi")}
+        </MembershipCheckout> : <button type="button" className="paywall-primary" onClick={onConnect}>
+          {translateUi("Sign in to look around")} <ArrowRight size={15} />
         </button>
-
-        {linkOpen && (
-          <div className="paywall-link-row">
-            <input
-              type="email"
-              placeholder="Your Ko-fi / PayPal email"
-              value={kofiEmail}
-              onChange={(e) => setKofiEmail(e.target.value)}
-            />
-            <button type="button" onClick={() => void link()} disabled={busy !== null || !kofiEmail.trim()}>
-              {busy === "link" ? <Loader2 className="paywall-spinner" size={16} /> : "Link"}
-            </button>
-          </div>
-        )}
-
-        {error && <p className="paywall-error">{error}</p>}
-
-        <p className="paywall-proof">10,000+ users · 10+ contributors · open source</p>
-
-        {isSignedIn && (
-          <button type="button" className="paywall-signout" onClick={onSignOut}>
-            <LogOut size={15} /> Sign out
-          </button>
-        )}
-      </div>
-    </main>
+    } />
   );
 }

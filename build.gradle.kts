@@ -17,8 +17,8 @@ plugins {
     id("com.google.dagger.hilt.android") version "2.57" apply false
     id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin") version "2.0.1" apply false
     // Firebase - requires google-services.json from Firebase Console
-    id("com.google.gms.google-services") version "4.4.0" apply false
-    id("com.google.firebase.crashlytics") version "2.9.9" apply false
+    id("com.google.gms.google-services") version "4.5.0" apply false
+    id("com.google.firebase.crashlytics") version "3.0.8" apply false
     // Static analysis
     id("io.gitlab.arturbosch.detekt") version "1.23.7" apply false
 }

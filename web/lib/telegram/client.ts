@@ -9,9 +9,9 @@
 import type { Api, TelegramClient } from "telegram";
 import type { BigInteger } from "big-integer";
 import {
-  TELEGRAM_API_HASH,
-  TELEGRAM_API_ID,
+  getTelegramCredentials,
   TELEGRAM_SESSION_KEY,
+  isTelegramConfigured,
 } from "./config";
 
 export type TgAuthState =
@@ -95,6 +95,10 @@ let gram: Gram | null = null;
 let loadingSession = false;
 
 async function loadGram(sessionString: string): Promise<Gram> {
+  const credentials = getTelegramCredentials();
+  if (!isTelegramConfigured()) {
+    throw new Error("Telegram API credentials are not configured in this build.");
+  }
   const [{ TelegramClient, Api }, { StringSession }, bigIntMod] = await Promise.all([
     import("telegram"),
     import("telegram/sessions"),
@@ -102,8 +106,13 @@ async function loadGram(sessionString: string): Promise<Gram> {
   ]);
   const bigInt = (bigIntMod.default ?? bigIntMod) as unknown as (v: number | string) => BigInteger;
   const session = new StringSession(sessionString);
-  const client = new TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, {
+  const client = new TelegramClient(session, credentials.apiId, credentials.apiHash, {
     connectionRetries: 5,
+    deviceModel: "ARVIO Web",
+    appVersion: "1.0.0",
+    systemVersion: typeof navigator !== "undefined" ? navigator.platform || "Web" : "Web",
+    langCode: typeof navigator !== "undefined" ? navigator.language || "en" : "en",
+    systemLangCode: typeof navigator !== "undefined" ? navigator.language || "en" : "en",
     // GramJS auto-selects the browser WebSocket transport; keep logs quiet.
     baseLogger: undefined,
   });
@@ -151,6 +160,10 @@ async function ensureGram(): Promise<Gram> {
  */
 export async function restoreSession(): Promise<void> {
   if (typeof window === "undefined") return;
+  if (!isTelegramConfigured()) {
+    setState({ k: "idle" });
+    return;
+  }
   if (state.k === "ready" || loadingSession) return;
   const saved = savedSession();
   if (!saved) return;
@@ -181,6 +194,10 @@ function base64Url(buf: Uint8Array): string {
 }
 
 export async function startQrAuth(): Promise<void> {
+  if (!isTelegramConfigured()) {
+    setState({ k: "error", message: "Telegram API credentials are not configured in this build." });
+    return;
+  }
   setState({ k: "initializing" });
   pendingPassword = deferred<string>();
   try {
@@ -191,7 +208,7 @@ export async function startQrAuth(): Promise<void> {
     await g.client.connect();
 
     const me = (await g.client.signInUserWithQrCode(
-      { apiId: TELEGRAM_API_ID, apiHash: TELEGRAM_API_HASH },
+      getTelegramCredentials(),
       {
         qrCode: async (code: { token: Buffer | Uint8Array }) => {
           const url = `tg://login?token=${base64Url(code.token as Uint8Array)}`;
@@ -221,6 +238,10 @@ export async function startQrAuth(): Promise<void> {
 // ---- phone / code authentication (fallback) -------------------------------
 
 export async function startPhoneAuth(phone: string): Promise<void> {
+  if (!isTelegramConfigured()) {
+    setState({ k: "error", message: "Telegram API credentials are not configured in this build." });
+    return;
+  }
   setState({ k: "initializing" });
   try {
     clearSession();
@@ -229,7 +250,7 @@ export async function startPhoneAuth(phone: string): Promise<void> {
     await g.client.connect();
 
     const me = (await g.client.signInUser(
-      { apiId: TELEGRAM_API_ID, apiHash: TELEGRAM_API_HASH },
+      getTelegramCredentials(),
       {
         phoneNumber: async () => phone,
         phoneCode: async () => {

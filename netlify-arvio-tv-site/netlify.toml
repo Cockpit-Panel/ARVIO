@@ -1,4 +1,5 @@
 [build]
+  command = "echo Static site ready"
   publish = "."
 
 [[plugins]]
@@ -23,49 +24,97 @@
   force = true
 
 [[redirects]]
+  from = "/companion"
+  to = "/"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/companion/*"
+  to = "/"
+  status = 301
+  force = true
+
+[[redirects]]
   from = "/go/premium"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&intent=trial"
-  status = 302
+  to = "/premium-redirect.html"
+  status = 200
   force = true
 
 [[redirects]]
   from = "/go/premium/nav"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&utm_content=navigation&intent=trial"
-  status = 302
+  to = "/premium-redirect.html"
+  status = 200
   force = true
 
 [[redirects]]
   from = "/go/premium/hero"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&utm_content=hero&intent=trial"
-  status = 302
+  to = "/premium-redirect.html"
+  status = 200
   force = true
 
 [[redirects]]
   from = "/go/premium/spotlight"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&utm_content=spotlight&intent=trial"
-  status = 302
+  to = "/premium-redirect.html"
+  status = 200
   force = true
 
 [[redirects]]
   from = "/go/premium/preview"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&utm_content=preview&intent=trial"
-  status = 302
+  to = "/premium-redirect.html"
+  status = 200
   force = true
 
 [[redirects]]
   from = "/go/premium/details"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&utm_content=details&intent=trial"
-  status = 302
+  to = "/premium-redirect.html"
+  status = 200
   force = true
 
 [[redirects]]
   from = "/go/premium/faq"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&utm_content=faq&intent=trial"
-  status = 302
+  to = "/premium-redirect.html"
+  status = 200
   force = true
 
 [[redirects]]
   from = "/go/premium/footer"
-  to = "https://web.arvio.tv/?utm_source=arvio.tv&utm_medium=website&utm_campaign=premium&utm_content=footer&intent=trial"
+  to = "/premium-redirect.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/go/membership/nav"
+  to = "/premium-redirect.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/go/membership/spotlight"
+  to = "/premium-redirect.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/go/membership/details"
+  to = "/premium-redirect.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/go/membership/footer"
+  to = "/premium-redirect.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/go/support/opensource"
+  to = "https://ko-fi.com/arvio/tiers?utm_source=arvio.tv&utm_medium=website&utm_campaign=support&utm_content=opensource"
+  status = 302
+  force = true
+
+[[redirects]]
+  from = "/go/support/footer"
+  to = "https://ko-fi.com/arvio/tiers?utm_source=arvio.tv&utm_medium=website&utm_campaign=support&utm_content=footer"
   status = 302
   force = true

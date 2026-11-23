@@ -833,7 +833,11 @@ class HttpLocalScraperRuntime @Inject constructor(
             .build()
         okHttpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return@withContext null
-            runCatching { gson.fromJson(response.body?.string().orEmpty(), JsonObject::class.java) }.getOrNull()
+            try {
+                gson.fromJson(response.body?.string().orEmpty(), JsonObject::class.java)
+            } catch (_: Exception) {
+                null
+            }
         }
     }
 
@@ -844,7 +848,7 @@ class HttpLocalScraperRuntime @Inject constructor(
     }
 
     private fun githubManifestUrlFor(url: String): String? {
-        val uri = runCatching { URI(url) }.getOrNull() ?: return null
+        val uri = try { URI(url) } catch (_: Exception) { null } ?: return null
         val host = uri.host?.lowercase(Locale.US) ?: return null
         val parts = uri.path.trim('/').split('/').filter { it.isNotBlank() }
         if (parts.size < 2) return null
@@ -942,9 +946,11 @@ class HttpLocalScraperRuntime @Inject constructor(
     private fun JsonObject.getArray(name: String): JsonArray? = get(name)?.asJsonArrayOrNull()
     private fun JsonElement.asJsonObjectOrNull(): JsonObject? = if (isJsonObject) asJsonObject else null
     private fun JsonElement.asJsonArrayOrNull(): JsonArray? = if (isJsonArray) asJsonArray else null
-    private fun JsonElement.asStringOrNull(): String? = runCatching {
+    private fun JsonElement.asStringOrNull(): String? = try {
         if (isJsonNull) null else asString
-    }.getOrNull()?.takeIf { it.isNotBlank() }
+    } catch (_: Exception) {
+        null
+    }?.takeIf { it.isNotBlank() }
 
     private data class HttpScraperManifest(
         val name: String = "",

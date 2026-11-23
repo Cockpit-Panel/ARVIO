@@ -19,6 +19,51 @@ class RemoteSyncManagerTest {
     private val simkl = mockk<SimklRemoteProvider>()
     private lateinit var manager: RemoteSyncManager
 
+    @Test fun disabledTrackerWritesAllowLocalWatchlistChanges() = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.WATCHLIST) } returns setOf(SyncProvider.TRAKT, SyncProvider.SIMKL)
+        coEvery { store.writeProviders() } returns emptySet()
+        assertTrue(manager.isRemoteConnected())
+        assertTrue(manager.addToWatchlist(MediaType.MOVIE, 603))
+        assertTrue(manager.removeFromWatchlist(MediaType.TV, 1399))
+        coVerify(exactly = 0) { trakt.addToWatchlist(any(), any(), any()) }
+        coVerify(exactly = 0) { simkl.removeFromWatchlist(any(), any(), any()) }
+    }
+
+    @Test fun failingSimklTokenRefreshCannotBlockTraktWatchlistWrite() = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.WATCHLIST) } returns setOf(SyncProvider.SIMKL, SyncProvider.TRAKT)
+        coEvery { store.writeProviders() } returns setOf(SyncProvider.SIMKL, SyncProvider.TRAKT)
+        coEvery { simkl.isConnected() } throws java.io.IOException("Token refresh unavailable")
+        coEvery { trakt.addToWatchlist(any(), any(), any()) } returns true
+        coEvery { trakt.removeFromWatchlist(any(), any(), any()) } returns true
+        assertTrue(manager.isRemoteConnected())
+        assertTrue(manager.addToWatchlist(MediaType.TV, 1399))
+        assertTrue(manager.removeFromWatchlist(MediaType.MOVIE, 603))
+        coVerify(exactly = 1) { trakt.addToWatchlist(MediaType.TV, 1399, false) }
+        coVerify(exactly = 1) { trakt.removeFromWatchlist(MediaType.MOVIE, 603, false) }
+    }
+
+    @Test fun disconnectedWriteTargetDoesNotPretendTheRemoteSaveSucceeded() = runBlocking {
+        coEvery { store.writeProviders() } returns setOf(SyncProvider.SIMKL)
+        coEvery { simkl.isConnected() } returns false
+        org.junit.Assert.assertFalse(manager.addToWatchlist(MediaType.MOVIE, 603))
+        coVerify(exactly = 0) { simkl.addToWatchlist(any(), any(), any()) }
+    }
+
+    @Test fun allConfiguredWritesFailingIsStillAnError() = runBlocking {
+        coEvery { store.writeProviders() } returns setOf(SyncProvider.TRAKT, SyncProvider.SIMKL)
+        coEvery { trakt.addToWatchlist(any(), any(), any()) } returns false
+        coEvery { simkl.isConnected() } throws java.io.IOException("Offline")
+        org.junit.Assert.assertFalse(manager.addToWatchlist(MediaType.MOVIE, 603))
+    }
+
+    @Test(expected = kotlinx.coroutines.CancellationException::class)
+    fun cancellationDuringConnectionCheckIsNotSwallowed(): Unit = runBlocking {
+        coEvery { store.writeProviders() } returns setOf(SyncProvider.SIMKL)
+        coEvery { simkl.isConnected() } throws kotlinx.coroutines.CancellationException("Profile changed")
+        manager.addToWatchlist(MediaType.MOVIE, 603)
+        Unit
+    }
+
     @Before
     fun setUp() {
         manager = RemoteSyncManager(store, trakt, mdbList, simkl)
@@ -77,6 +122,79 @@ class RemoteSyncManagerTest {
 
         assertEquals(1, result.size)
         assertEquals(55, result.single().progress)
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun failedContinueWatchingReadIsNotAnAuthoritativeEmptyResult(): Unit = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.CONTINUE_WATCHING) } returns setOf(SyncProvider.SIMKL)
+        coEvery { simkl.getContinueWatching(false) } throws IllegalStateException("offline")
+        manager.getContinueWatching()
+    }
+
+    @Test fun successfulEmptyContinueWatchingIsAuthoritative() = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.CONTINUE_WATCHING) } returns setOf(SyncProvider.SIMKL)
+        coEvery { simkl.getContinueWatching(false) } returns emptyList()
+        assertTrue(manager.getContinueWatching().isEmpty())
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun emptyPartialSnapshotCannotClearProgressFromAFailedProvider(): Unit = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.CONTINUE_WATCHING) } returns setOf(SyncProvider.SIMKL, SyncProvider.TRAKT)
+        coEvery { simkl.getContinueWatching(false) } throws IllegalStateException("offline")
+        coEvery { trakt.getContinueWatching(false) } returns emptyList()
+        manager.getContinueWatching()
+    }
+
+    @Test fun healthyProviderStillReturnsResultsWhenAnotherFails() = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.CONTINUE_WATCHING) } returns setOf(SyncProvider.SIMKL, SyncProvider.TRAKT)
+        coEvery { simkl.getContinueWatching(false) } throws IllegalStateException("offline")
+        coEvery { trakt.getContinueWatching(false) } returns listOf(ContinueWatchingItem(7, "Show", MediaType.TV, 0, season = 1, episode = 3, isUpNext = true))
+        assertEquals(3, manager.getContinueWatching().single().episode)
+    }
+
+    @Test
+    fun traktUpNextKeepsItsActivityOrderingWhenSimklHasNoTimestamp() = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.CONTINUE_WATCHING) } returns
+            setOf(SyncProvider.TRAKT, SyncProvider.SIMKL)
+        coEvery { trakt.getContinueWatching(false) } returns listOf(
+            ContinueWatchingItem(
+                7, "Show", MediaType.TV, 20,
+                season = 1, episode = 10, updatedAtMs = 1_000
+            )
+        )
+        coEvery { simkl.getContinueWatching(false) } returns listOf(
+            ContinueWatchingItem(
+                7, "Show", MediaType.TV, 55,
+                season = 1, episode = 9, updatedAtMs = 0
+            )
+        )
+
+        val result = manager.getContinueWatching()
+
+        assertEquals(1, result.size)
+        assertEquals(10, result.single().episode)
+        assertEquals(20, result.single().progress)
+    }
+
+    @Test
+    fun traktPlaybackKeepsItsActivityOrderingWhenSimklHasAnotherEpisode() = runBlocking {
+        coEvery { store.readProviders(TrackingFeature.CONTINUE_WATCHING) } returns
+            setOf(SyncProvider.TRAKT, SyncProvider.SIMKL)
+        coEvery { trakt.getContinueWatching(false) } returns listOf(
+            ContinueWatchingItem(
+                8, "Movie", MediaType.MOVIE, 30, updatedAtMs = 2_000
+            )
+        )
+        coEvery { simkl.getContinueWatching(false) } returns listOf(
+            ContinueWatchingItem(
+                8, "Movie", MediaType.MOVIE, 70, updatedAtMs = 0
+            )
+        )
+
+        val result = manager.getContinueWatching()
+
+        assertEquals(1, result.size)
+        assertEquals(30, result.single().progress)
     }
 
     @Test

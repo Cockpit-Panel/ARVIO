@@ -16,6 +16,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonElement
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.runBlocking
@@ -34,6 +35,7 @@ class SimklIntegrationTest {
     private lateinit var scrobbler: SimklScrobbler
     private lateinit var syncService: SimklSyncService
     private lateinit var tmdbApi: TmdbApi
+    private var elapsedMs = 1_000_000L
 
     private fun emptyLibraryPayload(): JsonElement = Gson().toJsonTree(SimklAllItemsResponse())
 
@@ -48,7 +50,14 @@ class SimklIntegrationTest {
         scrobbler = SimklScrobbler(simklApi, authManager)
         scrobbler.elapsedRealtimeMs = { 0L }
         tmdbApi = mockk(relaxed = true)
-        syncService = SimklSyncService(simklApi, authManager, tmdbApi)
+        coEvery { tmdbApi.getTvSeason(200, 1, any(), any()) } returns com.arflix.tv.data.api.TmdbSeasonDetails(
+            seasonNumber = 1, episodes = (1..3).map { com.arflix.tv.data.api.TmdbEpisode(episodeNumber = it, seasonNumber = 1, airDate = "2025-01-01") })
+        coEvery { tmdbApi.getTvSeason(200, 2, any(), any()) } returns com.arflix.tv.data.api.TmdbSeasonDetails(
+            seasonNumber = 2, episodes = listOf(com.arflix.tv.data.api.TmdbEpisode(episodeNumber = 4, seasonNumber = 2, name = "The Return", airDate = "2025-01-01")))
+        for (id in listOf(440, 777)) coEvery { tmdbApi.getTvSeason(id, 1, any(), any()) } returns com.arflix.tv.data.api.TmdbSeasonDetails(
+            seasonNumber = 1, episodes = listOf(com.arflix.tv.data.api.TmdbEpisode(episodeNumber = 2, seasonNumber = 1, airDate = "2025-01-01")))
+        syncService = SimklSyncService(simklApi, authManager, tmdbApi, syncProviderStore, context = null)
+        syncService.elapsedRealtimeMs = { elapsedMs }
     }
 
     @Test
@@ -76,8 +85,28 @@ class SimklIntegrationTest {
         val success = authManager.pollPinAuth("SIMKL-123")
         assertTrue(success)
         coVerify { syncProviderStore.setSimklAccessToken("token_abc123") }
-        coVerify { syncProviderStore.setMdbListApiKey(null) }
+        coVerify(exactly = 0) { syncProviderStore.setMdbListApiKey(any()) }
         coVerify { syncProviderStore.onProviderConnected(com.arflix.tv.data.repository.sync.SyncProvider.SIMKL) }
+    }
+
+    @Test(expected = SimklPinExpiredException::class)
+    fun testPollingDeadCodeThrowsException(): Unit = runBlocking {
+        coEvery { simklApi.pollPinToken(any(), any()) } returns SimklPinPollResponse(
+            result = "KO",
+            deviceCode = "dead_code"
+        )
+        authManager.pollPinAuth("EXPIRED-CODE")
+    }
+
+    @Test
+    fun testPollingPendingCodeReturnsFalse() = runBlocking {
+        coEvery { simklApi.pollPinToken(any(), any()) } returns SimklPinPollResponse(
+            result = "KO",
+            message = "Authorization pending",
+            deviceCode = null
+        )
+        val result = authManager.pollPinAuth("PENDING-CODE")
+        assertFalse(result)
     }
 
     @Test
@@ -87,6 +116,20 @@ class SimklIntegrationTest {
         assertFalse(authManager.isConnected())
         coVerify { syncProviderStore.setSimklAccessToken(null) }
         coVerify { syncProviderStore.onProviderDisconnected(com.arflix.tv.data.repository.sync.SyncProvider.SIMKL) }
+    }
+
+    @Test
+    fun testV2DisconnectClearsRoutingForTheCapturedProfileBeforeRevocation() = runBlocking {
+        val v2 = mockk<SimklListsRepository>(relaxed = true)
+        every { v2.profileId() } returns "original-profile"
+        coEvery { v2.disconnect(any()) } coAnswers {
+            every { v2.profileId() } returns "other-profile"
+            firstArg<suspend () -> Unit>().invoke()
+            coVerify { syncProviderStore.setSimklAccessToken(null, "original-profile") }
+            coVerify { syncProviderStore.onProviderDisconnected(com.arflix.tv.data.repository.sync.SyncProvider.SIMKL, "original-profile") }
+        }
+        SimklAuthManager(simklApi, syncProviderStore, v2).disconnect()
+        coVerify(exactly = 0) { syncProviderStore.setSimklAccessToken(null, "other-profile") }
     }
 
     @Test
@@ -114,13 +157,25 @@ class SimklIntegrationTest {
     }
 
     @Test
-    fun testMarkUnwatchedCallsRemoveFromHistory() = runBlocking {
+    fun testMarkMovieUnwatchedCallsAddToListPlanToWatch() = runBlocking {
+        coEvery { syncProviderStore.getSimklAccessToken() } returns "token_123"
+        coEvery { simklApi.addToList(any(), any(), any()) } returns retrofit2.Response.success(
+            mockk<okhttp3.ResponseBody>()
+        )
+
+        val success = syncService.markUnwatched(com.arflix.tv.data.model.MediaType.MOVIE, 12345)
+        assertTrue(success)
+        coVerify { simklApi.addToList("Bearer token_123", any(), any()) }
+    }
+
+    @Test
+    fun testMarkShowUnwatchedCallsRemoveFromHistory() = runBlocking {
         coEvery { syncProviderStore.getSimklAccessToken() } returns "token_123"
         coEvery { simklApi.removeFromHistory(any(), any(), any()) } returns retrofit2.Response.success(
             mockk<okhttp3.ResponseBody>()
         )
 
-        val success = syncService.markUnwatched(com.arflix.tv.data.model.MediaType.MOVIE, 12345)
+        val success = syncService.markUnwatched(com.arflix.tv.data.model.MediaType.TV, 12345, season = 1, episode = 2)
         assertTrue(success)
         coVerify { simklApi.removeFromHistory("Bearer token_123", any(), any()) }
     }
@@ -147,7 +202,7 @@ class SimklIntegrationTest {
     }
 
     @Test
-    fun testAnimeEpisodeScrobbleUsesAnimePayload() = runBlocking {
+    fun testAnimeEpisodeScrobbleUsesPathAPayload() = runBlocking {
         coEvery { syncProviderStore.getSimklAccessToken() } returns "token_123"
         val body = slot<SimklScrobbleBody>()
         coEvery { simklApi.scrobbleStart(any(), any(), capture(body)) } returns
@@ -162,10 +217,27 @@ class SimklIntegrationTest {
             isAnime = true
         )
 
-        assertEquals(null, body.captured.show)
-        assertEquals(789, body.captured.anime?.ids?.tmdb)
+        assertEquals(789, body.captured.show?.ids?.tmdb)
+        assertEquals(true, body.captured.show?.useTvdbAnimeSeasons)
+        assertEquals(null, body.captured.anime)
         assertEquals(2, body.captured.episode?.season)
         assertEquals(4, body.captured.episode?.number)
+    }
+
+    @Test
+    fun testScrobblerDoesNotMultiplySmallProgress() = runBlocking {
+        coEvery { syncProviderStore.getSimklAccessToken() } returns "token_123"
+        val body = slot<SimklScrobbleBody>()
+        coEvery { simklApi.scrobbleStart(any(), any(), capture(body)) } returns
+            retrofit2.Response.success(SimklScrobbleResponse(action = "scrobble"))
+
+        scrobbler.scrobbleStart(
+            mediaType = com.arflix.tv.data.model.MediaType.MOVIE,
+            tmdbId = 123,
+            progress = 1.0f
+        )
+
+        assertEquals(1.0f, body.captured.progress)
     }
 
     @Test
@@ -177,7 +249,7 @@ class SimklIntegrationTest {
 
         syncService.syncIfNeeded(force = true)
 
-        coVerify(exactly = 3) {
+        coVerify(exactly = 2) {
             simklApi.getAllItems(
                 any(),
                 any(),
@@ -185,6 +257,19 @@ class SimklIntegrationTest {
                 status = "all",
                 dateFrom = null,
                 extended = "full",
+                episodeWatchedAt = "yes",
+                includeAllEpisodes = "yes",
+                nextWatchInfo = "yes"
+            )
+        }
+        coVerify(exactly = 1) {
+            simklApi.getAllItems(
+                any(),
+                any(),
+                "anime",
+                status = "all",
+                dateFrom = null,
+                extended = "full_anime_seasons",
                 episodeWatchedAt = "yes",
                 includeAllEpisodes = "yes",
                 nextWatchInfo = "yes"
@@ -341,7 +426,8 @@ class SimklIntegrationTest {
         assertEquals(2, items.size)
         val movie = items.first { it.id == 100 }
         assertEquals(42, movie.progress)
-        assertEquals(3_024L, movie.resumePositionSeconds)
+        // Preserve SIMKL's 42.5%, even though the card's percentage is an integer.
+        assertEquals(3_060L, movie.resumePositionSeconds)
         assertFalse(syncService.getWatchedMovies().contains(100))
         val show = items.first { it.id == 200 }
         assertTrue(show.isUpNext)
@@ -401,5 +487,86 @@ class SimklIntegrationTest {
         coEvery { syncProviderStore.getSimklAccessToken() } returns null
 
         assertTrue(syncService.getWatchedMovies().isEmpty())
+    }
+
+    @Test
+    fun testActivitiesGateHonoredEvenWhenForceTrue() = runBlocking {
+        coEvery { syncProviderStore.getSimklAccessToken() } returns "token_123"
+        coEvery { simklApi.getActivities(any(), any()) } returns SimklActivitiesResponse(all = "2026-08-12T10:00:00Z")
+        coEvery { simklApi.getAllItems(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            emptyLibraryPayload()
+
+        // First sync establishes snapshot and watermark
+        syncService.syncIfNeeded(force = true)
+
+        // Second sync with force = true, but same activities timestamp
+        syncService.syncIfNeeded(force = true)
+
+        // getAllItems should only have been called during the first sync (3 times total)
+        coVerify(exactly = 3) { simklApi.getAllItems(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun testDeltaSyncCalledWhenActivitiesChanged() = runBlocking {
+        coEvery { syncProviderStore.getSimklAccessToken() } returns "token_123"
+        coEvery { simklApi.getActivities(any(), any()) } returnsMany listOf(
+            SimklActivitiesResponse(all = "2026-08-12T10:00:00Z"),
+            SimklActivitiesResponse(all = "2026-08-12T11:00:00Z")
+        )
+        coEvery { simklApi.getAllItems(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            emptyLibraryPayload()
+        coEvery { simklApi.getAllItemsDelta(any(), any(), any(), any(), any(), any(), any()) } returns
+            libraryPayload("""{"movies":[{"status":"completed","movie":{"title":"Delta Movie","ids":{"tmdb":999}}}]}""")
+
+        // Initial sync
+        syncService.syncIfNeeded(force = true)
+
+        // Delta sync on activities change
+        elapsedMs += SimklSyncService.MIN_ACTIVITY_CHECK_INTERVAL_MS
+        syncService.syncIfNeeded(force = true)
+
+        coVerify(exactly = 1) {
+            simklApi.getAllItemsDelta(
+                auth = "Bearer token_123",
+                clientId = any(),
+                dateFrom = "2026-08-12T10:00:00Z",
+                extended = any(),
+                episodeWatchedAt = any(),
+                includeAllEpisodes = any(),
+                nextWatchInfo = any()
+            )
+        }
+        assertTrue(syncService.getWatchedMovies().contains(999))
+    }
+
+    @Test
+    fun testUnairedEpisodesCountSubtractedFromTotal() = runBlocking {
+        coEvery { syncProviderStore.getSimklAccessToken() } returns "token_123"
+        coEvery { simklApi.getActivities(any(), any()) } returns SimklActivitiesResponse(all = "2026-08-12T10:00:00Z")
+        coEvery { simklApi.getAllItems(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            emptyLibraryPayload()
+        coEvery {
+            simklApi.getAllItems(any(), any(), "shows", any(), any(), any(), any(), any(), any())
+        } returns libraryPayload(
+            """{"shows":[{"status":"watching","last_watched_at":"2026-08-11T20:00:00Z","show":{"title":"Airing Show","ids":{"tmdb":777}},"next_to_watch":"S01E02","next_to_watch_info":{"season":1,"episode":2},"watched_episodes_count":1,"total_episodes_count":12,"not_aired_episodes_count":4}]}"""
+        )
+        coEvery { simklApi.getPlayback(any(), any()) } returns emptyList()
+
+        val items = syncService.getContinueWatching(forceRefresh = true)
+        val show = items.first { it.id == 777 }
+        // 12 total - 4 unaired = 8 aired total episodes
+        assertEquals(8, show.totalEpisodes)
+        assertEquals(1, show.watchedEpisodes)
+    }
+
+    @Test
+    fun testSimklIdsSupportsSlugAndSimklIdAlias() {
+        val ids = Gson().fromJson(
+            """{"simkl_id":12345,"slug":"test-show","tmdb":67890}""",
+            com.arflix.tv.data.api.SimklIds::class.java
+        )
+        assertEquals(12345L, ids.simkl)
+        assertEquals("test-show", ids.slug)
+        assertEquals(67890, ids.tmdb)
     }
 }

@@ -6,14 +6,11 @@ import com.google.firebase.crashlytics.FirebaseCrashlytics
  * Firebase Crashlytics implementation of [AppLogger.CrashContextProvider].
  *
  * Provides crash reporting with:
- * - Custom keys for context (user_id, content_id, playback_state)
+ * - Sanitized custom keys and playback state
  * - Non-fatal exception recording
  * - Breadcrumb logging
  *
- * Setup:
- * 1. Add google-services.json from Firebase Console to app/
- * 2. Uncomment Firebase plugins in app/build.gradle.kts
- * 3. Call CrashlyticsProvider.initialize() in Application.onCreate()
+ * Collection is configured by DiagnosticsManager, not Firebase's automatic defaults.
  */
 data object CrashlyticsProvider : AppLogger.CrashContextProvider {
 
@@ -42,6 +39,8 @@ data object CrashlyticsProvider : AppLogger.CrashContextProvider {
         return try {
             // Check if Firebase/Crashlytics is available
             val crashlytics = FirebaseCrashlytics.getInstance()
+            crashlytics.setCustomKey("distribution", if (com.arflix.tv.BuildConfig.SELF_UPDATE_ENABLED) "sideload" else "play")
+            crashlytics.setCustomKey("build_type", com.arflix.tv.BuildConfig.BUILD_TYPE)
             crashlytics.setCrashlyticsCollectionEnabled(true)
             isInitialized = true
             AppLogger.init(this)
@@ -132,9 +131,7 @@ data object CrashlyticsProvider : AppLogger.CrashContextProvider {
         position: Long?,
         duration: Long?
     ) {
-        setCustomKey("content_id", contentId ?: "none")
         setCustomKey("content_type", contentType ?: "unknown")
-        setCustomKey("stream_url_host", streamUrl?.let { extractHost(it) } ?: "none")
         position?.let { setCustomKey("playback_position", it.toInt()) }
         duration?.let { setCustomKey("playback_duration", it.toInt()) }
     }
@@ -154,11 +151,4 @@ data object CrashlyticsProvider : AppLogger.CrashContextProvider {
         setCustomKey("network_connected", isConnected)
     }
 
-    private fun extractHost(url: String): String {
-        return try {
-            java.net.URL(url).host
-        } catch (e: Exception) {
-            "invalid_url"
-        }
-    }
 }

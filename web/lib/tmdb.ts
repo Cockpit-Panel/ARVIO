@@ -1,3 +1,5 @@
+import { addonServesOwnMeta, findAddonServingOwnMeta, getNativeDetails, getNativeSeasonEpisodes, isAddonNative, registerNativeItem } from "./addonNative";
+import { isYouTubeItem, youTubeCatalogItems, youTubeDetails } from "./youtubeCollection";
 import { config } from "./config";
 import { apiProxiedUrl, jsonRequest, proxiedUrl } from "./http";
 import { fetchAniZipMappingByTmdbId } from "./metadata/anizip";
@@ -5,9 +7,13 @@ import { MetadataDispatcher } from "./metadata/dispatcher";
 import type { MetadataLookupIds, MetadataMediaType, MetadataProviderId, ProviderPriorityConfig } from "./metadata/types";
 import { tmdbImageUrl } from "./mediaImages";
 import { loadStored, saveStored } from "./storage";
+import { discoverParams, splitMultiResults, type DiscoverFilters, type SearchType } from "./searchModel";
+import { CARD_EXTRAS_APPEND, CARD_EXTRAS_IMAGE_LANGUAGES, CARD_EXTRAS_KEY, createCardExtrasCache, type CardExtras, type CardExtrasPayload } from "./cardExtras";
 import type { CatalogConfig, Category, CollectionSourceConfig, EpisodeInfo, HomeServerConfig, InstalledAddon, MediaItem, MediaType, PersonDetails, ReviewInfo } from "./types";
 
 type TmdbItem = {
+  job?: string;
+  popularity?: number;
   id: number;
   title?: string;
   name?: string;
@@ -17,6 +23,7 @@ type TmdbItem = {
   poster_path?: string | null;
   backdrop_path?: string | null;
   vote_average?: number;
+  vote_count?: number;
   release_date?: string;
   first_air_date?: string;
   media_type?: string;
@@ -63,6 +70,13 @@ type MdblistItem = Record<string, unknown>;
 const TMDB_CATALOG_PAGE_LIMIT = 10;
 const HYDRATE_BATCH_SIZE = 24;
 const CATALOG_FIRST_PAINT_LIMIT = 96;
+/**
+ * Home rows show this many titles and end in a "View all" tile that opens the
+ * full list (Android CategoryViewAllScreen). Hydrating 96 titles per trending
+ * row (one TMDB call each) was most of a cold Home's request storm.
+ */
+export const HOME_ROW_LIMIT = 20;
+export type CatalogLoadOptions = { limit?: number };
 
 type TmdbPersonResponse = {
   id: number;
@@ -139,6 +153,33 @@ export function mapTmdbItem(item: TmdbItem, fallbackType: MediaType): MediaItem 
 let tmdbCooldownUntil = 0;
 const TMDB_COOLDOWN_MS = 30_000;
 
+// Titles TMDB does not have (removed, or ids from another catalog) answer 404
+// every time. Remember them for a day so rows and Continue Watching do not ask
+// again on every visit.
+const MISSING_KEY = "arvio-tmdb-missing-v1";
+const MISSING_TTL_MS = 24 * 60 * 60 * 1000;
+let missing: Map<string, number> | null = null;
+function missingPaths(): Map<string, number> {
+  if (missing) return missing;
+  missing = new Map();
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(MISSING_KEY) ?? "{}") as Record<string, number>;
+    const now = Date.now();
+    for (const [key, at] of Object.entries(raw)) if (now - at < MISSING_TTL_MS) missing.set(key, at);
+  } catch { /* storage unavailable */ }
+  return missing;
+}
+function rememberMissing(path: string) {
+  const paths = missingPaths();
+  paths.set(path, Date.now());
+  while (paths.size > 500) paths.delete(paths.keys().next().value!);
+  try { window.localStorage.setItem(MISSING_KEY, JSON.stringify(Object.fromEntries(paths))); } catch { /* storage unavailable */ }
+}
+function knownMissing(path: string) {
+  const at = missingPaths().get(path);
+  return at !== undefined && Date.now() - at < MISSING_TTL_MS;
+}
+
 export async function tmdb<T>(path: string, params: Record<string, string | number | undefined> = {}, customKey?: string) {
   const url = new URL(`/api/tmdb/${path.replace(/^\/+/, "")}`, window.location.origin);
   // Never surface adult titles anywhere in the app (discover/search/trending).
@@ -148,6 +189,11 @@ export async function tmdb<T>(path: string, params: Record<string, string | numb
   });
   if (Date.now() < tmdbCooldownUntil) {
     throw new Error("Rate limited — TMDB requests are pausing briefly.");
+  }
+  // Only a title's own record is remembered as missing, not searches or lists.
+  const recordPath = /^(movie|tv)\/\d+$/.test(path.replace(/^\/+/, "")) ? path.replace(/^\/+/, "") : null;
+  if (recordPath && knownMissing(recordPath)) {
+    throw Object.assign(new Error("Not found on TMDB"), { status: 404 });
   }
   const headers: Record<string, string> = {};
   if (customKey?.trim()) {
@@ -166,8 +212,14 @@ export async function tmdb<T>(path: string, params: Record<string, string | numb
       });
     } catch (error) {
       lastError = error;
-      if ((error as { status?: number }).status === 429) {
+      const status = (error as { status?: number }).status;
+      if (status === 429) {
         tmdbCooldownUntil = Date.now() + TMDB_COOLDOWN_MS;
+        break;
+      }
+      // A 404/401/400 will not change on a retry.
+      if (status !== undefined && status >= 400 && status < 500 && status !== 408) {
+        if (status === 404 && recordPath) rememberMissing(recordPath);
         break;
       }
       if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 400));
@@ -208,9 +260,24 @@ export async function loadCatalog(
   catalog: CatalogConfig,
   language = "en-US",
   addons: InstalledAddon[] = [],
-  homeServers: HomeServerConfig[] = []
+  homeServers: HomeServerConfig[] = [],
+  options: CatalogLoadOptions = {}
 ): Promise<Category | null> {
   if (!catalog.enabled) return null;
+  const limit = options.limit && options.limit > 0 ? Math.floor(options.limit) : undefined;
+  const row = await loadCatalogUnlimited(catalog, language, addons, homeServers, limit);
+  if (!row || !limit) return row;
+  // hasMore: the row was cut (or its source has further pages/refs).
+  return { ...row, items: row.items.slice(0, limit), hasMore: Boolean(row.hasMore) || row.items.length > limit };
+}
+
+async function loadCatalogUnlimited(
+  catalog: CatalogConfig,
+  language: string,
+  addons: InstalledAddon[],
+  homeServers: HomeServerConfig[],
+  limit?: number
+): Promise<Category | null> {
   if (isCollectionCatalog(catalog)) {
     const items = await loadCollectionCatalog(catalog, language, addons, homeServers);
     return {
@@ -223,59 +290,88 @@ export async function loadCatalog(
     };
   }
 
-  if (catalog.sourceType === "tmdb" && catalog.endpoint) {
-    const results = await loadTmdbCatalogPages(catalog, language);
+  if (catalog.sourceType === "tmdb" && !catalog.endpoint) {
     return {
-      id: catalog.id,
-      title: catalog.name,
-      items: results.map((x) => mapTmdbItem(x, catalog.mediaType === "tv" ? "tv" : "movie")),
-      sourceLabel: "TMDB",
+      id: catalog.id, title: catalog.name,
+      items: await loadTmdbPageCatalog(catalog, language, limit),
+      sourceLabel: "TMDB", sourceUrl: catalog.sourceUrl,
       layout: catalog.layout ?? "landscape"
     };
   }
 
+  if (catalog.sourceType === "tmdb" && catalog.endpoint) {
+    const results = await loadTmdbCatalogPages(catalog, language, limit);
+    return {
+      id: catalog.id,
+      title: catalog.name,
+      items: results.items.map((x) => mapTmdbItem(x, catalog.mediaType === "tv" ? "tv" : "movie")),
+      sourceLabel: "TMDB",
+      layout: catalog.layout ?? "landscape",
+      hasMore: results.hasMore
+    };
+  }
+
   if (catalog.sourceType === "mdblist" && catalog.sourceUrl) {
-    const items = await loadMdblist(catalog, language);
+    const { items, hasMore } = await loadMdblistPage(catalog, language, limit);
     return {
       id: catalog.id,
       title: catalog.name,
       items,
       sourceLabel: "MDBLIST",
       sourceUrl: catalog.sourceUrl,
-      layout: catalog.layout ?? "landscape"
+      layout: catalog.layout ?? "landscape",
+      hasMore
     };
   }
 
-  if (catalog.sourceType === "preinstalled" && catalog.id === "favorite_tv") {
-    const response = await tmdb<TmdbList>("discover/tv", {
-      language,
-      sort_by: "vote_average.desc",
-      "vote_count.gte": 500
-    });
-    return {
-      id: catalog.id,
-      title: catalog.name,
-      items: response.results.map((x) => mapTmdbItem(x, "tv")),
-      sourceLabel: "TMDB",
-      layout: catalog.layout ?? "landscape"
-    };
+  if (catalog.sourceType === "youtube") {
+    const items = youTubeCatalogItems(catalog);
+    return items.length ? {
+      id: catalog.id, title: catalog.name, items,
+      sourceLabel: "YOUTUBE", layout: catalog.layout ?? "landscape"
+    } : null;
   }
+
+  // Favorite TV is the profile's IPTV favorites; Home renders it from the channel list.
+  if (catalog.sourceType === "preinstalled" && catalog.id === "favorite_tv") return null;
+  // WeTrakr recommendations need the TV's WeTrakr connection; the web has none.
+  if (catalog.sourceType === "preinstalled" && catalog.id.startsWith("wetrakr_")) return null;
 
   if (catalog.sourceType === "trakt" && catalog.sourceUrl) {
     const refs = await loadTraktPublicList(catalog.sourceUrl) as Array<{ type: MediaType; id: number }>;
-    const details = await hydrateRefs(refs, language);
+    const details = await hydrateRefs(refs, language, limit);
     return {
       id: catalog.id,
       title: catalog.name,
       items: details,
       sourceLabel: "TRAKT",
       sourceUrl: catalog.sourceUrl,
-      layout: catalog.layout ?? "landscape"
+      layout: catalog.layout ?? "landscape",
+      hasMore: Boolean(limit && refs.length > limit)
     };
   }
 
+  if (catalog.sourceType === "simkl" && catalog.sourceUrl) {
+    const { loadSimklCustomList } = await import("./simklLists");
+    const list = await loadSimklCustomList(catalog.sourceUrl);
+    const refs: Array<{ type: MediaType; id: number }> = [];
+    const wanted = Math.min(60, limit ?? 60);
+    for (let start = 0; start < list.items.length && refs.length < wanted; start += 6) {
+      const batch = await Promise.all(list.items.slice(start, start + 6).map(async item => {
+        const type: MediaType = item.type === "movie" || item.type === "movies" || item.anime_type === "movie" ? "movie" : "tv";
+        const id = await resolveTmdbId({ mediaType: type, tmdbId: Number(item.ids?.tmdb) || null,
+          imdbId: item.ids?.imdb, title: item.title, year: item.year }).catch(() => null);
+        return id ? { type, id } : null;
+      }));
+      refs.push(...batch.filter((ref): ref is { type: MediaType; id: number } => ref !== null));
+    }
+    return { id: catalog.id, title: catalog.name, items: await hydrateRefs(refs, language, limit),
+      sourceLabel: "SIMKL", sourceUrl: catalog.sourceUrl, layout: catalog.layout ?? "landscape",
+      hasMore: Boolean(limit && list.items.length > refs.length) };
+  }
+
   if (catalog.sourceType === "addon") {
-    const items = await loadAddonCatalog(catalog, addons, language);
+    const items = await loadAddonCatalog(catalog, addons, language, limit, homeServers);
     return {
       id: catalog.id,
       title: catalog.name,
@@ -320,6 +416,62 @@ function isCollectionCatalog(catalog: CatalogConfig) {
   return kind === "COLLECTION" || kind === "COLLECTION_RAIL" || Boolean(catalog.collectionSources?.length);
 }
 
+// Android stores TMDB page catalogs as a source reference, without a web endpoint.
+async function loadTmdbPageCatalog(catalog: CatalogConfig, language: string, limit?: number): Promise<MediaItem[]> {
+  const kinds = new Set(["list", "collection", "company", "network", "person", "keyword", "genre"]);
+  let parts = /^tmdb:([a-z]+):(\d+):(movie|tv)?$/i.exec(catalog.sourceRef ?? "");
+  if (!parts && catalog.sourceUrl) {
+    try {
+      const url = new URL(/^https?:\/\//i.test(catalog.sourceUrl) ? catalog.sourceUrl : `https://${catalog.sourceUrl}`);
+      if (url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org")) {
+        parts = /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?([a-z]+)\/(\d+)(?:-[^/]+)?(?:\/(movie|tv))?\/?$/i.exec(url.pathname);
+      }
+    } catch { /* Invalid restored URLs have no items. */ }
+  }
+  if (!parts || !kinds.has(parts[1].toLowerCase()) || Number(parts[2]) <= 0) return [];
+  const kind = parts[1].toLowerCase(), id = Number(parts[2]);
+  const scope = parts[3]?.toLowerCase();
+  // One extra title past a Home limit tells the row that "View all" has more.
+  const cap = limit ? limit + 1 : 200;
+  const filterScope = (items: MediaItem[]) => dedupeItems(items).filter(item => !scope || item.mediaType === scope).slice(0, cap);
+  if (kind === "list") {
+    const items: MediaItem[] = [];
+    let page = 1, totalPages = 1;
+    while (items.length < cap && page <= totalPages) {
+      const response = await tmdb<{ items?: TmdbItem[]; total_pages?: number }>(`list/${id}`, { language, page });
+      const batch = (response.items ?? []).map(item => mapTmdbItem(item, item.media_type === "tv" ? "tv" : "movie"));
+      items.push(...batch.filter(item => !scope || item.mediaType === scope));
+      totalPages = response.total_pages ?? 1;
+      if (!batch.length) break;
+      page++;
+    }
+    return filterScope(items);
+  }
+  if (kind === "collection") {
+    const response = await tmdb<{ parts?: TmdbItem[] }>(`collection/${id}`, { language });
+    return filterScope((response.parts ?? []).sort((a, b) => (a.release_date ?? "").localeCompare(b.release_date ?? ""))
+      .map(item => mapTmdbItem(item, "movie")));
+  }
+  if (kind === "person") {
+    const response = await tmdb<TmdbCombinedCredits>(`person/${id}/combined_credits`, { language });
+    return filterScope([...(response.cast ?? []), ...(response.crew ?? [])]
+      .filter(item => !item.adult && (item.media_type === "movie" || item.media_type === "tv"))
+      .sort((a, b) => (b.popularity ?? 0) - (a.popularity ?? 0))
+      .map(item => mapTmdbItem(item, item.media_type === "tv" ? "tv" : "movie")));
+  }
+  const param = ({ company: "with_companies", network: "with_networks", keyword: "with_keywords", genre: "with_genres" } as Record<string, string>)[kind];
+  if (!param) return [];
+  const scopes: MediaType[] = kind === "network" ? ["tv"] : scope ? [scope as MediaType] : ["movie", "tv"];
+  const batches = await Promise.all(scopes.map(mediaType => loadCollectionSource({
+    kind: "TMDB_DISCOVER", mediaType, sortBy: "popularity.desc", discoverParams: { [param]: String(id) }
+  }, language, [], [], { page: 1, pageLimit: limit ? Math.max(1, Math.ceil(cap / 20)) : 10 })));
+  const items: MediaItem[] = [];
+  for (let i = 0; i < Math.max(...batches.map(batch => batch.length)) && items.length < cap; i++) {
+    for (const batch of batches) if (batch[i] && items.length < cap) items.push(batch[i]);
+  }
+  return filterScope(items);
+}
+
 async function loadCollectionCatalog(
   catalog: CatalogConfig,
   language: string,
@@ -337,14 +489,33 @@ async function loadCollectionCatalog(
   return dedupeItems(batches.flat());
 }
 
-async function loadCollectionSource(
+export async function loadCollectionSource(
   source: CollectionSourceConfig,
   language: string,
   addons: InstalledAddon[],
-  homeServers: HomeServerConfig[] = []
+  homeServers: HomeServerConfig[] = [],
+  paging?: { page: number; pageLimit: number }
 ) {
   const kind = String(source.kind ?? "").toUpperCase();
   const mediaType = sourceMediaType(source);
+  if (kind === "TMDB_DISCOVER") {
+    const type = mediaType === "tv" ? "tv" : "movie";
+    const sort = (source.sortBy || "popularity.desc")
+      .replace(type === "tv" ? "primary_release_date" : "first_air_date",
+        type === "tv" ? "first_air_date" : "primary_release_date");
+    return loadTmdbCatalogPages({
+      id: "custom-discover", name: "Collection", sourceType: "tmdb", enabled: true,
+      endpoint: `discover/${type}`, mediaType: type,
+      params: { ...source.discoverParams, language, sort_by: sort, ...paging }
+    }, language).then(page => page.items.map(item => mapTmdbItem(item, type)));
+  }
+  if (kind === "TMDB_LIST" && source.tmdbListId) {
+    const response = await tmdb<{ items?: TmdbItem[] }>(`list/${source.tmdbListId}`, { language });
+    return (response.items ?? []).map(item => mapTmdbItem(item, item.media_type === "tv" ? "tv" : "movie"));
+  }
+  if (kind === "TRAKT_LIST" && source.traktListId) {
+    return hydrateRefs(await loadTraktPublicList(`https://trakt.tv/lists/${encodeURIComponent(source.traktListId)}`), language);
+  }
   if (kind === "CURATED_IDS") {
     const refs = (source.curatedRefs ?? [])
       .map(parseCuratedRef)
@@ -364,10 +535,27 @@ async function loadCollectionSource(
   }
   if (kind === "TMDB_COLLECTION" && source.tmdbCollectionId) {
     const response = await tmdb<{ parts?: TmdbItem[] }>(`collection/${source.tmdbCollectionId}`, { language });
-    return (response.parts ?? []).map((item) => mapTmdbItem({ ...item, media_type: item.media_type ?? "movie" }, "movie"));
+    return (response.parts ?? []).sort((a, b) => (a.release_date ?? "").localeCompare(b.release_date ?? ""))
+      .map((item) => mapTmdbItem({ ...item, media_type: item.media_type ?? "movie" }, "movie"));
   }
   if (kind === "TMDB_PERSON" && source.tmdbPersonId) {
     const response = await tmdb<TmdbCombinedCredits>(`person/${source.tmdbPersonId}/combined_credits`, { language });
+    if (source.tmdbCreditRole) {
+      const credits = source.tmdbCreditRole === "Director" ? (response.crew ?? []).filter(item => item.job === "Director") : response.cast ?? [];
+      const matching = credits.filter(item => !item.adult && item.media_type === (mediaType === "tv" ? "tv" : "movie"));
+      const sort = source.sortBy || "popularity.desc";
+      const value = (item: TmdbItem): string | number => {
+        switch (sort.split('.')[0]) {
+          case "primary_release_date": case "first_air_date": case "release_date": return item.release_date || item.first_air_date || "";
+          case "vote_average": return item.vote_average || 0;
+          case "vote_count": return item.vote_count || 0;
+          case "title": case "original_title": return item.title || item.name || "";
+          default: return item.popularity || 0;
+        }
+      };
+      matching.sort((a, b) => (value(a) < value(b) ? -1 : value(a) > value(b) ? 1 : 0) * (sort.endsWith('.asc') ? 1 : -1));
+      return dedupeItems(matching.map(item => mapTmdbItem(item, mediaType === "tv" ? "tv" : "movie")));
+    }
     return dedupeItems([...(response.cast ?? []), ...(response.crew ?? [])]
       .filter((item) => item.media_type === "movie" || item.media_type === "tv")
       .map((item) => mapTmdbItem(item, item.media_type === "tv" ? "tv" : "movie")));
@@ -383,9 +571,9 @@ async function loadCollectionSource(
       params: {
       language,
       with_genres: source.tmdbGenreId,
-      sort_by: source.sortBy || "popularity.desc"
+      sort_by: source.sortBy || "popularity.desc", ...paging
       }
-    }, language).then((items) => items.map((item) => mapTmdbItem(item, mediaType === "tv" ? "tv" : "movie")));
+    }, language).then((page) => page.items.map((item) => mapTmdbItem(item, mediaType === "tv" ? "tv" : "movie")));
   }
   if (kind === "TMDB_KEYWORD" && source.tmdbKeywordId) {
     return loadTmdbCatalogPages({
@@ -398,9 +586,9 @@ async function loadCollectionSource(
       params: {
         language,
         with_keywords: source.tmdbKeywordId,
-        sort_by: source.sortBy || "popularity.desc"
+        sort_by: source.sortBy || "popularity.desc", ...paging
       }
-    }, language).then((items) => items.map((item) => mapTmdbItem(item, mediaType === "tv" ? "tv" : "movie")));
+    }, language).then((page) => page.items.map((item) => mapTmdbItem(item, mediaType === "tv" ? "tv" : "movie")));
   }
   if (kind === "TMDB_WATCH_PROVIDER" && source.tmdbWatchProviderId) {
     return loadTmdbCatalogPages({
@@ -414,19 +602,22 @@ async function loadCollectionSource(
         language,
         watch_region: source.watchRegion || "US",
         with_watch_providers: source.tmdbWatchProviderId,
-        sort_by: source.sortBy || "popularity.desc"
+        sort_by: source.sortBy || "popularity.desc", ...paging
       }
-    }, language).then((items) => items.map((item) => mapTmdbItem(item, mediaType === "tv" ? "tv" : "movie")));
+    }, language).then((page) => page.items.map((item) => mapTmdbItem(item, mediaType === "tv" ? "tv" : "movie")));
   }
   if (kind === "ADDON_CATALOG") {
+    const installed = findCollectionAddon(addons, source);
+    if (!installed) throw new Error("The add-on for this collection is not installed or enabled.");
     return loadAddonCatalog({
       id: `collection-addon-${source.addonId}-${source.addonCatalogId}`,
       name: source.addonCatalogId || "Addon catalog",
       sourceType: "addon",
       mediaType,
-      addonId: source.addonId,
+      addonId: installed.id,
       addonCatalogType: source.addonCatalogType,
       addonCatalogId: source.addonCatalogId,
+      addonGenre: source.addonGenre,
       enabled: true
     }, addons, language);
   }
@@ -440,6 +631,22 @@ async function loadCollectionSource(
     return rows.flatMap((r) => r.items);
   }
   return [];
+}
+
+/**
+ * The installed addon a collection's addon source loads from. Collections name the addon by
+ * its manifest id ("aio-metadata"); Android-installed entries carry a per-URL suffix. Like
+ * Nuvio, the named addon is asked even for a catalog its manifest doesn't list (AIOMetadata
+ * serves its streaming catalogs that way).
+ */
+function findCollectionAddon(addons: InstalledAddon[], source: CollectionSourceConfig) {
+  const enabled = addons.filter(a => a.enabled !== false);
+  const wanted = String(source.addonId ?? "").trim();
+  const isNamed = (a: InstalledAddon) => Boolean(wanted) &&
+    (a.id === wanted || (a as { manifest?: { id?: string } }).manifest?.id === wanted);
+  const declares = (a: InstalledAddon) => (a.catalogs ?? []).some(c => c.id === source.addonCatalogId &&
+    String(c.type).toLowerCase() === String(source.addonCatalogType ?? "").toLowerCase());
+  return enabled.find(a => isNamed(a) && declares(a)) ?? enabled.find(declares) ?? enabled.find(isNamed);
 }
 
 function sourceMediaType(source: CollectionSourceConfig): MediaType | "all" {
@@ -497,24 +704,29 @@ function dedupeTmdbItems(items: TmdbItem[]) {
   });
 }
 
-async function loadTmdbCatalogPages(catalog: CatalogConfig, language: string) {
-  if (!catalog.endpoint) return [];
+async function loadTmdbCatalogPages(catalog: CatalogConfig, language: string, limit?: number) {
+  if (!catalog.endpoint) return { items: [] as TmdbItem[], hasMore: false };
   const params = cleanCatalogParams(catalog.params);
   const startPage = Number(params.page ?? 1);
   const first = await tmdb<TmdbList>(catalog.endpoint, { ...params, language, page: startPage });
   const totalPages = Math.max(startPage, Number(first.total_pages ?? startPage) || startPage);
-  const lastPage = Math.min(totalPages, startPage + catalogPageLimit(catalog) - 1);
+  // TMDB pages hold 20 titles: a limited (Home) row needs only enough pages for its limit.
+  const pageLimit = limit ? Math.min(catalogPageLimit(catalog), Math.max(1, Math.ceil(limit / 20))) : catalogPageLimit(catalog);
+  const lastPage = Math.min(totalPages, startPage + pageLimit - 1);
   const pageRequests: Array<Promise<TmdbList>> = [];
   for (let page = startPage + 1; page <= lastPage; page += 1) {
     pageRequests.push(tmdb<TmdbList>(catalog.endpoint, { ...params, language, page }).catch(() => ({ results: [] })));
   }
   const rest = await Promise.all(pageRequests);
-  return dedupeTmdbItems([...(first.results ?? []), ...rest.flatMap((page) => page.results ?? [])]);
+  return {
+    items: dedupeTmdbItems([...(first.results ?? []), ...rest.flatMap((page) => page.results ?? [])]),
+    hasMore: lastPage < totalPages
+  };
 }
 
-async function hydrateRefs(refs: Array<{ type: MediaType; id: number }>, language: string) {
+async function hydrateRefs(refs: Array<{ type: MediaType; id: number }>, language: string, limit?: number) {
   const output: MediaItem[] = [];
-  const firstPaintRefs = refs.slice(0, CATALOG_FIRST_PAINT_LIMIT);
+  const firstPaintRefs = refs.slice(0, limit ? Math.min(limit, CATALOG_FIRST_PAINT_LIMIT) : CATALOG_FIRST_PAINT_LIMIT);
   for (let index = 0; index < firstPaintRefs.length; index += HYDRATE_BATCH_SIZE) {
     const chunk = firstPaintRefs.slice(index, index + HYDRATE_BATCH_SIZE);
     const details = await Promise.all(chunk.map((item) => getBasicItem(item.type, item.id, language).catch(() => null)));
@@ -524,6 +736,10 @@ async function hydrateRefs(refs: Array<{ type: MediaType; id: number }>, languag
 }
 
 async function loadMdblist(catalog: CatalogConfig, language: string) {
+  return (await loadMdblistPage(catalog, language)).items;
+}
+
+async function loadMdblistPage(catalog: CatalogConfig, language: string, limit?: number) {
   const url = `${catalog.sourceUrl!.replace(/\/+$/, "")}/json`;
   const payload = await jsonRequest<unknown>(apiProxiedUrl(url));
   const rawItems = Array.isArray(payload)
@@ -536,7 +752,7 @@ async function loadMdblist(catalog: CatalogConfig, language: string) {
   const ids = rawItems
     .map((item) => extractMdblistIdentity(item as MdblistItem, catalog.mediaType))
     .filter(<T>(item: T | null | undefined): item is NonNullable<T> => Boolean((item as any)?.id));
-  return hydrateRefs(ids, language);
+  return { items: await hydrateRefs(ids, language, limit), hasMore: Boolean(limit && ids.length > limit) };
 }
 
 type StremioMeta = {
@@ -554,34 +770,85 @@ type StremioMeta = {
   year?: string | number;
 };
 
-async function loadAddonCatalog(catalog: CatalogConfig, addons: InstalledAddon[], language: string) {
+async function loadAddonCatalog(
+  catalog: CatalogConfig,
+  addons: InstalledAddon[],
+  language: string,
+  limit?: number,
+  homeServers: HomeServerConfig[] = []
+) {
   const addon = addons.find((candidate) =>
     candidate.id === catalog.addonId ||
     candidate.name === catalog.addonName ||
     candidate.manifestUrl === catalog.sourceUrl
   );
-  const manifestUrl = addon?.manifestUrl || catalog.sourceUrl;
-  const catalogType = catalog.addonCatalogType || (catalog.mediaType === "tv" ? "series" : catalog.mediaType === "movie" ? "movie" : "movie");
+  const requestedType = catalog.addonCatalogType || (catalog.mediaType === "tv" ? "series" : catalog.mediaType === "movie" ? "movie" : "movie");
   const catalogId = catalog.addonCatalogId || catalog.sourceRef || catalog.id;
+
+  // Generic Client-Side Delegation resolution
+  const catalogDecl = (addon?.catalogs ?? []).find(c => c.id === catalogId && String(c.type).toLowerCase() === requestedType.toLowerCase());
+  const delegateUri = catalog.clientDelegate || catalogDecl?.clientDelegate;
+  const effectiveFilter = catalog.clientFilter ?? catalogDecl?.clientFilter;
+  if (delegateUri) {
+    const { loadClientDelegatedCatalog } = await import('./clientCatalogLoader');
+    return loadClientDelegatedCatalog(delegateUri, { ...catalog, clientFilter: effectiveFilter }, homeServers, limit, async seed => {
+      const id = seed.id > 0 ? seed.id : await resolveTmdbId({ mediaType: seed.mediaType, imdbId: seed.imdbId, title: seed.title, year: seed.year }).catch(() => null);
+      if (!id) return null;
+      const details = await getBasicItem(seed.mediaType, id, language).catch(() => null);
+      if (!details) return null;
+      return { ...seed, ...details, id, activityAt: seed.activityAt };
+    });
+  }
+
+  const manifestUrl = addon?.manifestUrl || catalog.sourceUrl;
+  // Addons route by the manifest's exact spelling ("Live Docs"); collections may lower-case it.
+  const catalogType = (addon?.catalogs ?? []).find(c => c.id === catalogId &&
+    String(c.type).toLowerCase() === requestedType.toLowerCase())?.type || requestedType;
   if (!manifestUrl || !catalogId) return [];
   const base = manifestUrl.replace(/\/manifest\.json$/, "").replace(/\/+$/, "");
-  const url = proxiedUrl(`${base}/catalog/${encodeURIComponent(catalogType)}/${encodeURIComponent(catalogId)}.json`);
+  const extra = catalog.addonGenre ? `/genre=${encodeURIComponent(catalog.addonGenre)}` : "";
+  const url = proxiedUrl(`${base}/catalog/${encodeURIComponent(catalogType)}/${encodeURIComponent(catalogId)}${extra}.json`);
   const payload = await jsonRequest<{ metas?: StremioMeta[] }>(url);
-  const metas = payload.metas ?? [];
-  const hydrated = await Promise.all(metas.map((meta) => hydrateAddonMeta(meta, catalog.mediaType, language).catch(() => null)));
-  return hydrated.filter((item): item is MediaItem => Boolean(item));
+  // Each meta may cost a TMDB call: a Home row hydrates only what it shows unless filtering locally.
+  const rawMetas = payload.metas ?? [];
+  const metas = effectiveFilter ? rawMetas : rawMetas.slice(0, limit ?? Infinity);
+  const hydrated = await Promise.all(metas.map((meta) => hydrateAddonMeta(meta, catalog.mediaType, language, addon, addons, catalogType).catch(() => null)));
+  const items = hydrated.filter((item): item is MediaItem => Boolean(item));
+  if (effectiveFilter) {
+    const { filterClientCatalogItems } = await import('./clientCatalogLoader');
+    return filterClientCatalogItems(items, effectiveFilter, homeServers, limit);
+  }
+  return items;
 }
 
-async function hydrateAddonMeta(meta: StremioMeta, preferred: CatalogConfig["mediaType"], language: string): Promise<MediaItem | null> {
+
+async function hydrateAddonMeta(
+  meta: StremioMeta,
+  preferred: CatalogConfig["mediaType"],
+  language: string,
+  addon?: InstalledAddon,
+  addons: InstalledAddon[] = [],
+  catalogType = ""
+): Promise<MediaItem | null> {
   const tmdbId = numberValue(meta.tmdb_id);
   const mediaType: MediaType = String(meta.type ?? preferred ?? "").toLowerCase().includes("series") || preferred === "tv" ? "tv" : "movie";
+  // Items the addon describes itself open from its own /meta instead of a TMDB guess. A
+  // metadata addon (AIOMetadata) may re-list another addon's catalog; that addon owns the ids.
+  if (!tmdbId && !meta.imdb_id && meta.id) {
+    const addonType = String(meta.type ?? "").trim() || catalogType || (mediaType === "tv" ? "series" : "movie");
+    const owner = addon && addonServesOwnMeta(addon, addonType, meta.id)
+      ? addon
+      : findAddonServingOwnMeta(addons, addonType, meta.id, addon?.id);
+    const native = owner ? registerNativeItem(owner, meta, nativeMediaType(addonType), addonType) : null;
+    if (native) return native;
+  }
   if (tmdbId) {
-    const detailed = await getBasicItem(mediaType, tmdbId, language);
+    const detailed = await getBasicItem(mediaType, tmdbId, language).catch(() => null);
     if (detailed) return detailed;
   }
   const numericId = numberValue(meta.id);
   if (numericId) {
-    const detailed = await getBasicItem(mediaType, numericId, language);
+    const detailed = await getBasicItem(mediaType, numericId, language).catch(() => null);
     if (detailed) return detailed;
   }
   const title = meta.name ?? meta.title;
@@ -597,6 +864,16 @@ async function hydrateAddonMeta(meta: StremioMeta, preferred: CatalogConfig["med
     rating: "",
     duration: ""
   };
+}
+
+/**
+ * How a native item is shown. Stremio's "tv" type is a live channel: one stream, no episodes,
+ * so it opens like a movie and plays straight away. Other addon-defined types (podcasts,
+ * debrid libraries) are containers of videos, which the series page shows.
+ */
+function nativeMediaType(addonType: string): MediaType {
+  const type = addonType.trim().toLowerCase();
+  return type === "tv" || type === "movie" || type === "film" ? "movie" : "tv";
 }
 
 function stableStringId(value: string) {
@@ -695,6 +972,7 @@ export function resolveTmdbId(item: {
   id?: number | null;
   tmdbId?: number | null;
   imdbId?: string | null;
+  tvdbId?: number | null;
   title?: string | null;
   year?: number | string | null;
 }): Promise<number | null> {
@@ -706,13 +984,14 @@ export function resolveTmdbId(item: {
   if (directId) return Promise.resolve(directId);
 
   const imdbId = item.imdbId?.trim().toLowerCase();
+  const tvdbId = Number.isSafeInteger(item.tvdbId) && item.tvdbId! > 0 ? item.tvdbId : null;
   const title = item.title?.trim() ?? "";
   const year = typeof item.year === "number" ? item.year : Number(item.year) || null;
   const normalizedTitle = normalizeLookupTitle(title);
-  if ((!imdbId || !/^tt\d+$/.test(imdbId)) && !normalizedTitle) return Promise.resolve(null);
+  if ((!imdbId || !/^tt\d+$/.test(imdbId)) && !tvdbId && !normalizedTitle) return Promise.resolve(null);
   const cacheKey = imdbId && /^tt\d+$/.test(imdbId)
     ? `${item.mediaType}:imdb:${imdbId}`
-    : `${item.mediaType}:title:${normalizedTitle}:${year ?? 0}`;
+    : tvdbId ? `${item.mediaType}:tvdb:${tvdbId}` : `${item.mediaType}:title:${normalizedTitle}:${year ?? 0}`;
   const cached = externalTmdbIdCache.get(cacheKey);
   if (cached) return cached;
 
@@ -723,6 +1002,10 @@ export function resolveTmdbId(item: {
       const externalResults = item.mediaType === "tv" ? payload?.tv_results : payload?.movie_results;
       const externalId = externalResults?.[0]?.id;
       if (externalId) return externalId;
+    }
+    if (tvdbId && item.mediaType === "tv") {
+      const payload = await tmdb<TmdbExternalFind>(`find/${tvdbId}`, { external_source: "tvdb_id" }).catch(() => null);
+      if (payload?.tv_results?.[0]?.id) return payload.tv_results[0].id;
     }
     if (!normalizedTitle) return null;
 
@@ -770,163 +1053,44 @@ type CinemetaSeries = {
   };
 };
 
-const logoCache = new Map<string, string | null>();
-const LOGO_CACHE_KEY = "arvio.web.logoCache";
+// One cached TMDB details call per title feeds every card decoration (logo,
+// service badges, runtime, artwork fallback, imdb id). See lib/cardExtras.ts.
+const cardExtras = createCardExtrasCache({
+  request: (mediaType, id) => tmdb<CardExtrasPayload>(`${mediaType}/${id}`, {
+    append_to_response: CARD_EXTRAS_APPEND,
+    include_image_language: CARD_EXTRAS_IMAGE_LANGUAGES
+  }),
+  imageUrl: (kind, path) => tmdbImageUrl(kind === "logo" ? config.logoBase : kind === "poster" ? config.imageBase : config.backdropBase, path),
+  load: () => loadStored<Record<string, never> | null>(CARD_EXTRAS_KEY, null),
+  save: (value) => saveStored(CARD_EXTRAS_KEY, value)
+});
 
-function restoreLogoCache() {
-  if (logoCache.size || typeof window === "undefined") return;
-  try {
-    const raw = window.localStorage.getItem(LOGO_CACHE_KEY);
-    if (!raw) return;
-    Object.entries(JSON.parse(raw) as Record<string, string | null>).forEach(([k, v]) => logoCache.set(k, v));
-  } catch {
-    /* ignore */
-  }
+/** Cached card extras without a request (null until fetched). */
+export function peekCardExtras(item: { mediaType: MediaType; id: number }): CardExtras | null {
+  return cardExtras.peek(item.mediaType, item.id);
 }
 
-let logoPersistTimer: ReturnType<typeof setTimeout> | null = null;
-function persistLogoCache() {
-  if (typeof window === "undefined") return;
-  if (logoPersistTimer) clearTimeout(logoPersistTimer);
-  logoPersistTimer = setTimeout(() => {
-    try {
-      const trimmed = Array.from(logoCache.entries()).slice(-600);
-      window.localStorage.setItem(LOGO_CACHE_KEY, JSON.stringify(Object.fromEntries(trimmed)));
-    } catch {
-      /* ignore */
-    }
-  }, 1500);
+/** Card extras for a title — one request on a cache miss, none after. */
+export function getCardExtras(item: { mediaType: MediaType; id: number }): Promise<CardExtras | null> {
+  return cardExtras.get(item.mediaType, item.id);
 }
 
 /** Title-treatment (clearlogo) URL for a movie/show — mirrors MediaRepository.getImages logo pick. */
 export async function getLogoUrl(item: { mediaType: MediaType; id: number }): Promise<string | null> {
-  const key = `${item.mediaType}:${item.id}`;
-  restoreLogoCache();
-  if (logoCache.has(key)) return logoCache.get(key) ?? null;
-  try {
-    const images = await tmdb<TmdbImages>(`${item.mediaType}/${item.id}/images`, { include_image_language: "en,null" });
-    const logos = images.logos ?? [];
-    const pick =
-      logos.filter((l) => l.iso_639_1 === "en").sort((a, b) => (b.vote_average ?? 0) - (a.vote_average ?? 0))[0] ??
-      logos.find((l) => l.iso_639_1 === null) ??
-      logos[0];
-    const url = pick?.file_path ? `https://image.tmdb.org/t/p/w500${pick.file_path}` : null;
-    logoCache.set(key, url);
-    persistLogoCache();
-    return url;
-  } catch {
-    logoCache.set(key, null);
-    return null;
-  }
-}
-
-// Per-card streaming service names (US flatrate providers), cached and
-// persisted like title logos so home rails can show clearlogo badges without
-// hammering TMDB on every render.
-const PROVIDER_CACHE_KEY = "arvio.web.cardProviders.v1";
-const providerCache = new Map<string, string[]>();
-
-function restoreProviderCache() {
-  if (providerCache.size || typeof window === "undefined") return;
-  try {
-    const raw = window.localStorage.getItem(PROVIDER_CACHE_KEY);
-    if (!raw) return;
-    Object.entries(JSON.parse(raw) as Record<string, string[]>).forEach(([k, v]) => providerCache.set(k, v));
-  } catch { /* ignore */ }
-}
-
-let providerPersistTimer: ReturnType<typeof setTimeout> | null = null;
-function persistProviderCache() {
-  if (typeof window === "undefined") return;
-  if (providerPersistTimer) clearTimeout(providerPersistTimer);
-  providerPersistTimer = setTimeout(() => {
-    try {
-      const trimmed = Array.from(providerCache.entries()).slice(-600);
-      window.localStorage.setItem(PROVIDER_CACHE_KEY, JSON.stringify(Object.fromEntries(trimmed)));
-    } catch { /* ignore */ }
-  }, 800);
-}
-
-// Per-card runtime (minutes), cached + persisted. List responses omit runtime,
-// so cards fetch it lazily when needed.
-type CardMeta = { runtime: number; image?: string; backdrop?: string | null; imdbId?: string | null };
-const CARD_META_KEY = "arvio.web.cardMeta.v2";
-const cardMetaCache = new Map<string, CardMeta>();
-
-function restoreCardMetaCache() {
-  if (cardMetaCache.size || typeof window === "undefined") return;
-  try {
-    const raw = window.localStorage.getItem(CARD_META_KEY);
-    if (raw) Object.entries(JSON.parse(raw) as Record<string, CardMeta>).forEach(([k, v]) => cardMetaCache.set(k, v));
-  } catch { /* ignore */ }
-}
-
-let cardMetaTimer: ReturnType<typeof setTimeout> | null = null;
-function persistCardMetaCache() {
-  if (typeof window === "undefined") return;
-  if (cardMetaTimer) clearTimeout(cardMetaTimer);
-  cardMetaTimer = setTimeout(() => {
-    try {
-      const trimmed = Array.from(cardMetaCache.entries()).slice(-800);
-      window.localStorage.setItem(CARD_META_KEY, JSON.stringify(Object.fromEntries(trimmed)));
-    } catch { /* ignore */ }
-  }, 800);
+  // Ids below 1 are never TMDB titles (native addon items, unmatched entries).
+  if (item.id <= 0) return null;
+  return (await cardExtras.get(item.mediaType, item.id))?.logo ?? null;
 }
 
 export async function getCardMeta(item: { mediaType: MediaType; id: number }): Promise<{ runtime: number; image: string; backdrop: string | null; imdbId: string | null }> {
-  const key = `${item.mediaType}:${item.id}`;
-  restoreCardMetaCache();
-  const cached = cardMetaCache.get(key);
-  // Older cache entries only stored runtime; treat a missing `image` field as a
-  // miss so the card can back-fill its artwork (fixes grey CW thumbnails).
-  if (cached && "image" in cached) {
-    return { runtime: cached.runtime, image: cached.image ?? "", backdrop: cached.backdrop ?? null, imdbId: cached.imdbId ?? null };
-  }
-  try {
-    // external_ids rides along on the call this function already makes, so the
-    // imdb id needed for real IMDb ratings costs no extra request.
-    const payload = await tmdb<{ runtime?: number; episode_run_time?: number[]; poster_path?: string | null; backdrop_path?: string | null; external_ids?: { imdb_id?: string | null } }>(
-      `${item.mediaType}/${item.id}`,
-      { append_to_response: "external_ids" }
-    );
-    const runtime = payload.runtime ?? payload.episode_run_time?.[0] ?? 0;
-    const meta = {
-      runtime,
-      image: tmdbImageUrl(config.imageBase, payload.poster_path),
-      backdrop: tmdbImageUrl(config.backdropBase, payload.backdrop_path) || null,
-      imdbId: payload.external_ids?.imdb_id ?? null
-    };
-    cardMetaCache.set(key, meta);
-    persistCardMetaCache();
-    return meta;
-  } catch {
-    const meta = { runtime: 0, image: "", backdrop: null, imdbId: null };
-    cardMetaCache.set(key, meta);
-    return meta;
-  }
+  const extras = item.id > 0 ? await cardExtras.get(item.mediaType, item.id) : null;
+  return { runtime: extras?.runtime ?? 0, image: extras?.image ?? "", backdrop: extras?.backdrop ?? null, imdbId: extras?.imdbId ?? null };
 }
 
+/** Per-card streaming service names (US flatrate providers). */
 export async function getCardProviders(item: { mediaType: MediaType; id: number }): Promise<string[]> {
-  const key = `${item.mediaType}:${item.id}`;
-  restoreProviderCache();
-  const cached = providerCache.get(key);
-  if (cached) return cached;
-  try {
-    const payload = await tmdb<{ results?: Record<string, { flatrate?: Array<{ provider_name?: string }> }> }>(
-      `${item.mediaType}/${item.id}/watch/providers`,
-      {}
-    );
-    const names = (payload.results?.US?.flatrate ?? [])
-      .map((provider) => provider.provider_name ?? "")
-      .filter(Boolean)
-      .slice(0, 3);
-    providerCache.set(key, names);
-    persistProviderCache();
-    return names;
-  } catch {
-    providerCache.set(key, []);
-    return [];
-  }
+  if (item.id <= 0) return [];
+  return (await cardExtras.get(item.mediaType, item.id))?.providers ?? [];
 }
 
 export async function searchMedia(query: string, language = "en-US") {
@@ -937,10 +1101,80 @@ export async function searchMedia(query: string, language = "en-US") {
     .map((item) => mapTmdbItem(item, item.media_type === "tv" ? "tv" : "movie"));
 }
 
+export type SearchPerson = { id: number; name: string; image: string; knownFor: string };
+export type SearchPage = { movies: MediaItem[]; shows: MediaItem[]; people: SearchPerson[]; total: number; hasMore: boolean };
+
+/**
+ * Text search. Without a type it searches movies, series and people together
+ * (search/multi) — "breaking bad" used to miss the series because Search only
+ * asked search/movie by default. A chosen type uses search/movie or search/tv,
+ * the endpoints that accept a year. Genre/rating filters belong to Discover:
+ * TMDB search can't apply them, and filtering a page afterwards left it empty.
+ */
+export async function searchTitlesPage(options: { query: string; type: SearchType; year?: string }, language: string, page = 1): Promise<SearchPage> {
+  const query = options.query.trim();
+  if (!query) return { movies: [], shows: [], people: [], total: 0, hasMore: false };
+  if (options.type === "all") {
+    const response = await tmdb<TmdbList & { total_pages?: number; total_results?: number }>("search/multi", { query, language, page });
+    const split = splitMultiResults(response.results as Array<TmdbItem & { media_type?: string; profile_path?: string | null; known_for?: TmdbItem[]; known_for_department?: string }>);
+    return {
+      movies: split.movies.map((item) => mapTmdbItem(item, "movie")),
+      shows: split.shows.map((item) => mapTmdbItem(item, "tv")),
+      people: split.people.map((person) => ({
+        id: person.id,
+        name: person.name ?? "",
+        image: tmdbImageUrl(config.imageBase, person.profile_path),
+        knownFor: (person.known_for ?? []).map((title) => title.title ?? title.name ?? "").filter(Boolean).slice(0, 2).join(", ") || (person.known_for_department ?? "")
+      })).filter((person) => person.name),
+      total: response.total_results ?? response.results.length,
+      hasMore: page < Math.min(response.total_pages ?? 1, 500)
+    };
+  }
+  const type = options.type;
+  const response = await tmdb<TmdbList & { total_pages?: number; total_results?: number }>(`search/${type}`, {
+    query, language, page,
+    ...(options.year ? { [type === "tv" ? "first_air_date_year" : "primary_release_year"]: options.year } : {})
+  });
+  const items = response.results.map((item) => mapTmdbItem(item, type));
+  return {
+    movies: type === "movie" ? items : [],
+    shows: type === "tv" ? items : [],
+    people: [],
+    total: response.total_results ?? items.length,
+    hasMore: page < Math.min(response.total_pages ?? 1, 500)
+  };
+}
+
+/**
+ * Discover with every filter applied by TMDB (lib/searchModel discoverParams).
+ * "All" asks discover/movie and discover/tv for the same page and interleaves them.
+ */
+export async function discoverTitlesPage(filters: DiscoverFilters, language: string, page = 1): Promise<{ items: MediaItem[]; total: number; hasMore: boolean }> {
+  const types: Array<"movie" | "tv"> = filters.type === "all" ? ["movie", "tv"] : [filters.type];
+  const responses = await Promise.all(types.map((type) =>
+    tmdb<TmdbList & { total_pages?: number; total_results?: number }>(`discover/${type}`, { ...discoverParams(filters, type), language, page })
+      .then((response) => ({ type, response }))));
+  const lists = responses.map(({ type, response }) => response.results.map((item) => mapTmdbItem(item, type)));
+  const items: MediaItem[] = [];
+  for (let index = 0; index < Math.max(0, ...lists.map((list) => list.length)); index += 1) {
+    for (const list of lists) if (list[index]) items.push(list[index]);
+  }
+  return {
+    items,
+    total: responses.reduce((sum, { response }) => sum + (response.total_results ?? response.results.length), 0),
+    hasMore: responses.some(({ response }) => page < Math.min(response.total_pages ?? 1, 500))
+  };
+}
+
 const seasonCache = new Map<string, EpisodeInfo[]>();
 const seriesEpisodeRatingsCache = new Map<string, Map<string, string>>();
 const SEASON_EPISODE_CACHE_KEY = "arvio.web.seasonEpisodes.v1";
 const SEASON_EPISODE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+
+export function peekSeasonEpisodes(tvId: number, seasonNumber: number, language = "en-US"): EpisodeInfo[] {
+  const key = `${tvId}:${seasonNumber}:${language}`;
+  return seasonCache.get(key) ?? readSeasonEpisodesCache(key) ?? [];
+}
 
 export interface SeasonMetadataContext {
   tvdbId?: number | null;
@@ -972,6 +1206,7 @@ export async function getSeasonEpisodes(
   priorityConfig?: ProviderPriorityConfig,
   metadataContext?: SeasonMetadataContext
 ): Promise<EpisodeInfo[]> {
+  if (isAddonNative({ id: tvId })) return getNativeSeasonEpisodes(tvId, seasonNumber).catch(() => []);
   const metadataType: MetadataMediaType = metadataContext?.isAnime ? "anime" : "tv";
   const externalConfig = providersBeforeTmdb(metadataType, priorityConfig);
   const lookup: MetadataLookupIds = {
@@ -1080,6 +1315,7 @@ function writeSeasonEpisodesCache(key: string, episodes: EpisodeInfo[]) {
 }
 
 export async function getReviews(item: { mediaType: MediaType; id: number }): Promise<ReviewInfo[]> {
+  if (item.id <= 0) return [];
   try {
     const response = await tmdb<{ results?: Array<{ id: string; author?: string; content?: string; created_at?: string; author_details?: { rating?: number | null; avatar_path?: string | null } }> }>(
       `${item.mediaType}/${item.id}/reviews`
@@ -1223,6 +1459,14 @@ function normalizeRating(value: unknown) {
 const basicItemCache = new Map<string, MediaItem | null>();
 
 /** Lightweight details fetch (no append_to_response) with an in-memory cache — used to hydrate catalog rows. */
+export async function getCollectionPreview(item: MediaItem, language: string): Promise<MediaItem> {
+  if (isYouTubeItem(item)) return youTubeDetails(item) ?? item;
+  if (isAddonNative(item)) return (await getNativeDetails(item)) ?? item;
+  const details = await tmdb<TmdbItem>(`${item.mediaType}/${item.id}`, { language, append_to_response: "external_ids" });
+  return { ...item, ...mapTmdbItem(details, item.mediaType), budget: details.budget,
+    imdbId: details.external_ids?.imdb_id ?? item.imdbId, genres: details.genres?.map(genre => genre.name) };
+}
+
 export async function getBasicItem(mediaType: MediaType, id: number, language = "en-US"): Promise<MediaItem | null> {
   const key = `${mediaType}:${id}`;
   if (basicItemCache.has(key)) return basicItemCache.get(key) ?? null;
@@ -1248,20 +1492,31 @@ export async function getBasicItem(mediaType: MediaType, id: number, language = 
 const detailsPayloadCache = new Map<string, { at: number; payload: TmdbItem }>();
 const DETAILS_CACHE_TTL_MS = 10 * 60 * 1000;
 
-async function fetchDetailsPayload(item: MediaItem, customApiKey?: string) {
+// Requests in flight, keyed like the cache: a card hover/focus prefetch and the
+// details page opening right after it share one TMDB call instead of two.
+const detailsPayloadInflight = new Map<string, Promise<TmdbItem>>();
+
+function fetchDetailsPayload(item: MediaItem, customApiKey?: string): Promise<TmdbItem> {
   const key = `${item.mediaType}-${item.id}`;
   const cached = detailsPayloadCache.get(key);
-  if (cached && Date.now() - cached.at < DETAILS_CACHE_TTL_MS) return cached.payload;
-  const payload = await tmdb<TmdbItem>(`${item.mediaType}/${item.id}`, {
+  if (cached && Date.now() - cached.at < DETAILS_CACHE_TTL_MS) return Promise.resolve(cached.payload);
+  // A custom API key is a different request (and may fail differently).
+  const inflightKey = `${key}|${customApiKey?.trim() ?? ""}`;
+  const existing = detailsPayloadInflight.get(inflightKey);
+  if (existing) return existing;
+  const request = tmdb<TmdbItem>(`${item.mediaType}/${item.id}`, {
     language: "en-US",
     append_to_response: "credits,videos,similar,recommendations,external_ids,watch/providers"
-  }, customApiKey);
-  detailsPayloadCache.set(key, { at: Date.now(), payload });
-  if (detailsPayloadCache.size > 60) {
-    const oldest = [...detailsPayloadCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
-    if (oldest) detailsPayloadCache.delete(oldest[0]);
-  }
-  return payload;
+  }, customApiKey).then((payload) => {
+    detailsPayloadCache.set(key, { at: Date.now(), payload });
+    if (detailsPayloadCache.size > 60) {
+      const oldest = [...detailsPayloadCache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
+      if (oldest) detailsPayloadCache.delete(oldest[0]);
+    }
+    return payload;
+  }).finally(() => { detailsPayloadInflight.delete(inflightKey); });
+  detailsPayloadInflight.set(inflightKey, request);
+  return request;
 }
 
 /** Warm the details cache from a card hover; failures are irrelevant. */
@@ -1302,6 +1557,8 @@ export async function getTitlesForSearch(
 }
 
 export async function getDetails(item: MediaItem, priorityConfig?: ProviderPriorityConfig) {
+  if (isYouTubeItem(item)) return youTubeDetails(item) ?? item;
+  if (isAddonNative(item)) return (await getNativeDetails(item).catch(() => null)) ?? item;
   try {
     const details = await fetchDetailsPayload(item, priorityConfig?.customTmdbApiKey);
     const mapped = mapTmdbItem({ ...details, media_type: item.mediaType }, item.mediaType);
@@ -1372,7 +1629,7 @@ export async function getDetails(item: MediaItem, priorityConfig?: ProviderPrior
         image: person.profile_path ? `${config.imageBase}${person.profile_path}` : ""
       })),
       seasons: item.mediaType === "tv" ? (details.seasons ?? [])
-        .filter((season) => (season.season_number ?? 0) > 0)
+        .filter((season) => season.season_number != null && season.season_number >= 0)
         .map((season) => ({
           id: season.id,
           seasonNumber: season.season_number ?? 0,

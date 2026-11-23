@@ -25,6 +25,7 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
+    private val simklRateLimiter = com.arflix.tv.network.sharedSimklRateLimiter
 
     @Provides
     @Singleton
@@ -46,8 +47,15 @@ object AppModule {
                 val lang = langPrefs.getString("locale_tag", "en-US") ?: "en-US"
 
                 // Only inject if it's not the default English. Map "iw" to "he".
+                //
+                // An explicit `language` from the call site wins. setQueryParameter used to
+                // overwrite it, which silently broke every deliberate request for a specific
+                // language: the English fallback in getTrailerKey re-sent the user's language and
+                // returned the same empty result (TMDB's /videos `language` filters the video
+                // records, so a Hebrew user saw no trailers at all), and fetchTitles' explicit
+                // language="en" came back localized.
                 val urlBuilder = originalHttpUrl.newBuilder()
-                if (lang != "en-US") {
+                if (lang != "en-US" && originalHttpUrl.queryParameter("language") == null) {
                     val tmdbLang = lang.replace("iw", "he").replace('_', '-')
                     urlBuilder.setQueryParameter("language", tmdbLang)
                 }
@@ -71,7 +79,27 @@ object AppModule {
     fun provideTraktApi(okHttpClient: OkHttpClient): TraktApi {
         return Retrofit.Builder()
             .baseUrl(Constants.TRAKT_API_URL)
-            .client(okHttpClient)
+            .client(okHttpClient.newBuilder()
+                .addInterceptor(com.arflix.tv.network.TraktAvailabilityInterceptor())
+                .build())
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(TraktApi::class.java)
+    }
+
+    @Provides
+    @Singleton
+    @Named("traktAuth")
+    fun provideTraktAuthApi(okHttpClient: OkHttpClient): TraktApi {
+        // Device activation must not queue behind Home's metadata/sync requests.
+        val client = okHttpClient.newBuilder()
+            .dispatcher(okhttp3.Dispatcher())
+            .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .addInterceptor(com.arflix.tv.network.TraktAvailabilityInterceptor())
+            .build()
+        return Retrofit.Builder()
+            .baseUrl(Constants.TRAKT_API_URL)
+            .client(client)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(TraktApi::class.java)
@@ -92,51 +120,61 @@ object AppModule {
     @Provides
     @Singleton
     @JvmStatic
-    fun provideSimklApi(okHttpClient: OkHttpClient): com.arflix.tv.data.api.SimklApi {
-        var lastPostTimestampMs = 0L
-        val postLock = Any()
-
+    fun provideSimklApi(
+        okHttpClient: OkHttpClient,
+        simklV2: com.arflix.tv.data.repository.simkl.SimklListsRepository,
+        @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context
+    ): com.arflix.tv.data.api.SimklApi {
         val simklClient = okHttpClient.newBuilder()
             .addInterceptor { chain ->
                 val original = chain.request()
-
-                // Enforce 1 POST request per second per Simkl API policy
-                if (original.method.equals("POST", ignoreCase = true)) {
-                    synchronized(postLock) {
-                        val now = android.os.SystemClock.elapsedRealtime()
-                        val elapsed = now - lastPostTimestampMs
-                        if (elapsed < 1000L) {
-                            val sleepTime = 1000L - elapsed
-                            try {
-                                Thread.sleep(sleepTime)
-                            } catch (_: InterruptedException) {}
-                        }
-                        lastPostTimestampMs = android.os.SystemClock.elapsedRealtime()
-                    }
-                }
+                val token = original.header("Authorization")?.removePrefix("Bearer ")
+                if (token?.startsWith("simkl_at_") != true) return@addInterceptor chain.proceed(original)
+                val profile = simklV2.profileId()
+                val connection = simklV2.connectionId()
+                val ownsToken = simklV2.ownsAccessToken(token)
+                val response = chain.proceed(original)
+                if (response.code != 401 || !ownsToken) return@addInterceptor response
+                response.close()
+                val refreshed = kotlinx.coroutines.runBlocking { simklV2.refreshRejectedToken(token, profile, connection) }
+                chain.proceed(original.newBuilder().header("Authorization", "Bearer $refreshed").build())
+            }
+            .addInterceptor { chain ->
+                val original = chain.request()
 
                 val originalUrl = original.url
                 val urlBuilder = originalUrl.newBuilder()
-                if (originalUrl.queryParameter("client_id") == null) {
-                    urlBuilder.addQueryParameter("client_id", Constants.SIMKL_CLIENT_ID)
+                val rawVersion = com.arflix.tv.BuildConfig.VERSION_NAME
+                val cleanVersion = rawVersion.substringBefore("-")
+
+                val clientId = if (original.header("Authorization")?.startsWith("Bearer simkl_at_") == true)
+                    Constants.SIMKL_V2_CLIENT_ID else Constants.SIMKL_CLIENT_ID
+                if (clientId.isNotBlank()) {
+                    urlBuilder.setQueryParameter("client_id", clientId)
                 }
-                if (originalUrl.queryParameter("app-name") == null) {
-                    urlBuilder.addQueryParameter("app-name", "ARVIO")
-                }
-                if (originalUrl.queryParameter("app-version") == null) {
-                    urlBuilder.addQueryParameter("app-version", com.arflix.tv.BuildConfig.VERSION_NAME)
-                }
+                urlBuilder.setQueryParameter("app-name", "arvio")
+                urlBuilder.setQueryParameter("app-version", cleanVersion)
 
                 val requestBuilder = original.newBuilder()
                     .url(urlBuilder.build())
-                    .header("User-Agent", "ARVIO/${com.arflix.tv.BuildConfig.VERSION_NAME} (Android TV)")
+                    .header("User-Agent", OkHttpProvider.getAppUserAgent(context))
 
-                if (original.header("simkl-api-key") == null) {
-                    requestBuilder.header("simkl-api-key", Constants.SIMKL_CLIENT_ID)
+                if (clientId.isNotBlank()) {
+                    requestBuilder.header("simkl-api-key", clientId)
                 }
 
-                chain.proceed(requestBuilder.build())
+                if (original.method.equals("POST", ignoreCase = true) && original.header("Content-Type") == null) {
+                    requestBuilder.header("Content-Type", "application/json")
+                }
+
+
+                val response = chain.proceed(requestBuilder.build())
+                if (response.code == 412) {
+                    com.arflix.tv.util.AppLogger.e("SimklApi", "HTTP 412 Precondition Failed / client_id_failed from Simkl. Check API key.")
+                }
+                response
             }
+            .addInterceptor(simklRateLimiter)
             .build()
 
         return Retrofit.Builder()

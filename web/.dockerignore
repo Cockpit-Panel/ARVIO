@@ -1,0 +1,17 @@
+node_modules
+**/node_modules
+**/rebuild-output
+**/.npm-cache
+distribution-artifacts/**
+!distribution-artifacts/arvio-source.tar.gz
+!distribution-artifacts/arvio-source.json
+.next
+.netlify
+.data
+.git
+.env*
+*.log
+*.tsbuildinfo
+tests
+docs
+compose.yaml

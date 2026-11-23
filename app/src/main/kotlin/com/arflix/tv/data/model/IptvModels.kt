@@ -44,6 +44,8 @@ data class IptvChannel(
     val qualityLabel: String? = null,
     val variantKey: String? = null,
     val drmInfo: DrmInfo? = null,
+    // Only true when the portal explicitly confirmed that live playback needs no create_link.
+    val stalkerDirectStream: Boolean = false,
 )
 
 /**
@@ -67,7 +69,9 @@ data class IptvProgram(
     val description: String? = null,
     val startUtcMillis: Long,
     val endUtcMillis: Long,
-    val catchupAvailable: Boolean? = null
+    val catchupAvailable: Boolean? = null,
+    val artworkUrl: String? = null,
+    val category: String? = null,
 ) {
     fun isLive(atUtcMillis: Long): Boolean = atUtcMillis in startUtcMillis until endUtcMillis
     fun startsInMinutes(atUtcMillis: Long): Long = ((startUtcMillis - atUtcMillis) / 60_000L).coerceAtLeast(0L)
@@ -87,6 +91,17 @@ data class IptvSnapshot(
     val groupOrder: List<String> = emptyList(),
     val sortOrder: String = "provider",
     val epgWarning: String? = null,
+    /**
+     * Full catalog size before the large-list memory cap trims [channels].
+     * 0 means unknown — readers must fall back to `channels.size`.
+     */
+    val totalChannelCount: Int = 0,
+    /**
+     * Channels with program data counted over the full catalog, matching
+     * [totalChannelCount]. -1 means unknown — readers must count over the
+     * (possibly capped) window instead.
+     */
+    val epgCoveredCount: Int = -1,
     val loadedAt: Instant = Instant.now()
 )
 
@@ -105,3 +120,13 @@ value class PlaylistGroupKey(val key: String) {
         }
     }
 }
+
+/**
+ * Which half of a Stalker portal's catalog a category selection belongs to.
+ *
+ * Movies and series are separate lists on the portal, with their own ids, so
+ * the two selections are stored and applied separately as well. Live TV is not
+ * one of them: its groups are picked by name, through the existing
+ * hidden-groups preference.
+ */
+enum class StalkerCatalogKind { MOVIES, SERIES }

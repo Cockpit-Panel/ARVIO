@@ -9,9 +9,8 @@ class LiveTvResponsiveLayoutTest {
     fun landscapePhoneUsesShortMiniPlayerSoGuideRemainsVisible() {
         val layout = liveTvMiniPlayerLayout(
             isTouchDevice = true,
-            smallestScreenWidthDp = 411,
-            screenWidthDp = 892,
-            screenHeightDp = 360,
+            availableWidthDp = 892,
+            availableHeightDp = 360,
         )
 
         assertThat(layout).isEqualTo(LiveTvMiniPlayerLayout.LANDSCAPE_COMPACT)
@@ -21,21 +20,19 @@ class LiveTvResponsiveLayoutTest {
     fun portraitPhoneKeepsTheExistingFullWidthStackedPlayer() {
         val layout = liveTvMiniPlayerLayout(
             isTouchDevice = true,
-            smallestScreenWidthDp = 411,
-            screenWidthDp = 411,
-            screenHeightDp = 892,
+            availableWidthDp = 411,
+            availableHeightDp = 892,
         )
 
         assertThat(layout).isEqualTo(LiveTvMiniPlayerLayout.PORTRAIT_STACKED)
     }
 
     @Test
-    fun tabletBoundaryKeepsTheExistingStandardPlayer() {
+    fun landscapeTabletUsesStandardSideBySidePlayer() {
         val layout = liveTvMiniPlayerLayout(
             isTouchDevice = true,
-            smallestScreenWidthDp = 600,
-            screenWidthDp = 1280,
-            screenHeightDp = 800,
+            availableWidthDp = 1280,
+            availableHeightDp = 800,
         )
 
         assertThat(layout).isEqualTo(LiveTvMiniPlayerLayout.STANDARD)
@@ -45,9 +42,8 @@ class LiveTvResponsiveLayoutTest {
     fun televisionKeepsTheExistingStandardPlayer() {
         val layout = liveTvMiniPlayerLayout(
             isTouchDevice = false,
-            smallestScreenWidthDp = 720,
-            screenWidthDp = 1280,
-            screenHeightDp = 720,
+            availableWidthDp = 1280,
+            availableHeightDp = 720,
         )
 
         assertThat(layout).isEqualTo(LiveTvMiniPlayerLayout.STANDARD)
@@ -62,5 +58,56 @@ class LiveTvResponsiveLayoutTest {
         assertThat(spec.totalHeightDp).isAtMost(116)
         assertThat(spec.showDescription).isFalse()
         assertThat(spec.showNextProgramme).isFalse()
+    }
+
+    @Test
+    fun landscapeGeometryWinsIfAPathAlsoRequestsStackedCompactSizing() {
+        assertThat(miniPlayerVideoSizeMode(compact = true, landscapeCompact = true))
+            .isEqualTo(MiniPlayerVideoSizeMode.LANDSCAPE_COMPACT)
+    }
+
+    @Test
+    fun largeLandscapePhoneStillUsesCompactPlayer() {
+        assertThat(
+            liveTvMiniPlayerLayout(
+                isTouchDevice = true,
+                availableWidthDp = 915,
+                availableHeightDp = 411,
+            )
+        ).isEqualTo(LiveTvMiniPlayerLayout.LANDSCAPE_COMPACT)
+    }
+
+    @Test
+    fun foldedAndUnfoldedFoldablesFollowAvailableGeometry() {
+        assertThat(liveTvMiniPlayerLayout(true, 360, 800))
+            .isEqualTo(LiveTvMiniPlayerLayout.PORTRAIT_STACKED)
+        assertThat(liveTvMiniPlayerLayout(true, 800, 360))
+            .isEqualTo(LiveTvMiniPlayerLayout.LANDSCAPE_COMPACT)
+        assertThat(liveTvMiniPlayerLayout(true, 841, 673))
+            .isEqualTo(LiveTvMiniPlayerLayout.STANDARD)
+    }
+
+    @Test
+    fun portraitTabletUsesStandardPlayer() {
+        assertThat(liveTvMiniPlayerLayout(true, 800, 1280))
+            .isEqualTo(LiveTvMiniPlayerLayout.STANDARD)
+    }
+
+    @Test
+    fun narrowLandscapeStillLeavesVisibleEpgRows() {
+        val guideHeight = landscapeCompactGuideHeightDp(availableHeightDp = 300)
+
+        assertThat(guideHeight).isAtLeast(96)
+    }
+
+    @Test
+    fun rotatingDuringNavigationReevaluatesTheLayout() {
+        val portrait = liveTvMiniPlayerLayout(true, 411, 892)
+        val landscape = liveTvMiniPlayerLayout(true, 892, 411)
+        val portraitAgain = liveTvMiniPlayerLayout(true, 411, 892)
+
+        assertThat(portrait).isEqualTo(LiveTvMiniPlayerLayout.PORTRAIT_STACKED)
+        assertThat(landscape).isEqualTo(LiveTvMiniPlayerLayout.LANDSCAPE_COMPACT)
+        assertThat(portraitAgain).isEqualTo(portrait)
     }
 }

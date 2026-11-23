@@ -2,6 +2,7 @@ package com.arflix.tv.ui.screens.player
 
 import android.content.Context
 import android.util.Log
+import androidx.annotation.StringRes
 import com.arflix.tv.R
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -12,18 +13,39 @@ import com.arflix.tv.BuildConfig
 import com.arflix.tv.data.api.TmdbApi
 import com.arflix.tv.data.model.Addon
 import com.arflix.tv.data.model.AddonType
+import com.arflix.tv.data.model.AnimeStructuringStyle
 import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.data.model.RecentPlayedSource
+import com.arflix.tv.data.model.findRecentSourceMatch
 import com.arflix.tv.data.model.EpisodeIdentity
 import com.arflix.tv.data.model.SportsAddonCapabilities
+import com.arflix.tv.data.model.IptvVodSourceIds
+import com.arflix.tv.network.IptvAccountAvailability
+import com.arflix.tv.network.IptvAdmission
+import com.arflix.tv.network.IptvPlaybackConnections
+import com.arflix.tv.data.model.isDirectStreamUrl
 import com.arflix.tv.data.model.StreamSource
 import com.arflix.tv.data.model.Subtitle
+import com.arflix.tv.data.repository.AddonNotice
+import com.arflix.tv.data.repository.YouTubeCollection
+import com.arflix.tv.data.repository.KidsContentFilter
 import com.arflix.tv.data.repository.MediaRepository
 import com.arflix.tv.data.repository.HomeServerRepository
 import com.arflix.tv.data.repository.PlaybackTelemetryRepository
 import com.arflix.tv.data.repository.ProfileManager
+import com.arflix.tv.data.repository.RecentPlayedSourceRepository
 import com.arflix.tv.data.repository.SkipInterval
 import com.arflix.tv.data.repository.SkipIntroRepository
 import com.arflix.tv.data.repository.StreamRepository
+import com.arflix.tv.data.model.StreamIntegrationType
+import com.arflix.tv.data.model.StreamSearchMode
+import com.arflix.tv.data.repository.StreamIntegrationRepository
+import com.arflix.tv.data.repository.toStreamSource
+import com.arflix.tv.core.plugin.PluginManager
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.withTimeoutOrNull
+import com.arflix.tv.ui.screens.details.minQualityThreshold
+import com.arflix.tv.ui.screens.details.qualityScoreForAutoPlay
 import com.arflix.tv.data.repository.isHubCloudPageUrl
 import com.arflix.tv.data.repository.providerScopedStreamIdentity
 import com.arflix.tv.data.repository.CloudSyncRepository
@@ -34,8 +56,12 @@ import com.arflix.tv.data.repository.WatchHistoryRepository
 import com.arflix.tv.util.AnimeMapper
 import com.arflix.tv.util.AppLogger
 import com.arflix.tv.util.Constants
+import com.arflix.tv.util.EpisodeAvailability
+import com.arflix.tv.util.ForcedSubtitles
+import com.arflix.tv.util.normalizeLanguageCode
 import com.arflix.tv.util.fallbackAdjacentEpisodeIdentity
-import com.arflix.tv.util.settingsDataStore
+import com.arflix.tv.util.adjacentTmdbEpisodeIdentity
+import com.arflix.tv.data.repository.effectiveSettingsDataStore as settingsDataStore
 import com.arflix.tv.util.weightedSubtitleScore
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey as globalStringPreferencesKey
@@ -44,26 +70,50 @@ import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Clock
+import com.arflix.tv.ui.screens.player.subtitles.AiLineSync
+import com.arflix.tv.ui.screens.player.subtitles.AiVerdict
+import com.arflix.tv.ui.screens.player.subtitles.mayRememberMatch
+import com.arflix.tv.ui.screens.player.subtitles.verdict
+import com.arflix.tv.ui.screens.player.subtitles.SubtitleAiModel
+import com.arflix.tv.ui.screens.player.subtitles.RETIMED_SUBTITLE_ID_SUFFIX
+import com.arflix.tv.ui.screens.player.subtitles.SubtitleAutoSync
+import com.arflix.tv.ui.screens.player.subtitles.SubtitleSyncMatcher
+import com.arflix.tv.ui.screens.player.subtitles.endTimeMs
+import com.arflix.tv.ui.screens.player.subtitles.startTimeMs
+import com.arflix.tv.ui.screens.player.subtitles.SubtitleTranslationManager
+import com.arflix.tv.ui.screens.player.subtitles.SubtitleTranslationService
+import com.arflix.tv.ui.screens.player.subtitles.TRANSLATION_ERROR_CONTENT_BLOCKED
+import com.arflix.tv.ui.screens.player.subtitles.GeminiLiveTranslationService
+import com.arflix.tv.ui.screens.player.subtitles.GeminiLiveState
+import com.arflix.tv.ui.screens.player.subtitles.AudioCaptureProcessor
+import com.arflix.tv.ui.screens.player.common.NextEpisodePromptGate
+import com.arflix.tv.ui.screens.player.common.PlaybackEpisodeKey
 import javax.inject.Inject
 
 private fun isSupplementalStream(stream: StreamSource): Boolean =
-    stream.addonId == "iptv_xtream_vod" || stream.addonId == HomeServerRepository.ADDON_ID
+    IptvVodSourceIds.isIptvVodAddonId(stream.addonId) || stream.addonId == HomeServerRepository.ADDON_ID
 
 private fun Addon.isVodStreamingAddon(): Boolean =
     isEnabled &&
@@ -76,10 +126,48 @@ private const val PLAYBACK_DIAGNOSTICS = true
 // side-loaded at startup (each becomes a MediaItem SubtitleConfiguration read at prepare).
 private const val MAX_PRELOAD_SUBS = 15
 
+/**
+ * How long a manual subtitle pick waits for its local (correctly decoded) copy before falling back
+ * to the remote URL. Generous enough for a normal ~100 KB fetch, short enough that a stalled addon
+ * doesn't make the menu feel broken.
+ *
+ * This bound is only real because `SubtitleSyncMatcher.loadRaw` enqueues its call and cancels it on
+ * coroutine cancellation. A blocking `execute()` would ignore the timeout entirely and run on to
+ * OkHttp's own connect/read timeouts.
+ */
+private const val SUBTITLE_LOCALIZE_TIMEOUT_MS = 6_000L
+
 private fun playbackDiag(message: String) {
     if (PLAYBACK_DIAGNOSTICS) {
         System.err.println("[PlaybackDiag] $message")
     }
+}
+
+/**
+ * A user-facing player message, kept as a resource reference until a composable renders it.
+ * A ViewModel only has the application context, whose resources follow the SYSTEM language
+ * instead of the language selected in the app, so resolving here would show the wrong
+ * language whenever the two differ. Mirrors [com.arflix.tv.ui.screens.plugin.PluginMessage].
+ */
+sealed interface PlayerMessage {
+    /** A localizable message. [formatArgs] may itself contain [PlayerMessage] entries. */
+    data class Res(
+        @param:StringRes val resourceId: Int,
+        val formatArgs: List<Any> = emptyList()
+    ) : PlayerMessage
+
+    /** Text without a resource (e.g. a platform exception message); shown as it is. */
+    data class Raw(val text: String) : PlayerMessage
+}
+
+internal val IPTV_ACCOUNT_BUSY_MESSAGE: PlayerMessage = PlayerMessage.Res(R.string.iptv_account_busy_vod)
+
+/** A full account is not a playback failure, so its modal carries the same title as the Live TV panel. */
+@StringRes
+internal fun playerErrorTitleRes(isSetupError: Boolean, error: PlayerMessage?): Int = when {
+    isSetupError -> R.string.player_addon_setup_required
+    error == IPTV_ACCOUNT_BUSY_MESSAGE -> R.string.iptv_account_busy_title
+    else -> R.string.player_playback_error
 }
 
 data class PlayerUiState(
@@ -96,6 +184,8 @@ data class PlayerUiState(
     val selectedStream: StreamSource? = null,
     val selectedStreamUrl: String? = null,
     val streamSelectionNonce: Int = 0,
+    // This title's recently played source, pinned at the top of the source menu.
+    val recentSource: RecentPlayedSource? = null,
     val selectedSubtitle: Subtitle? = null,
     val subtitleSelectionNonce: Int = 0,
     // "Preload Subtitles" mode: preferred-language addon subs downloaded to local files before
@@ -115,18 +205,39 @@ data class PlayerUiState(
     // Addon names still being queried for subtitles (preload mode) — shown on the loading
     // screen so a chronically slow addon identifies itself to the user.
     val pendingSubtitleAddons: List<String> = emptyList(),
+    // Auto-match's optimistic pick: the best release-name-scored candidate, shown immediately so
+    // the screen is never blank while the scan runs. Unverified and never cached; the scan
+    // replaces it only if it finds something clearly better.
+    val provisionalMatch: Subtitle? = null,
+    // Timing correction for the auto-matched subtitle, applied live by the text renderer (no
+    // MediaItem rebuild). Scoped to [autoSyncSubtitleKey] ("provider|id") so it can never leak
+    // onto a different track or a new file.
+    val autoSync: SubtitleAutoSync? = null,
+    val autoSyncSubtitleKey: String? = null,
     val savedPosition: Long = 0,
+    val expectedDurationMs: Long = 0,
+    val isLoadingPlaybackMetadata: Boolean = false,
     val preferredAudioLanguage: String = "en",
+    // The language a source's badge puts first: the chosen audio language, or null (the device
+    // language) under "Auto"/"None", the same as the details screen's source list.
+    val sourceBadgeLanguage: String? = null,
+    // Addon messages ("[❌] Comet — invalid API key") listed under the sources in the source menu.
+    val addonNotices: List<AddonNotice> = emptyList(),
     val preferredSubtitleLang: String = "",
     val secondarySubtitleLang: String = "",
     val frameRateMatchingMode: String = "Off",
     val subtitleSize: String = "Medium",
+    val subtitleSizePct: Int = 100,
     val subtitleColor: String = "White",
     val subtitleStyle: String = "Bold",
     val subtitleFont: String = SubtitleFontOption.DefaultPreference,
     val subtitleStylized: Boolean = true,
     val subtitleOffset: String = "Bottom",
-    val error: String? = null,
+    val subtitleVerticalPct: Int = 2,
+    val filterSubtitlesByLanguage: Boolean = false,
+    val useForcedSubtitles: Boolean = false,
+    val subtitleRemoveHearingImpaired: Boolean = false,
+    val error: PlayerMessage? = null,
     val isSetupError: Boolean = false, // true when error is due to missing addons (shows friendly guide instead of red error)
     // Auto-play next episode at end of current one. Mirrors the profile-scoped
     // "auto_play_next" DataStore setting so the player can respect the toggle
@@ -139,6 +250,7 @@ data class PlayerUiState(
     val showLoadingStats: Boolean = true,
     // Skip intro/recap
     val activeSkipInterval: SkipInterval? = null,
+    val skipIntervals: List<SkipInterval> = emptyList(),
     val skipIntervalDismissed: Boolean = false,
     // Source-loading progress surfaced to the loading UI. When streams are
     // being resolved progressively, this fills from 0f→1f as addons complete.
@@ -146,7 +258,7 @@ data class PlayerUiState(
     val streamProgress: Float? = null,
     // Human-readable phase label for the loading UI (e.g. "Searching 3/8
     // sources"). Null when progress isn't meaningful.
-    val streamLoadPhase: String? = null,
+    val streamLoadPhase: PlayerMessage? = null,
     // True while source discovery can still add playback alternatives. This
     // remains true after autoplay selects the first stream.
     val sourceSearchActive: Boolean = false,
@@ -157,23 +269,39 @@ data class PlayerUiState(
     // Language name being translated into (e.g. "Hebrew") when AI is available
     val aiTargetLanguageName: String = "",
     // Non-null while an AI translation API error toast should be visible
-    val aiErrorToast: String? = null,
+    val aiErrorToast: PlayerMessage? = null,
     // True while Gemini Live audio translation is active for this session
     val isLiveAudioTranslating: Boolean = false,
     // True while "Find best match" is scanning subtitles; message shown as a transient toast.
     val isFindingBestMatch: Boolean = false,
-    val matchToast: String? = null,
+    /** Sync by hearing is working on the subtitle and has not confirmed its timing yet. */
+    val isHearingSync: Boolean = false,
+    val matchToast: PlayerMessage? = null,
     // Persistent status shown on screen for the whole duration of a "Find best match" scan.
-    val matchStatusText: String = "",
+    // Null while no scan is running.
     // Full name of the preferred subtitle language (e.g. "Hebrew") — drives the "Find Best Match"
     // menu entry. Independent of AI availability: the timing scan needs no AI/API key.
     val matchLanguageName: String = "",
+    // Active media metadata fields
+    val mediaType: MediaType = MediaType.MOVIE,
+    val seasonNumber: Int? = null,
+    val episodeNumber: Int? = null,
     // Episode title for TV shows (e.g. "The Devil's Verdict"), populated from TMDB season details
     val episodeTitle: String? = null,
     // Plot synopsis from TMDB, used in the pause overlay metadata block
     val overview: String? = null,
     // Release year extracted from TMDB releaseDate/firstAirDate (e.g. "2023")
-    val releaseYear: String? = null
+    val releaseYear: String? = null,
+    // All episodes for the active season (used in Mobile Episodes drawer)
+    val seasonEpisodes: List<com.arflix.tv.data.model.Episode> = emptyList(),
+    // Auto-skip intro preference
+    val autoSkipIntro: Boolean = false,
+    // Auto-skip outro preference
+    val autoSkipOutro: Boolean = false,
+    // Audio delay offset in milliseconds
+    val audioDelayMs: Long = 0L,
+    // Audio volume normalization preference
+    val audioNormalization: Boolean = false
 )
 
 
@@ -200,8 +328,17 @@ class PlayerViewModel @Inject constructor(
     private val animeMapper: AnimeMapper,
     private val tmdbApi: TmdbApi,
     private val skipIntroRepository: SkipIntroRepository,
-    private val playbackTelemetryRepository: PlaybackTelemetryRepository
+    private val playbackTelemetryRepository: PlaybackTelemetryRepository,
+    private val pluginManager: PluginManager,
+    private val streamIntegrationRepository: StreamIntegrationRepository,
+    private val recentPlayedSourceRepository: RecentPlayedSourceRepository,
+    private val kidsContentFilter: KidsContentFilter,
+    val idleReturnCoordinator: com.arflix.tv.data.repository.IdleReturnCoordinator
 ) : ViewModel() {
+
+    /** Whether the active profile may play this title; always true outside a kids profile. */
+    suspend fun isAllowedForKids(mediaType: MediaType, mediaId: Int): Boolean =
+        kidsContentFilter.isAllowed(mediaType, mediaId)
 
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
@@ -225,6 +362,9 @@ class PlayerViewModel @Inject constructor(
     private var currentBackdrop: String? = null
     private var currentEpisodeTitle: String? = null
     private var currentOriginalLanguage: String? = null
+    // Language of the audio track currently playing, fed in from PlayerScreen. Only the
+    // forced-subtitles rule reads it; empty means "not known (yet)".
+    private var currentAudioLanguage: String? = null
     private var currentAirDate: String? = null
     private var currentGenreIds: List<Int> = emptyList()
     private var currentItemTitle: String = ""
@@ -237,27 +377,68 @@ class PlayerViewModel @Inject constructor(
     private var currentAddonOrderedIds: List<String> = emptyList()
     private var currentInstalledAddons: List<Addon> = emptyList()
     private var currentIsLiveStreamPlayback: Boolean = false
+    private var autoPlayMinimumQuality: Int = 0
+    private var autoPlayLimits = com.arflix.tv.data.model.AutoplayLimits()
     private var lastScrobbleTime: Long = 0
     private var lastWatchHistorySaveTime: Long = 0
     private var lastWatchHistorySavedPositionSeconds: Long = -1L
     private var lastIsPlaying: Boolean = false
     private var hasMarkedWatched: Boolean = false
+    private var hasScrobbledIntermediateStop: Boolean = false
     private var hasManualSubtitleSelection: Boolean = false
     // True only when the user explicitly picked a subtitle track from the menu (not AI/auto-match).
     // A late-arriving embedded preferred-language track overrides auto selections but never this.
     private var userPickedSubtitle: Boolean = false
+    // provider|base-id of the user's menu pick, including while its local copy downloads.
+    // Automatic writers are gated at their entry points, never by rewriting StateFlow emissions.
+    // Explicit AI, Find best match, subtitles off, and media/source changes release the lock.
+    private var userLockedSubtitleKey: String? = null
     private var playbackSessionStartTime: Long = 0L
+    private val recentSourcePlayTracker = RecentSourcePlayTracker()
+    private var recentSourceLoad: Deferred<RecentPlayedSource?>? = null
+    // Autoplay picks the title's recently played source over its own ranking (see the gate).
+    private val recentSourceGate = RecentSourceAutoplayGate()
+    // The source whose URL the player has loaded. selectStream() names its pick in selectedStream
+    // at once, but the old video keeps playing until the new URL is resolved and applied.
+    private var preparedStream: StreamSource? = null
+    // The selected source as the addon listed it. Torrentio, Comet … links are swapped for the
+    // debrid server's own URL before playback; failover checks hosts by the listed URL.
+    private var listedSelectedStream: StreamSource? = null
+    private var confirmedStartupMs = 0L
+    private var recentSourceClock: () -> Long = { android.os.SystemClock.elapsedRealtime() }
 
     private fun isCurrentAnime(): Boolean =
         currentMediaType == MediaType.TV &&
             currentOriginalLanguage.equals("ja", ignoreCase = true) &&
             currentGenreIds.contains(16)
 
+    private fun animeStructuringStyleKey() = profileManager.profileStringKey(AnimeStructuringStyle.PREFERENCE_KEY)
+
+    private suspend fun getAnimeStructuringStyle(): AnimeStructuringStyle {
+        return try {
+            val prefs = context.settingsDataStore.data.first()
+            AnimeStructuringStyle.fromId(prefs[animeStructuringStyleKey()])
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            AnimeStructuringStyle.BROADCAST
+        }
+    }
+
     suspend fun adjacentEpisodeIdentity(
         tmdbId: Int,
         current: EpisodeIdentity,
         forward: Boolean
     ): EpisodeIdentity? {
+        if (getAnimeStructuringStyle() == AnimeStructuringStyle.STANDARD) {
+            return adjacentTmdbEpisodeIdentity(
+                current = current,
+                forward = forward,
+                loadEpisodes = { mediaRepository.getSeasonEpisodes(tmdbId, it) },
+                loadSeasonNumbers = {
+                    tmdbApi.getTvDetails(tmdbId, Constants.TMDB_API_KEY).seasons.map { it.seasonNumber }
+                },
+            )
+        }
         val structure = runCatching { animeMapper.resolveAnimeSeasonStructure(tmdbId) }.getOrNull()
         if (structure != null) {
             return if (forward) {
@@ -298,6 +479,11 @@ class PlayerViewModel @Inject constructor(
     private val aiEnabledKey = booleanPreferencesKey("subtitle_ai_enabled")
     private val aiAutoSelectKey = booleanPreferencesKey("subtitle_ai_auto_select")
     private val aiFindBestMatchKey = booleanPreferencesKey("subtitle_ai_find_best_match")
+    /** "Sync by hearing" (sideload build only): the audio sync after an unverified scan. */
+    // v2: the setting is stored (and synced) only once the user sets it, so an untouched device
+    // keeps its own default — on, except on low-memory devices (see hearingSyncDefault).
+    private val hearingSyncKey = booleanPreferencesKey("subtitle_hearing_sync_v2")
+    private var hearingSyncEnabled = true
     private val subtitlePreloadKey = booleanPreferencesKey("subtitle_preload_enabled")
     private val dolbyVisionCompatPrefKey = booleanPreferencesKey("dolby_vision_compat")
     private val aiApiKeyKey = globalStringPreferencesKey("subtitle_ai_api_key")
@@ -305,7 +491,11 @@ class PlayerViewModel @Inject constructor(
     private val aiRemoveHearingImpairedKey = booleanPreferencesKey("subtitle_remove_hearing_impaired")
     // Remembered "find best match" results, keyed by stream identity (sync is a property of the
     // exact video file, not the title — a different rip needs a fresh scan).
-    private val subtitleMatchCacheKey = globalStringPreferencesKey("subtitle_match_cache_v1")
+    // v2 (Sept 2026): matches remembered by earlier builds are dropped once. Those were verified by
+    // logic since fixed — an AI check that "confirmed" a wrong constant shift on a drifting
+    // reference (The Shards: −1.15s), timing scored on raw image-track noise — and a remembered
+    // match replays without scanning, so a stale one kept serving the old wrong result.
+    private val subtitleMatchCacheKey = globalStringPreferencesKey("subtitle_match_cache_v2")
 
     private val _isTranslatingLive = MutableStateFlow(false)
     val isTranslatingLive: kotlinx.coroutines.flow.StateFlow<Boolean> = _isTranslatingLive.asStateFlow()
@@ -317,18 +507,40 @@ class PlayerViewModel @Inject constructor(
     private var aiSourceSubtitle: Subtitle? = null
     // AI sources proven at runtime to carry no text (image tracks whose MIME/label didn't say so).
     // Per-file state: cleared on every new media/stream so it can't leak across sources.
-    private val untranslatableSourceIds = mutableSetOf<String>()
+    private val untranslatableSourceKeys = mutableSetOf<String>()
+
+    /** User-configured translation endpoints (Settings → Audio & Subtitles → Translation service). */
+    @Volatile private var customAiStore: com.arflix.tv.ui.screens.player.subtitles.ai.CustomAiConfigStore? = null
+    private val customAiProvider: () -> com.arflix.tv.ui.screens.player.subtitles.ai.CustomAiConfig? = {
+        customAiStore?.current
+    }
+
+    /** Shared with [translationManager]; also used directly for AI subtitle line-matching. */
+    private val translationService = SubtitleTranslationService(
+        apiKeyProvider = { aiApiKey },
+        modelProvider = { aiModel },
+        customConfigProvider = customAiProvider,
+    )
 
     val translationManager: SubtitleTranslationManager = SubtitleTranslationManager(
-        service = SubtitleTranslationService(
-            apiKeyProvider = { aiApiKey },
-            modelProvider = { aiModel }
-        ),
+        service = translationService,
         targetLanguage = "",
         scope = viewModelScope
     ).also { mgr ->
         mgr.onTranslatingChanged = { isTranslating -> _isTranslatingLive.value = isTranslating }
-        mgr.onUntranslatableSource = { viewModelScope.launch { onAiSourceUntranslatable() } }
+        mgr.onUntranslatableSource = {
+            // Several renderer callbacks can queue before Main switches to the next source.
+            // A second callback for the old source must not blacklist the new one.
+            // Known boundary: the callback carries no track identity, so a cue still rendering
+            // from the abandoned image track during the switch window is indistinguishable from
+            // a source change. Closing that needs a source id in the renderer contract.
+            val sourceKey = _uiState.value.selectedSubtitle?.let(SubtitleSelectionPolicy::key)
+            viewModelScope.launch {
+                if (sourceKey != null && aiSourceSubtitle?.let(SubtitleSelectionPolicy::key) == sourceKey) {
+                    onAiSourceUntranslatable()
+                }
+            }
+        }
         mgr.onBatchResult = { success, errorMessage ->
             // Content-policy blocks are not actionable (Gemini's non-configurable output filter
             // on raw movie dialogue) and don't stop translation of other windows — the service
@@ -339,10 +551,15 @@ class PlayerViewModel @Inject constructor(
             } else if (!success && !aiErrorToastShown) {
                 aiErrorToastShown = true
                 val msg = when {
-                    errorMessage == "API key missing" -> context.getString(R.string.player_ai_no_key)
-                    errorMessage == "RATE_LIMITED"    -> context.getString(R.string.player_ai_rate_limited)
-                    errorMessage?.startsWith("HTTP 401") == true -> context.getString(R.string.player_ai_invalid_key)
-                    else -> context.getString(R.string.player_ai_translation_error, errorMessage.orEmpty())
+                    errorMessage == "API key missing" -> PlayerMessage.Res(R.string.player_ai_no_key)
+                    errorMessage == "RATE_LIMITED"    -> PlayerMessage.Res(R.string.player_ai_rate_limited)
+                    errorMessage?.startsWith("HTTP 401") == true ||
+                        (errorMessage == "HTTP 403" && customAiProvider()?.isActive == true) ->
+                        PlayerMessage.Res(R.string.player_ai_invalid_key)
+                    else -> PlayerMessage.Res(
+                        R.string.player_ai_translation_error,
+                        listOf(errorMessage.orEmpty())
+                    )
                 }
                 _uiState.value = _uiState.value.copy(aiErrorToast = msg)
             }
@@ -358,8 +575,13 @@ class PlayerViewModel @Inject constructor(
 
     // Latest playback media position, used to time-align AI-hearing samples with subtitle cues.
     @Volatile private var lastKnownPositionMs = 0L
+    /** True once the player has reported its text tracks for the current source. */
+    @Volatile private var playerTextTracksResolved = false
 
     private var findMatchJob: Job? = null
+    private var matchCacheConfirmJob: Job? = null
+    /** True once the current match survived its dwell and was actually written to the cache. */
+    @Volatile private var matchCacheConfirmed = false
 
     // Built-in reference collection: while active, rendered cues of the selected (built-in English)
     // track are turned into cue-visible intervals used as the sync reference.
@@ -372,6 +594,26 @@ class PlayerViewModel @Inject constructor(
 
     /** Set by the player screen: reads the selected text track's already-buffered cue texts. */
     @Volatile var bufferedCueTextsProvider: ((Int) -> List<String>)? = null
+
+    /**
+     * Set by the player screen: the selected text track's buffered cues **with text**.
+     *
+     * Only trustworthy as a *reference* when the selected track IS the reference — i.e. while AI
+     * translation is running off the embedded track. Any other time this returns the user's own
+     * subtitle, which is why the caller checks for a self-match by text before scoring against it.
+     */
+    @Volatile var bufferedReferenceCuesProvider: ((Int) -> List<SubtitleSyncMatcher.TimedCue>)? = null
+
+    /**
+     * Set by the player screen: the text track the player has ACTUALLY selected, as
+     * (groupIndex, trackIndex) in `currentTracks.groups` — the same indexing embedded [Subtitle]s
+     * carry. Distinct from what ui state asked for: a selection change takes a moment to land, and
+     * until it does the text renderer's buffer still holds the previous track.
+     */
+    @Volatile var selectedTextTrackProvider: (() -> Pair<Int, Int>?)? = null
+
+
+
 
     // Normalized lines of the candidate displayed when the scan started — set for the duration of
     // reference collection so BOTH the buffered and the realtime paths can reject self-cues (the
@@ -423,8 +665,19 @@ class PlayerViewModel @Inject constructor(
     private val SKIP_INTERVAL_MIN_VISIBLE_MS = 250L
 
     private val SCROBBLE_UPDATE_INTERVAL_MS = 20_000L
-    private val WATCH_HISTORY_UPDATE_INTERVAL_MS = 60_000L
-    private val CLOUD_PUSH_INTERVAL_MS = 5 * 60_000L // Push CW to cloud occasionally during active playback
+    private val FIRST_SCROBBLE_HEARTBEAT_DELAY_MS = 5_000L
+    private val WATCH_HISTORY_UPDATE_INTERVAL_MS = 30_000L
+    // Exact resume positions only reach other devices through our own cloud
+    // snapshot, because a tracker stores a percentage and never a position.
+    //
+    // This timer is not what carries the usual handoff: pausing or leaving the
+    // player pushes immediately, so walking from one room to another is already
+    // exact. It only covers losing power mid-episode, where a few minutes of
+    // drift on the *other* device is a fair price — each push uploads the whole
+    // account snapshot (tens of KB, a function invocation and two blob writes),
+    // so a short interval multiplies backend cost by the hour without improving
+    // the case anyone actually hits.
+    private val CLOUD_PUSH_INTERVAL_MS = 3 * 60_000L
 
     private var lastCloudPushTime = 0L
 
@@ -432,7 +685,9 @@ class PlayerViewModel @Inject constructor(
     private fun defaultAudioLanguageKey() = profileManager.profileStringKey("default_audio_language")
     private fun subtitleUsageKey() = profileManager.profileStringKey("subtitle_usage_v1")
     private fun filterSubtitlesByLanguageKey() = profileManager.profileBooleanKey("filter_subtitles_by_lang")
+    private fun useForcedSubtitlesKey() = profileManager.profileBooleanKey("use_forced_subtitles")
     private fun secondarySubtitleKey() = profileManager.profileStringKey("secondary_subtitle")
+    private val subtitleMenuCandidates = linkedMapOf<String, Subtitle>()
     private fun frameRateMatchingModeKey() = profileManager.profileStringKey("frame_rate_matching_mode")
     private fun autoPlayNextKey() = profileManager.profileBooleanKey("auto_play_next")
     private fun showLoadingStatsKey() = profileManager.profileBooleanKey("show_loading_stats")
@@ -459,7 +714,7 @@ class PlayerViewModel @Inject constructor(
         val url = source.url?.trim().orEmpty()
         return when {
             addonId == HomeServerRepository.ADDON_ID -> "home_server"
-            addonId == "iptv_xtream_vod" -> "iptv_vod"
+            IptvVodSourceIds.isIptvVodAddonId(addonId) -> "iptv_vod"
             url.startsWith("magnet:", ignoreCase = true) || !source.infoHash.isNullOrBlank() -> "p2p"
             url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true) -> "http"
             else -> "unknown"
@@ -483,6 +738,23 @@ class PlayerViewModel @Inject constructor(
         "has_selected_url" to (!_uiState.value.selectedStreamUrl.isNullOrBlank()).toString()
     ).apply { putAll(extra) }
 
+    /** This player has told the Telegram search that playback is on (see loadMedia / onCleared). */
+    private var holdsTelegramQuiet = false
+
+    override fun onCleared() {
+        if (holdsTelegramQuiet) {
+            holdsTelegramQuiet = false
+            streamRepository.onPlaybackEnded()
+        }
+        // Sync by hearing lives on its own threads (audio sampling, decoding, speech recognition):
+        // without this every video played kept its hearing running on the old stream, and the
+        // next one's model load and recognition competed with them (70s loads, no words in 90s).
+        stopAudioSync()
+        audioSyncInstance?.release()
+        audioSyncInstance = null
+        super.onCleared()
+    }
+
     fun loadMedia(
         mediaType: MediaType,
         mediaId: Int,
@@ -498,9 +770,21 @@ class PlayerViewModel @Inject constructor(
         preferredBingeGroup: String?,
         startPositionMs: Long?,
         isLiveStreamPlayback: Boolean = false,
-        airDate: String? = null
+        forceRefresh: Boolean = false,
+        airDate: String? = null,
+        providedIptvSourceId: String? = null
     ) {
         currentAirDate = airDate
+        currentProvidedStreamUrl = providedStreamUrl
+        currentProvidedIptvSourceId = providedIptvSourceId
+        iptvBusyOnProvidedPath = false
+        // Playback is starting: Telegram searches still running for the source list the user
+        // just chose from are stopped, and none may toast over the player (they used to: "Telegram
+        // search timed out" appearing mid-episode). Held until this player is cleared.
+        if (!holdsTelegramQuiet) {
+            holdsTelegramQuiet = true
+            streamRepository.onPlaybackStarted()
+        }
         currentMediaType = mediaType
         currentMediaId = mediaId
         currentSeason = seasonNumber
@@ -512,7 +796,11 @@ class PlayerViewModel @Inject constructor(
         currentPreferredAddonId = preferredAddonId?.trim()?.takeIf { it.isNotBlank() }
         currentPreferredSourceName = preferredSourceName?.trim()?.takeIf { it.isNotBlank() }
         currentPreferredBingeGroup = preferredBingeGroup?.trim()?.takeIf { it.isNotBlank() }
-        currentIsLiveStreamPlayback = isLiveStreamPlayback
+        // An addon's live channel opens like a movie but plays live: no progress, scrobbles or
+        // Continue Watching entry.
+        currentIsLiveStreamPlayback = isLiveStreamPlayback || mediaRepository.isAddonNativeLiveChannel(mediaId)
+        autoPlayMinimumQuality = 0
+        autoPlayLimits = com.arflix.tv.data.model.AutoplayLimits()
         playbackSessionStartTime = System.currentTimeMillis()
         playbackDiag(
             "loadMedia type=$mediaType id=$mediaId season=$seasonNumber episode=$episodeNumber " +
@@ -521,17 +809,19 @@ class PlayerViewModel @Inject constructor(
         )
         currentEpisodeTitle = null
         hasMarkedWatched = false
+        hasScrobbledIntermediateStop = false
         lastIsPlaying = false
         lastScrobbleTime = 0
         lastWatchHistorySaveTime = 0
         lastWatchHistorySavedPositionSeconds = -1L
         subtitleRefreshJob?.cancel()
         subtitleSelectionJob?.cancel()
+        cancelSubtitleLocalization()
         subtitlePreloadJob?.cancel()
         // Cancel any in-flight "Find best match" scan from the previous title — otherwise it can
         // finish on this new session and select/restore a stale subtitle or poison the match cache
         // (its stream cache key resolves to the new stream). Same-VM path only, e.g. play-next.
-        cancelFindBestMatch()
+        cancelFindBestMatch("loadMedia (new title)")
         vodAppendJob?.cancel()
         homeServerAppendJob?.cancel()
         streamPrewarmJob?.cancel()
@@ -539,12 +829,24 @@ class PlayerViewModel @Inject constructor(
         streamSelectionJob?.cancel()
         playbackErrorReportJob?.cancel()
         primaryStreamResolutionFinal = false
+        resetPlaybackClock()
         hasManualSubtitleSelection = false
         userPickedSubtitle = false
+        userLockedSubtitleKey = null
         autoMatchAttempted = false
         aiSourceSubtitle = null
         val cachedItem = mediaRepository.getCachedItem(mediaType, mediaId)
         val cachedLogoUrl = mediaRepository.peekCachedLogoUrl(mediaType, mediaId)
+        val cachedSeasonEpisodes = if (mediaType == MediaType.TV && seasonNumber != null) {
+            mediaRepository.peekCachedSeasonEpisodes(mediaId, seasonNumber).orEmpty()
+        } else {
+            emptyList()
+        }
+        val cachedEpisode = currentPlayerEpisode(cachedSeasonEpisodes, seasonNumber, episodeNumber)
+        currentEpisodeTitle = cachedEpisode?.name?.takeIf { it.isNotBlank() }
+        val cachedOverview = playerPauseOverview(
+            mediaType, seasonNumber, episodeNumber, cachedSeasonEpisodes, cachedItem?.overview
+        )
         _uiState.value = _uiState.value.copy(
             isLoading = true,
             isLoadingStreams = false,
@@ -557,30 +859,58 @@ class PlayerViewModel @Inject constructor(
             isAiAvailable = false,
             aiTargetLanguageName = "",
             logoUrl = cachedLogoUrl,
+            mediaType = mediaType,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            episodeTitle = currentEpisodeTitle,
+            overview = cachedOverview,
+            seasonEpisodes = cachedSeasonEpisodes,
+            expectedDurationMs = (cachedEpisode?.runtime ?: 0).coerceAtLeast(0) * 60_000L,
+            isLoadingPlaybackMetadata = mediaId > 0 && !isLiveStreamPlayback,
             streamProgress = null,
-            streamLoadPhase = null,
+            streamLoadPhase = if (providedStreamUrl.isNullOrBlank()) null else PlayerMessage.Res(R.string.player_phase_preparing_stream),
             sourceSearchActive = false,
             error = null,
-            isSetupError = false
+            isSetupError = false,
+            recentSource = null
         )
+        loadRecentSource(mediaType, mediaId, seasonNumber, episodeNumber)
         lastTopPrewarmKey = ""
         skipIntervalsJob?.cancel()
         currentImdbId = providedImdbId
         skipIntervals = emptyList()
+        subtitleMenuCandidates.clear()
         lastActiveSkipType = null
         activeSkipRequestKey = null
-        _uiState.value = _uiState.value.copy(activeSkipInterval = null, skipIntervalDismissed = false)
+        _uiState.value = _uiState.value.copy(activeSkipInterval = null, skipIntervals = emptyList(), skipIntervalDismissed = false)
         currentOriginalLanguage = cachedItem?.originalLanguage
         currentGenreIds = cachedItem?.genreIds ?: emptyList()
         currentItemTitle = cachedItem?.title ?: ""
 
-        viewModelScope.launch {
+        mediaLoadJob?.cancel()
+        mediaLoadJob = viewModelScope.launch {
+            // Before any lookup starts: Home Server / IPTV background results can autoplay too.
+            armRecentSourceGate(recentSourceLoad?.await())
             // Autoplay should always use the current highest-ranked source list.
             // Explicit source navigation still passes preferred fields or a URL below.
             val preferredAudioLanguage = resolvePreferredAudioLanguage()
             val frameRateMatchingMode = resolveFrameRateMatchingMode()
             val prefs = context.settingsDataStore.data.first()
+            // A manually selected URL is explicit consent to that source's quality.
+            autoPlayMinimumQuality = if (providedStreamUrl.isNullOrBlank()) {
+                minQualityThreshold(prefs[profileManager.profileStringKey("auto_play_min_quality")] ?: "Any")
+            } else 0
+            autoPlayLimits = com.arflix.tv.data.model.AutoplayLimits(
+                maximumQuality = prefs[profileManager.profileStringKey("auto_play_max_quality")] ?: "Unlimited",
+                maximumSizeGb = prefs[profileManager.profileIntKey("auto_play_max_size_gb")] ?: 0
+            )
             val subSize = prefs[profileManager.profileStringKey("subtitle_size")] ?: "Medium"
+            val subSizePct = prefs[profileManager.profileIntKey("subtitle_size_pct")] ?: when (subSize.lowercase()) {
+                "small" -> 80
+                "large" -> 120
+                "extra large" -> 140
+                else -> 100
+            }
             val subColor = prefs[profileManager.profileStringKey("subtitle_color")] ?: "White"
             val subStyle = prefs[profileManager.profileStringKey("subtitle_style")] ?: "Bold"
             val subFont = SubtitleFontOption.fromPreference(
@@ -588,15 +918,20 @@ class PlayerViewModel @Inject constructor(
             ).preferenceValue
             val subStylized = prefs[profileManager.profileBooleanKey("subtitle_stylized")] ?: true
             val subOffset = prefs[profileManager.profileStringKey("subtitle_offset")] ?: "Bottom"
+            val subVertPct = prefs[profileManager.profileIntKey("subtitle_vertical_pct")] ?: when (subOffset) {
+                "Bottom" -> 2; "Low" -> 8; "Medium" -> 15; "High" -> 25; else -> 2
+            }
+            val filterSubLang = prefs[filterSubtitlesByLanguageKey()] ?: true
+            val useForcedSubs = prefs[useForcedSubtitlesKey()] ?: false
+            val removeHi = prefs[profileManager.profileBooleanKey("subtitle_remove_hearing_impaired")] ?: false
+            translationManager.removeSubtitleHearingImpaired = removeHi
             val autoPlayNext = prefs[autoPlayNextKey()] ?: true
             val showLoadingStats = prefs[showLoadingStatsKey()] ?: true
             val volumeBoostDb = prefs[profileManager.profileStringKey("volume_boost_db")]
                 ?.toIntOrNull()?.coerceIn(0, 15) ?: 0
             val installedAddons = streamRepository.installedAddons.first()
             currentInstalledAddons = installedAddons
-            val orderedAddonIds = installedAddons
-                .filter { it.isVodStreamingAddon() }
-                .map { it.id }
+            val orderedAddonIds = streamIntegrationRepository.getUnifiedSourceOrderedIds().first()
             currentAddonOrderedIds = orderedAddonIds
             val preferredSub = prefs[defaultSubtitleKey()]?.trim().orEmpty()
                 .let { if (isSubtitleDisabledPreference(it)) "" else it }
@@ -605,41 +940,73 @@ class PlayerViewModel @Inject constructor(
             setTargetSubtitleLang(normalizeLanguage(preferredSub))
 
             // Load AI subtitle settings
+            customAiStore = withContext(Dispatchers.IO) {
+                com.arflix.tv.ui.screens.player.subtitles.ai.CustomAiConfigStore.from(context)
+            }
             aiSubtitleEnabled = prefs[aiEnabledKey] ?: false
             aiSubtitleAutoSelect = prefs[aiAutoSelectKey] ?: false
             aiFindBestMatchFirst = prefs[aiFindBestMatchKey] ?: false
+            hearingSyncEnabled = prefs[hearingSyncKey] ?: hearingSyncDefault(context)
             subtitlePreloadEnabled = prefs[subtitlePreloadKey] ?: true
             aiApiKey = prefs[aiApiKeyKey] ?: ""
             aiModel = runCatching {
                 SubtitleAiModel.valueOf(prefs[aiModelKey] ?: SubtitleAiModel.GROQ_LLAMA_70B.name)
             }.getOrDefault(SubtitleAiModel.GROQ_LLAMA_70B)
             aiRemoveHearingImpaired = prefs[aiRemoveHearingImpairedKey] ?: true
-            translationManager.updateService(apiKey = aiApiKey, model = aiModel)
+            translationManager.updateService(
+                apiKey = aiApiKey,
+                model = aiModel,
+                customConfigProvider = customAiProvider,
+            )
             translationManager.removeHearingImpaired = aiRemoveHearingImpaired
             translationManager.isEnabled = false
-            untranslatableSourceIds.clear()
+            untranslatableSourceKeys.clear()
             translationManager.reset()
 
+            val autoSkipIntro = prefs[profileManager.profileBooleanKey("auto_skip_intro")] ?: false
+            val autoSkipOutro = prefs[profileManager.profileBooleanKey("auto_skip_outro")] ?: false
+            val audioDelayMs = prefs[profileManager.profileLongKey("audio_delay_ms")] ?: 0L
+            val audioNormalization = prefs[profileManager.profileBooleanKey("audio_normalization")] ?: false
+
             _uiState.value = PlayerUiState(
+                mediaType = mediaType,
+                seasonNumber = seasonNumber,
+                episodeNumber = episodeNumber,
+                episodeTitle = currentEpisodeTitle,
+                overview = cachedOverview,
+                seasonEpisodes = cachedSeasonEpisodes,
+                expectedDurationMs = (cachedEpisode?.runtime ?: 0).coerceAtLeast(0) * 60_000L,
+                isLoadingPlaybackMetadata = mediaId > 0 && !isLiveStreamPlayback,
                 isLoading = true,
                 isLoadingStreams = true,
                 sourceSearchActive = true,
+                streamLoadPhase = if (providedStreamUrl.isNullOrBlank()) null else PlayerMessage.Res(R.string.player_phase_preparing_stream),
                 title = cachedItem?.title ?: currentItemTitle,
                 backdropUrl = cachedItem?.backdrop?.takeIf { it.isNotBlank() }
                     ?: cachedItem?.image?.takeIf { it.isNotBlank() },
                 logoUrl = cachedLogoUrl,
                 addonOrderedIds = orderedAddonIds,
                 preferredAudioLanguage = preferredAudioLanguage,
+                sourceBadgeLanguage = resolveSourceBadgeLanguage(),
                 preferredSubtitleLang = preferredSub,
                 secondarySubtitleLang = secondarySub,
                 frameRateMatchingMode = frameRateMatchingMode,
                 subtitleSize = subSize,
+                subtitleSizePct = subSizePct,
                 subtitleColor = subColor,
                 subtitleStyle = subStyle,
                 subtitleFont = subFont,
                 subtitleStylized = subStylized,
                 subtitleOffset = subOffset,
+                subtitleVerticalPct = subVertPct,
+                filterSubtitlesByLanguage = filterSubLang,
+                useForcedSubtitles = useForcedSubs,
+                subtitleRemoveHearingImpaired = removeHi,
                 autoPlayNext = autoPlayNext,
+                autoSkipIntro = autoSkipIntro,
+                autoSkipOutro = autoSkipOutro,
+                audioDelayMs = audioDelayMs,
+                audioNormalization = audioNormalization,
                 showLoadingStats = showLoadingStats,
                 volumeBoostDb = volumeBoostDb,
                 subtitlePreloadEnabled = subtitlePreloadEnabled,
@@ -658,13 +1025,14 @@ class PlayerViewModel @Inject constructor(
                         addonId = currentPreferredAddonId.orEmpty(),
                         quality = "",
                         size = "",
-                        url = url
+                        url = url,
+                        iptvSourceId = providedIptvSourceId
                     )
                 }
             val providedIsHubPage = providedStreamCandidate?.url
                 ?.let(::isHubCloudPageUrl) == true
             val preResolvedHubStream = if (providedIsHubPage) {
-                _uiState.value = _uiState.value.copy(streamLoadPhase = "Preparing stream")
+                _uiState.value = _uiState.value.copy(streamLoadPhase = PlayerMessage.Res(R.string.player_phase_preparing_stream))
                 providedStreamCandidate?.let { stream ->
                     runCatching { streamRepository.resolveStreamForPlayback(stream) }.getOrNull()
                 }
@@ -700,7 +1068,7 @@ class PlayerViewModel @Inject constructor(
                 // path sat 5-10s with no overlay text (selectedStreamUrl not set yet, so startupPhase
                 // is gated off), unlike the manual selectStream() path which already labels this step.
                 if (providedStream != null) {
-                    _uiState.value = _uiState.value.copy(streamLoadPhase = "Preparing stream")
+                    _uiState.value = _uiState.value.copy(streamLoadPhase = PlayerMessage.Res(R.string.player_phase_preparing_stream))
                 }
                 val resolvedProvidedStream = preResolvedHubStream ?: providedStream?.let { stream ->
                     runCatching { streamRepository.resolveStreamForPlayback(stream) }.getOrNull() ?: stream
@@ -726,10 +1094,26 @@ class PlayerViewModel @Inject constructor(
                         isLoadingStreams = false,
                         sourceSearchActive = false,
                         error = if (isMagnet) {
-                            "Selected source is P2P (magnet) and not supported. Choose an HTTP/debrid source."
+                            PlayerMessage.Res(R.string.player_error_magnet_unsupported)
                         } else {
-                            "Failed to open selected source. Try another one."
+                            PlayerMessage.Res(R.string.player_error_open_source_failed)
                         }
+                    )
+                    return@launch
+                }
+
+                if (admitIptvVodStream(resolvedProvidedStream) is IptvAdmission.Full) {
+                    iptvBusyOnProvidedPath = true
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        isLoadingStreams = false,
+                        sourceSearchActive = false,
+                        streamLoadPhase = null,
+                        streams = listOfNotNull(resolvedProvidedStream),
+                        selectedStream = resolvedProvidedStream,
+                        selectedStreamUrl = null,
+                        savedPosition = resumeData.positionMs,
+                        error = IPTV_ACCOUNT_BUSY_MESSAGE
                     )
                     return@launch
                 }
@@ -738,10 +1122,15 @@ class PlayerViewModel @Inject constructor(
                     isLoading = false,
                     isLoadingStreams = false,
                     sourceSearchActive = true,
+                    streams = listOfNotNull(resolvedProvidedStream),
                     selectedStream = resolvedProvidedStream,
                     selectedStreamUrl = resolvedProvidedUrl,
                     savedPosition = resumeData.positionMs
                 )
+                preparedStream = resolvedProvidedStream
+                listedSelectedStream = null
+                prefetchSubtitleIndex(onlyForAutoScan = true)
+                audioSyncOnStream()
                 // NOTE: these background children share the load job — an uncaught exception in
                 // any of them cancels ALL siblings (that silently killed the subtitle flow).
                 // Every body is therefore failure-isolated and logged.
@@ -766,28 +1155,44 @@ class PlayerViewModel @Inject constructor(
                 // Load IPTV and home-server sources from cache in parallel so the
                 // source picker in the player shows alternatives immediately.
                 homeServerAppendJob?.cancel()
-                homeServerAppendJob = launch {
-                    runCatching {
-                        appendHomeServerSourcesInBackground(
-                            mediaType = mediaType,
-                            imdbId = currentImdbId,
-                            seasonNumber = seasonNumber,
-                            episodeNumber = episodeNumber,
-                            timeoutMs = 5_000L
-                        )
-                    }.onFailure(childFailed("homeServerAppend"))
+                if (!isYouTubeVideo() && streamIntegrationRepository.isIntegrationEnabled(StreamIntegrationType.HOME_SERVER)) {
+                    homeServerAppendJob = launch {
+                        try {
+                            runCatching {
+                                appendHomeServerSourcesInBackground(
+                                    mediaType = mediaType,
+                                    imdbId = currentImdbId,
+                                    seasonNumber = seasonNumber,
+                                    episodeNumber = episodeNumber,
+                                    timeoutMs = 20_000L
+                                )
+                            }.onFailure(childFailed("homeServerAppend"))
+                        } finally {
+                            if (currentCoroutineContext().isActive) finishSupplementalSourceLookupIfReady(
+                                currentCoroutineContext()[Job], PlayerMessage.Res(R.string.player_error_no_streams_media_servers)
+                            )
+                        }
+                    }
                 }
                 vodAppendJob?.cancel()
-                vodAppendJob = launch {
-                    runCatching {
-                        appendVodSourceInBackground(
-                            mediaType = mediaType,
-                            imdbId = currentImdbId,
-                            seasonNumber = seasonNumber,
-                            episodeNumber = episodeNumber,
-                            timeoutMs = 15_000L
-                        )
-                    }.onFailure(childFailed("vodAppend"))
+                if (!isYouTubeVideo() && streamIntegrationRepository.isIntegrationEnabled(StreamIntegrationType.IPTV_VOD)) {
+                    vodAppendJob = launch {
+                        try {
+                            runCatching {
+                                appendVodSourceInBackground(
+                                    mediaType = mediaType,
+                                    imdbId = currentImdbId,
+                                    seasonNumber = seasonNumber,
+                                    episodeNumber = episodeNumber,
+                                    timeoutMs = 15_000L
+                                )
+                            }.onFailure(childFailed("vodAppend"))
+                        } finally {
+                            if (currentCoroutineContext().isActive) finishSupplementalSourceLookupIfReady(
+                                currentCoroutineContext()[Job], PlayerMessage.Res(R.string.player_error_no_streams_other_source)
+                            )
+                        }
+                    }
                 }
                 // Fetch metadata in background
                 launch {
@@ -919,7 +1324,7 @@ class PlayerViewModel @Inject constructor(
                             isLoading = false,
                             isLoadingStreams = false,
                             sourceSearchActive = false,
-                            error = context.getString(R.string.player_error_imdb_resolve)
+                            error = PlayerMessage.Res(R.string.player_error_imdb_resolve)
                         )
                         return@launch
                     }
@@ -936,27 +1341,36 @@ class PlayerViewModel @Inject constructor(
                     }
                 }
                 // Start VOD append in background - single fast attempt, no retries blocking UI
-                homeServerAppendJob?.cancel()
-                homeServerAppendJob = launch {
-                    appendHomeServerSourcesInBackground(
-                        mediaType = mediaType,
-                        imdbId = imdbId,
-                        seasonNumber = seasonNumber,
-                        episodeNumber = episodeNumber,
-                        timeoutMs = 5_000L
-                    )
-                }
-                vodAppendJob?.cancel()
-                vodAppendJob = launch {
-                    // VOD runs in parallel with addon streams — catalog is disk-cached
-                    // so lookups are usually fast. Give enough time for series info calls.
-                    appendVodSourceInBackground(
-                        mediaType = mediaType,
-                        imdbId = imdbId,
-                        seasonNumber = seasonNumber,
-                        episodeNumber = episodeNumber,
-                        timeoutMs = 15_000L
-                    )
+                val searchMode = streamIntegrationRepository.getSearchMode()
+                val isSequential = searchMode == StreamSearchMode.SEQUENTIAL
+
+                if (!isSequential) {
+                    homeServerAppendJob?.cancel()
+                    if (!isYouTubeVideo() && streamIntegrationRepository.isIntegrationEnabled(StreamIntegrationType.HOME_SERVER)) {
+                        homeServerAppendJob = launch {
+                            appendHomeServerSourcesInBackground(
+                                mediaType = mediaType,
+                                imdbId = imdbId,
+                                seasonNumber = seasonNumber,
+                                episodeNumber = episodeNumber,
+                                timeoutMs = 20_000L
+                            )
+                        }
+                    }
+                    vodAppendJob?.cancel()
+                    if (!isYouTubeVideo() && streamIntegrationRepository.isIntegrationEnabled(StreamIntegrationType.IPTV_VOD)) {
+                        vodAppendJob = launch {
+                            // VOD runs in parallel with addon streams — catalog is disk-cached
+                            // so lookups are usually fast. Give enough time for series info calls.
+                            appendVodSourceInBackground(
+                                mediaType = mediaType,
+                                imdbId = imdbId,
+                                seasonNumber = seasonNumber,
+                                episodeNumber = episodeNumber,
+                                timeoutMs = 15_000L
+                            )
+                        }
+                    }
                 }
 
                 // Get saved position for resume playback
@@ -971,15 +1385,231 @@ class PlayerViewModel @Inject constructor(
                     error = null,
                     isSetupError = false,
                     streamProgress = 0f,
-                    streamLoadPhase = if (streamingAddonCount > 0) "Searching 0/$streamingAddonCount sources" else "Preparing sources"
+                    streamLoadPhase = if (streamingAddonCount > 0) {
+                        PlayerMessage.Res(
+                            R.string.player_phase_searching_sources,
+                            listOf(0, streamingAddonCount)
+                        )
+                    } else {
+                        PlayerMessage.Res(R.string.player_phase_preparing_sources)
+                    }
                 )
 
                 val preferredLanguage = _uiState.value.preferredAudioLanguage.ifBlank { resolvePreferredAudioLanguage() }
+
+                if (isSequential) {
+                    val providers = streamIntegrationRepository.observeProviderItems().first().filter { it.isEnabled }
+                    val total = providers.size.coerceAtLeast(1)
+                    var index = 0
+                    val sequentialCandidates = SequentialStreamCandidates(autoPlayMinimumQuality, autoPlayLimits)
+
+                    for (providerItem in providers) {
+                        index++
+                        val progressFraction = (index.toFloat() / total.toFloat()).coerceIn(0f, 0.99f)
+                        _uiState.value = _uiState.value.copy(
+                            streamProgress = progressFraction,
+                            streamLoadPhase = PlayerMessage.Res(
+                                R.string.player_phase_searching_sources,
+                                listOf(index - 1, total)
+                            )
+                        )
+
+                        val rawCandidates: List<StreamSource> = when (providerItem.type) {
+                            StreamIntegrationType.HOME_SERVER -> {
+                                val lookupTitle = currentItemTitle.ifBlank { currentTitle }
+                                if (mediaType == MediaType.MOVIE) {
+                                    streamRepository.resolveMovieHomeServerSources(
+                                        imdbId = imdbId,
+                                        title = lookupTitle,
+                                        year = null,
+                                        tmdbId = currentMediaId,
+                                        timeoutMs = 3_500L,
+                                        providerId = providerItem.id
+                                    )
+                                } else {
+                                    streamRepository.resolveEpisodeHomeServerSources(
+                                        imdbId = imdbId,
+                                        season = seasonNumber ?: 1,
+                                        episode = episodeNumber ?: 1,
+                                        title = lookupTitle,
+                                        tmdbId = currentMediaId,
+                                        tvdbId = currentTvdbId,
+                                        timeoutMs = 3_500L,
+                                        providerId = providerItem.id
+                                    )
+                                }
+                            }
+                            StreamIntegrationType.STREMIO_ADDONS -> {
+                                val allAddons = streamRepository.installedAddonsForSourceResolution()
+                                val targetAddon = allAddons.firstOrNull { it.id == providerItem.id }
+                                    ?: allAddons.firstOrNull { it.id.equals(providerItem.id, ignoreCase = true) }
+                                    ?: allAddons.firstOrNull { providerItem.id == "stremio:${it.id}" || providerItem.rawProviderKeys.contains(it.id) }
+                                if (targetAddon != null) {
+                                    streamRepository.resolveAddonStreams(
+                                        addon = targetAddon,
+                                        mediaType = mediaType,
+                                        imdbId = effectiveStreamId.orEmpty(),
+                                        title = currentItemTitle,
+                                        year = null,
+                                        season = seasonNumber,
+                                        episode = episodeNumber,
+                                        tmdbId = mediaId,
+                                        tvdbId = currentTvdbId,
+                                        genreIds = currentGenreIds,
+                                        originalLanguage = currentOriginalLanguage,
+                                        animeQueryOverride = animeQueryOverride,
+                                        airDate = currentAirDate,
+                                        timeoutMs = 3_500L,
+                                        nativeType = mediaRepository.addonNativeType(mediaId)
+                                    )
+                                } else emptyList()
+                            }
+                            StreamIntegrationType.TELEGRAM -> {
+                                streamRepository.resolveTelegramStreams(
+                                    mediaType = mediaType,
+                                    title = currentItemTitle,
+                                    year = null,
+                                    season = seasonNumber,
+                                    episode = episodeNumber,
+                                    imdbId = effectiveStreamId,
+                                    timeoutMs = 3_500L
+                                )
+                            }
+                            StreamIntegrationType.PLUGINS -> {
+                                if (streamIntegrationRepository.isIntegrationEnabled(StreamIntegrationType.PLUGINS)) {
+                                    val pluginStreams = mutableListOf<StreamSource>()
+                                    withTimeoutOrNull(3_500L) {
+                                        try {
+                                            pluginManager.executeScrapersStreaming(
+                                                tmdbId = mediaId.toString(),
+                                                mediaType = if (mediaType == MediaType.MOVIE) "movie" else "tv",
+                                                season = seasonNumber,
+                                                episode = episodeNumber,
+                                                allowedProviderIds = setOf(providerItem.id)
+                                            ).collect { (_, results) ->
+                                                if (results != null) {
+                                                    pluginStreams.addAll(results.map { it.toStreamSource() })
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            if (e is kotlinx.coroutines.CancellationException) throw e
+                                        }
+                                    }
+                                    pluginStreams
+                                } else emptyList()
+                            }
+                            StreamIntegrationType.IPTV_VOD -> {
+                                val lookupTitle = currentItemTitle
+                                    .ifBlank { currentTitle }
+                                    .ifBlank { mediaRepository.getCachedItem(mediaType, currentMediaId)?.title.orEmpty() }
+                                val lookupOriginalTitle = mediaRepository.getCachedItem(mediaType, currentMediaId)?.originalTitle
+                                if (mediaType == MediaType.MOVIE) {
+                                    streamRepository.resolveMovieVodSources(
+                                        imdbId = imdbId,
+                                        title = lookupTitle,
+                                        year = null,
+                                        tmdbId = currentMediaId,
+                                        timeoutMs = 3_500L,
+                                        originalTitle = lookupOriginalTitle,
+                                        providerId = providerItem.id
+                                    )
+                                } else {
+                                    streamRepository.resolveEpisodeVodSources(
+                                        imdbId = imdbId,
+                                        season = seasonNumber ?: 1,
+                                        episode = episodeNumber ?: 1,
+                                        title = lookupTitle,
+                                        tmdbId = currentMediaId,
+                                        tvdbId = currentTvdbId,
+                                        timeoutMs = 3_500L,
+                                        originalTitle = lookupOriginalTitle,
+                                        providerId = providerItem.id
+                                    )
+                                }
+                            }
+                            // Searched only when the viewer presses "Search YouTube", never here.
+                            StreamIntegrationType.YOUTUBE -> emptyList()
+                        }
+
+                        val validCandidates = rawCandidates.filter { stream ->
+                            val u = stream.url?.trim().orEmpty()
+                            u.isNotBlank() && !u.startsWith("magnet:", ignoreCase = true)
+                        }
+                        val filteredCandidates = streamRepository.applyQualityRegexFilters(validCandidates)
+                        if (sequentialCandidates.accept(filteredCandidates)) break
+                    }
+
+                    val foundStreams = sortStreamsByQualityAndSize(sequentialCandidates.streams, preferredLanguage)
+                    if (foundStreams.isNotEmpty()) {
+                        val autoplayCandidates = eligiblePlayerAutoplayStreams(foundStreams, autoPlayMinimumQuality, autoPlayLimits)
+                        val targetSelection = autoplayCandidates.firstOrNull()
+                        primaryStreamResolutionFinal = true
+                        _uiState.value = _uiState.value.copy(
+                            isLoading = false,
+                            isLoadingStreams = false,
+                            sourceSearchActive = false,
+                            streams = foundStreams,
+                            streamProgress = null,
+                            streamLoadPhase = null,
+                            error = if (targetSelection == null) PlayerMessage.Res(R.string.stream_no_sources_match) else null
+                        )
+                        prewarmTopStreams(foundStreams, preferredLanguage)
+                        if (targetSelection != null) {
+                            selectStream(targetSelection)
+                        }
+
+                        // Apply subtitle preference in background (non-blocking)
+                        subtitleRefreshJob?.cancel()
+                        subtitleRefreshJob = launch {
+                            val fetchedSubs = runCatching {
+                                streamRepository.fetchSubtitlesForSelectedStream(
+                                    mediaType = mediaType,
+                                    imdbId = effectiveStreamId,
+                                    season = seasonNumber,
+                                    episode = episodeNumber,
+                                    stream = null,
+                                    softDeadlineMs = subtitleFetchSoftDeadline(),
+                                    onPendingAddons = pendingSubtitleAddonsReporter()
+                                )
+                            }.getOrDefault(emptyList())
+
+                            val mergedSubs = filterSubsByPreferredLanguage(
+                                (_uiState.value.subtitles + fetchedSubs)
+                                    .filter { it.isEmbedded || it.url.isNotBlank() }
+                                    .distinctBy { if (it.isEmbedded) it.id else "${it.id}|${it.url}" }
+                            )
+
+                            _uiState.value = _uiState.value.copy(
+                                subtitles = mergedSubs,
+                                isLoadingSubtitles = false
+                            )
+                            preloadSubtitles(mergedSubs)
+                            scheduleSubtitleSelection(currentOriginalLanguage)
+                        }
+                        return@launch
+                    } else {
+                        primaryStreamResolutionFinal = true
+                        _uiState.value = _uiState.value.copy(
+                            isLoading = false,
+                            isLoadingStreams = false,
+                            isLoadingSubtitles = false,
+                            sourceSearchActive = false,
+                            streams = emptyList(),
+                            addonNotices = emptyList(),
+                            streamProgress = null,
+                            streamLoadPhase = null,
+                            error = PlayerMessage.Res(R.string.player_error_no_streams_from_addons)
+                        )
+                        return@launch
+                    }
+                }
                 val progressiveFlow = if (mediaType == MediaType.MOVIE) {
                     streamRepository.resolveMovieStreamsProgressive(
                         imdbId = effectiveStreamId,
                         title = currentItemTitle,
-                        year = null
+                        year = null,
+                        forceRefresh = forceRefresh,
+                        nativeType = mediaRepository.addonNativeType(mediaId)
                     )
                 } else {
                     streamRepository.resolveEpisodeStreamsProgressive(
@@ -991,8 +1621,10 @@ class PlayerViewModel @Inject constructor(
                         genreIds = currentGenreIds,
                         originalLanguage = currentOriginalLanguage,
                         title = currentItemTitle,
+                        forceRefresh = forceRefresh,
                         animeQueryOverride = animeQueryOverride,
-                        airDate = currentAirDate
+                        airDate = currentAirDate,
+                        nativeType = mediaRepository.addonNativeType(mediaId)
                     )
                 }
 
@@ -1000,6 +1632,10 @@ class PlayerViewModel @Inject constructor(
                 // a short grace period to avoid false low-quality picks, then
                 // force-select once quality/size looks stable.
                 val hasHomeServerConnections = streamRepository.hasHomeServerConnections()
+                // An IPTV playlist or portal is a source like any other: without it
+                // in the count, a user whose only provider is IPTV was told to go
+                // install a streaming addon whenever a search came back empty.
+                val hasIptvVodProviders = streamRepository.hasIptvVodProviders()
                 val HOME_SERVER_AUTOPLAY_WAIT_MS = 850L
                 val AUTOPLAY_MAX_WINDOW_MS = 1_750L
                 val AUTOPLAY_QUALITY_WINDOW_MS = 180L
@@ -1010,7 +1646,28 @@ class PlayerViewModel @Inject constructor(
                 var isFirstEmission = true
                 var sourceEmptyReported = false
 
-                progressiveFlow.collect { progressive ->
+                var pluginSearchStarted = false
+                val pluginsEnabled = !isYouTubeVideo() && streamIntegrationRepository.isIntegrationEnabled(StreamIntegrationType.PLUGINS)
+                val pluginBatches = if (pluginsEnabled) {
+                    pluginManager.executeScrapersStreaming(
+                        tmdbId = mediaId.toString(),
+                        mediaType = if (mediaType == MediaType.MOVIE) "movie" else "tv",
+                        season = seasonNumber,
+                        episode = episodeNumber,
+                        allowedProviderIds = streamIntegrationRepository.enabledProviderIds(StreamIntegrationType.PLUGINS)
+                    ).map { (_, results) ->
+                        pluginSearchStarted = true
+                        results.orEmpty().map { it.toStreamSource() }
+                    }
+                } else {
+                    emptyFlow()
+                }
+                val playerSources = mergePlayerSourceDiscovery(
+                    addons = progressiveFlow,
+                    pluginBatches = pluginBatches,
+                    onPluginFailure = { Log.w(TAG, "Player plugin source discovery failed", it) }
+                )
+                playerSources.collect { progressive ->
                     if (progressive.isFinal) {
                         primaryStreamResolutionFinal = true
                     }
@@ -1020,28 +1677,37 @@ class PlayerViewModel @Inject constructor(
                             u.isNotBlank() && !u.startsWith("magnet:", ignoreCase = true)
                         }
                     val existingVod = _uiState.value.streams.filter(::isSupplementalStream)
+                    val activeStreamList = listOfNotNull(_uiState.value.selectedStream)
                     val mergedStreams = sortStreamsByQualityAndSize(
-                        (allStreams + existingVod)
+                        (allStreams + existingVod + activeStreamList)
                             .distinctBy(::providerScopedStreamIdentity),
                         preferredLanguage
                     )
                     lastMergedStreams = mergedStreams
+                    val autoplayStreams = eligiblePlayerAutoplayStreams(mergedStreams, autoPlayMinimumQuality, autoPlayLimits)
 
                     val supplementalSourcesStillLoading =
                         homeServerAppendJob?.isActive == true || vodAppendJob?.isActive == true
-                    val errorMessage = if (
-                        progressive.isFinal &&
-                        mergedStreams.isEmpty() &&
-                        !hasHomeServerConnections &&
-                        !supplementalSourcesStillLoading
-                    ) {
-                        if (streamingAddonCount == 0) {
-                            "No streaming addons configured.\n\nGo to Settings \u2192 Addons to add a streaming addon, then come back and try again."
-                        } else {
-                            "No streams found for this content. The addons may not have sources for this title."
+                    val availability = playerAutoplayAvailability(
+                        streams = mergedStreams,
+                        minimumQuality = autoPlayMinimumQuality,
+                        limits = autoPlayLimits,
+                        searchActive = !progressive.isFinal || supplementalSourcesStillLoading,
+                        hasSelection = !canStartAutoplay()
+                    )
+                    val errorMessage = when (availability) {
+                        PlayerAutoplayAvailability.SELECTED -> _uiState.value.error
+                        PlayerAutoplayAvailability.NO_MATCH -> PlayerMessage.Res(R.string.stream_no_sources_match)
+                        PlayerAutoplayAvailability.NO_SOURCES -> when {
+                            streamingAddonCount == 0 && !pluginSearchStarted &&
+                                !hasHomeServerConnections && !hasIptvVodProviders ->
+                                PlayerMessage.Res(R.string.player_error_no_streaming_addons)
+                            hasHomeServerConnections -> PlayerMessage.Res(R.string.player_error_no_streams_media_servers)
+                            else -> PlayerMessage.Res(R.string.player_error_no_streams_from_addons)
                         }
-                    } else null
-                    if (errorMessage != null && !sourceEmptyReported) {
+                        else -> null
+                    }
+                    if (errorMessage != null && !sourceEmptyReported && mergedStreams.isEmpty()) {
                         sourceEmptyReported = true
                         AppLogger.recordException(
                             throwable = IllegalStateException("Playback source list empty"),
@@ -1068,23 +1734,28 @@ class PlayerViewModel @Inject constructor(
                     }
                     val phaseLabel = when {
                         progressive.isFinal -> null
-                        mergedStreams.isNotEmpty() -> "Found ${mergedStreams.size} sources ($completed/$total)"
-                        else -> "Searching $completed/$total sources"
+                        mergedStreams.isNotEmpty() -> PlayerMessage.Res(
+                            R.string.player_phase_found_sources,
+                            listOf(mergedStreams.size, completed, total)
+                        )
+                        else -> PlayerMessage.Res(
+                            R.string.player_phase_searching_sources,
+                            listOf(completed, total)
+                        )
                     }
                     val filteredSubtitles = filterSubsByPreferredLanguage(progressive.subtitles)
 
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
-                        isLoadingStreams = mergedStreams.isEmpty() &&
-                            (!progressive.isFinal || hasHomeServerConnections || supplementalSourcesStillLoading),
+                        isLoadingStreams = availability == PlayerAutoplayAvailability.SEARCHING,
                         sourceSearchActive = !progressive.isFinal || supplementalSourcesStillLoading,
                         streams = mergedStreams,
+                        addonNotices = progressive.notices,
                         subtitles = filteredSubtitles,
                         error = errorMessage,
-                        isSetupError = progressive.isFinal &&
-                            mergedStreams.isEmpty() &&
-                            streamingAddonCount == 0 &&
-                            !hasHomeServerConnections &&
+                        isSetupError = availability == PlayerAutoplayAvailability.NO_SOURCES &&
+                            streamingAddonCount == 0 && !pluginSearchStarted &&
+                            !hasHomeServerConnections && !hasIptvVodProviders &&
                             !supplementalSourcesStillLoading,
                         streamProgress = if (progressive.isFinal) null else progressFraction,
                         streamLoadPhase = phaseLabel
@@ -1104,7 +1775,14 @@ class PlayerViewModel @Inject constructor(
                             stream.behaviorHints.notWebReady != true &&
                             !stream.url.isNullOrBlank()
                     }
-                    if (!autoplaySelected && mergedStreams.isNotEmpty() && autoplayDeferredJob == null) {
+                    // While the gate holds, only the recent source may start (see RecentSourceAutoplayGate).
+                    recentSourceGate.onStreams(mergedStreams)
+                    if (progressive.isFinal && !supplementalSourcesStillLoading) recentSourceGate.release()
+                    val holdForRecentSource = recentSourceGate.isHolding(recentSourceClock())
+                    val recentAutoplayStream = recentSourceGate.recentCandidate(autoplayStreams)
+                    if (!autoplaySelected && autoplayStreams.isNotEmpty() && autoplayDeferredJob == null &&
+                        !holdForRecentSource && canStartAutoplay()
+                    ) {
                         autoplayDeferredJob = launch {
                             delay(AUTOPLAY_QUALITY_WINDOW_MS)
                             if (!autoplaySelected) {
@@ -1120,7 +1798,7 @@ class PlayerViewModel @Inject constructor(
                                         preferredLanguage
                                     )
                                 }
-                                if (snapshot.isNotEmpty()) {
+                                if (eligiblePlayerAutoplayStreams(snapshot, autoPlayMinimumQuality, autoPlayLimits).isNotEmpty()) {
                                     autoplaySelected = true
                                     Log.i(
                                         TAG,
@@ -1135,15 +1813,19 @@ class PlayerViewModel @Inject constructor(
                             }
                         }
                     }
-                    val autoplayTopStream = pickAutoplayTopStream(mergedStreams, preferredLanguage)
-                    val hasRequestedPreferredStream = hasRequestedPreferredStream(mergedStreams)
-                    val shouldSelectNow = !autoplaySelected && mergedStreams.isNotEmpty() && homeServerReadyForAutoplay && (
-                        cacheHit ||
-                            progressive.isFinal ||
-                            hasCachedReadyStream ||
-                            hasRequestedPreferredStream ||
-                            isExcellentAutoplayCandidate(autoplayTopStream) ||
-                            elapsedMs >= AUTOPLAY_MAX_WINDOW_MS
+                    val autoplayTopStream = pickAutoplayTopStream(autoplayStreams, preferredLanguage)
+                    val hasRequestedPreferredStream = hasRequestedPreferredStream(autoplayStreams)
+                    val shouldSelectNow = !autoplaySelected && autoplayStreams.isNotEmpty() && canStartAutoplay() && homeServerReadyForAutoplay && (
+                        recentAutoplayStream != null || (
+                            !holdForRecentSource && (
+                                cacheHit ||
+                                    progressive.isFinal ||
+                                    hasCachedReadyStream ||
+                                    hasRequestedPreferredStream ||
+                                    isExcellentAutoplayCandidate(autoplayTopStream) ||
+                                    elapsedMs >= AUTOPLAY_MAX_WINDOW_MS
+                                )
+                            )
                         )
 
                     if (shouldSelectNow) {
@@ -1158,10 +1840,15 @@ class PlayerViewModel @Inject constructor(
                             "autoplayNow streams=${mergedStreams.size} completed=$completed/$total final=${progressive.isFinal} " +
                                 "cached=$hasCachedReadyStream preferred=$hasRequestedPreferredStream top=${autoplayTopStream?.let { streamDiag(it) } ?: "none"}"
                         )
-                        autoplayTopStream?.let { selectStream(it) } ?: autoplaySelectBest(mergedStreams, preferredLanguage)
+                        autoplaySelectBest(autoplayStreams, preferredLanguage)
                     }
                 }
 
+                // The addon search is over. Home Server / IPTV may still bring the recent source;
+                // if they don't, the gate's own timer picks once it runs out.
+                if (homeServerAppendJob?.isActive != true && vodAppendJob?.isActive != true) {
+                    recentSourceGate.release()
+                }
                 if (!autoplaySelected && lastMergedStreams.isNotEmpty()) {
                     if (hasHomeServerConnections &&
                         lastMergedStreams.none { it.addonId == HomeServerRepository.ADDON_ID }
@@ -1222,7 +1909,7 @@ class PlayerViewModel @Inject constructor(
                     sourceSearchActive = false,
                     streamProgress = null,
                     streamLoadPhase = null,
-                    error = e.message
+                    error = e.message?.let { PlayerMessage.Raw(it) }
                 )
             }
         }
@@ -1231,7 +1918,47 @@ class PlayerViewModel @Inject constructor(
     /**
      * Fetch media metadata in background (non-blocking)
      */
+    private suspend fun loadPlayerSeasonEpisodes(mediaId: Int, displaySeason: Int): List<com.arflix.tv.data.model.Episode> {
+        val structure = if (isCurrentAnime() && getAnimeStructuringStyle() == AnimeStructuringStyle.BROADCAST) {
+            animeMapper.resolveAnimeSeasonStructure(mediaId)
+        } else null
+        val identities = structure?.seasons?.get(displaySeason)
+            ?: return mediaRepository.getSeasonEpisodes(mediaId, displaySeason)
+        val bySeason = identities.map { it.tmdbSeason }.distinct().associateWith { season ->
+            mediaRepository.getSeasonEpisodes(mediaId, season).associateBy { it.episodeNumber }
+        }
+        return identities.mapNotNull { identity ->
+            bySeason[identity.tmdbSeason]?.get(identity.tmdbEpisode)?.copy(
+                seasonNumber = identity.displaySeason,
+                episodeNumber = identity.displayEpisode,
+                identity = identity,
+            )
+        }
+    }
+
+    /** A YouTube collection video: its only source is YouTube, so no title-matched extras are fetched. */
+    private fun isYouTubeVideo(): Boolean =
+        mediaRepository.addonNativeCard(currentMediaType, currentMediaId)?.addonNativeAddonId == YouTubeCollection.ADDON_ID
+
     private suspend fun fetchMediaMetadata(mediaType: MediaType, mediaId: Int) {
+        val season = currentSeason
+        val episode = currentEpisode
+        val displaySeason = currentDisplaySeason ?: season
+        val sessionStart = playbackSessionStartTime
+        // A native addon item (negative id) has no TMDB entry: its own card carries the artwork
+        // that watch history and Continue Watching show.
+        if (mediaId < 0) {
+            val card = mediaRepository.addonNativeCard(mediaType, mediaId) ?: mediaRepository.getCachedItem(mediaType, mediaId) ?: return
+            if (playbackSessionStartTime != sessionStart || currentMediaId != mediaId) return
+            currentPoster = card.image.takeIf { it.isNotBlank() } ?: currentPoster
+            currentBackdrop = card.backdrop?.takeIf { it.isNotBlank() } ?: currentBackdrop ?: currentPoster
+            if (currentTitle.isBlank()) currentTitle = card.title
+            _uiState.value = _uiState.value.copy(
+                posterUrl = currentPoster ?: _uiState.value.posterUrl,
+                backdropUrl = currentBackdrop ?: _uiState.value.backdropUrl
+            )
+            return
+        }
         try {
             val details = if (mediaType == MediaType.TV) {
                 tmdbApi.getTvDetails(mediaId, Constants.TMDB_API_KEY)
@@ -1249,6 +1976,8 @@ class PlayerViewModel @Inject constructor(
             val posterUrl: String?
             var overview: String? = null
             var releaseYear: String? = null
+            var fetchedSeasonEpisodes = emptyList<com.arflix.tv.data.model.Episode>()
+            var runtimeMinutes = 0
 
             if (mediaType == MediaType.TV) {
                 val tvDetails = details as com.arflix.tv.data.api.TmdbTvDetails
@@ -1260,15 +1989,34 @@ class PlayerViewModel @Inject constructor(
                 releaseYear = tvDetails.firstAirDate?.take(4)
 
                 // Keep episode title aligned with saved progress rows for TV playback sessions.
-                val season = currentSeason
-                val episode = currentEpisode
                 if (season != null && episode != null) {
-                    val episodeDetails = runCatching {
-                        val seasonDetails = tmdbApi.getTvSeason(mediaId, season, Constants.TMDB_API_KEY)
-                        seasonDetails.episodes.firstOrNull { it.episodeNumber == episode }
-                    }.getOrNull()
-                    currentEpisodeTitle = episodeDetails?.name?.takeIf { it.isNotBlank() }
-                    overview = episodeDetails?.overview?.takeIf { it.isNotBlank() } ?: overview
+                    fetchedSeasonEpisodes = try {
+                        loadPlayerSeasonEpisodes(mediaId, displaySeason ?: season)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+                    val matchingEpisode = currentPlayerEpisode(fetchedSeasonEpisodes, season, episode)
+                    runtimeMinutes = matchingEpisode?.runtime ?: 0
+                    var episodeTitle = matchingEpisode?.name?.takeIf { it.isNotBlank() }
+                    var episodeOverview = matchingEpisode?.overview?.takeIf { it.isNotBlank() }
+                    if (episodeOverview == null || episodeTitle == null) {
+                        val episodeDetails = try {
+                            tmdbApi.getTvSeason(mediaId, season, Constants.TMDB_API_KEY)
+                                .episodes.firstOrNull { it.episodeNumber == episode }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            null
+                        }
+                        episodeTitle = episodeTitle ?: episodeDetails?.name?.takeIf { it.isNotBlank() }
+                        episodeOverview = episodeOverview ?: episodeDetails?.overview?.takeIf { it.isNotBlank() }
+                        if (runtimeMinutes <= 0) runtimeMinutes = episodeDetails?.runtime ?: 0
+                    }
+                    if (playbackSessionStartTime != sessionStart) return
+                    currentEpisodeTitle = episodeTitle
+                    overview = episodeOverview ?: overview
                 }
             } else {
                 val movieDetails = details as com.arflix.tv.data.api.TmdbMovieDetails
@@ -1278,7 +2026,13 @@ class PlayerViewModel @Inject constructor(
                 currentOriginalLanguage = movieDetails.originalLanguage ?: currentOriginalLanguage
                 overview = movieDetails.overview
                 releaseYear = movieDetails.releaseDate?.take(4)
+                runtimeMinutes = movieDetails.runtime ?: 0
             }
+
+            // A late response must never replace the next video's episode metadata.
+            if (playbackSessionStartTime != sessionStart || currentMediaType != mediaType ||
+                currentMediaId != mediaId || currentSeason != season || currentEpisode != episode
+            ) return
 
             // Store info for watch history
             currentTitle = title
@@ -1291,21 +2045,34 @@ class PlayerViewModel @Inject constructor(
                 backdropUrl = backdropUrl,
                 logoUrl = logoUrl ?: _uiState.value.logoUrl,
                 posterUrl = posterUrl,
+                mediaType = mediaType,
+                seasonNumber = currentSeason,
+                episodeNumber = currentEpisode,
                 episodeTitle = currentEpisodeTitle,
                 overview = overview,
                 releaseYear = releaseYear,
+                expectedDurationMs = runtimeMinutes.coerceAtLeast(0) * 60_000L,
+                seasonEpisodes = if (mediaType == MediaType.TV && fetchedSeasonEpisodes.isNotEmpty()) fetchedSeasonEpisodes else _uiState.value.seasonEpisodes,
                 preferredAudioLanguage = resolvePreferredAudioLanguage()
             )
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
 
             // Failed to fetch metadata
+        } finally {
+            if (playbackSessionStartTime == sessionStart && currentMediaType == mediaType &&
+                currentMediaId == mediaId && currentSeason == season && currentEpisode == episode
+            ) {
+                _uiState.value = _uiState.value.copy(isLoadingPlaybackMetadata = false)
+            }
         }
     }
 
     private data class ExternalIds(val imdbId: String?, val tvdbId: Int?)
 
     private suspend fun resolveExternalIds(mediaType: MediaType, mediaId: Int): ExternalIds {
+        // A native addon item's own id stands in for the IMDb id: streams are requested by it.
+        if (mediaId < 0) return ExternalIds(mediaRepository.getCachedImdbId(mediaType, mediaId), null)
         return try {
             val ids = when (mediaType) {
                 MediaType.MOVIE -> tmdbApi.getMovieExternalIds(mediaId, Constants.TMDB_API_KEY)
@@ -1327,8 +2094,19 @@ class PlayerViewModel @Inject constructor(
             skipIntervals = intervals
             // Force a recompute on the next position tick.
             lastActiveSkipType = null
-            _uiState.value = _uiState.value.copy(activeSkipInterval = null, skipIntervalDismissed = false)
+            _uiState.value = _uiState.value.copy(activeSkipInterval = null, skipIntervals = intervals, skipIntervalDismissed = false)
         }
+    }
+
+    /**
+     * Forgets the previous file's playback clock. The auto-match scan reads it to decide how much
+     * continuous playback has elapsed, so carrying it into a new source — or worse, a new title —
+     * makes every wait expire instantly. Repopulated by the next position tick, within a second of
+     * playback starting.
+     */
+    private fun resetPlaybackClock() {
+        lastKnownPositionMs = 0L
+        playerTextTracksResolved = false
     }
 
     fun onPlaybackPosition(positionMs: Long) {
@@ -1381,6 +2159,9 @@ class PlayerViewModel @Inject constructor(
     // Returns subs filtered to the preferred language(s) when the setting is enabled.
     // Tries primary language first; if nothing matches, tries secondary; falls back to full list.
     private suspend fun filterSubsByPreferredLanguage(subs: List<Subtitle>): List<Subtitle> {
+        subs.forEach { subtitle ->
+            subtitleMenuCandidates["${subtitle.provider}|${subtitle.id.ifBlank { subtitle.url }}"] = subtitle
+        }
         val prefs = runCatching { context.settingsDataStore.data.first() }.getOrNull() ?: return subs
         val enabled = prefs[filterSubtitlesByLanguageKey()] ?: true
         if (!enabled) return subs
@@ -1414,7 +2195,7 @@ class PlayerViewModel @Inject constructor(
         // and represent tracks the device actually has, not fetched addons.
         val combined = subs.filter { sub ->
             sub.isEmbedded || targetLanguages.any { lang -> matchesLang(sub, lang) }
-        }.distinctBy { it.id }
+        }.distinctBy { it.provider to it.id }
         return combined.ifEmpty { subs }
     }
 
@@ -1442,7 +2223,8 @@ class PlayerViewModel @Inject constructor(
             // a fallback-language track (e.g. English selected while waiting for Hebrew), let
             // applyPreferredSubtitle decide whether to upgrade to the preferred language.
             if (currentSel?.isEmbedded == true &&
-                normalizeLanguage(currentSel.lang) == normalizeLanguage(preferred)) {
+                normalizeLanguage(currentSel.lang) == normalizeLanguage(preferred) &&
+                !forcedModeWantsAnotherLook(currentSel, preferred)) {
                 return@launch
             }
             val subs = _uiState.value.subtitles
@@ -1460,6 +2242,7 @@ class PlayerViewModel @Inject constructor(
     }
 
     private fun applyPreferredSubtitle(preference: String, subtitles: List<Subtitle>, fallbackLanguage: String?) {
+        if (userLockedSubtitleKey != null) return
         val normalizedPref = normalizeLanguage(preference)
         if (normalizedPref.isNotBlank() && !isSubtitleDisabledPreference(preference)) {
             setTargetSubtitleLang(normalizedPref)
@@ -1469,15 +2252,24 @@ class PlayerViewModel @Inject constructor(
         // sync, so it beats any auto logic — it overrides an auto-selected/auto-matched subtitle and
         // cancels a running "Find best match" scan. It never overrides a real user pick. This also
         // handles embedded tracks that resolve *after* the auto-match already started.
-        if (!userPickedSubtitle && normalizedPref.isNotBlank() && !isSubtitleDisabledPreference(preference)) {
+        // Forced mode only takes over when the audio language allows it (forcedRuleApplies). If it
+        // does not — a dubbed film — every line below must behave exactly as it does today, the
+        // shortcut included, so the whole decision is made once here and reused.
+        val forcedActive = _uiState.value.useForcedSubtitles && normalizedPref.isNotBlank() &&
+            !isSubtitleDisabledPreference(preference) && forcedRuleApplies(normalizedPref)
+        // This shortcut deliberately skips forced tracks, which are exactly the ones forced mode is
+        // after — selectForcedSubtitle does the picking instead.
+        if (!forcedActive && !userPickedSubtitle && normalizedPref.isNotBlank() && !isSubtitleDisabledPreference(preference)) {
             val embeddedPref = subtitles.firstOrNull {
                 it.isEmbedded && !it.isBitmap && !it.isForced &&
                     !it.label.contains("forced", ignoreCase = true) &&
                     (normalizeLanguage(it.lang) == normalizedPref || normalizeLanguage(it.label) == normalizedPref)
             }
             if (embeddedPref != null && _uiState.value.selectedSubtitle?.id != embeddedPref.id) {
-                cancelFindBestMatch()
-                hasManualSubtitleSelection = true
+                cancelFindBestMatch("preferred-language embedded track appeared")
+                // Forced mode must reconsider this automatic pick when the audio changes.
+                // Actual menu selections still set the manual-selection guard themselves.
+                hasManualSubtitleSelection = !_uiState.value.useForcedSubtitles
                 translationManager.isEnabled = false
                 aiSourceSubtitle = null
                 _uiState.value = _uiState.value.copy(
@@ -1500,6 +2292,11 @@ class PlayerViewModel @Inject constructor(
         val normalizedFallback = fallbackLanguage
             ?.let { normalizeLanguage(it) }
             ?.takeIf { it.isNotBlank() && it != normalizedPref }
+
+        if (forcedActive) {
+            selectForcedSubtitle(subtitles, normalizedPref, normalizedFallback)
+            return
+        }
 
         val streamSrc = _uiState.value.selectedStream?.source.orEmpty()
 
@@ -1644,13 +2441,86 @@ class PlayerViewModel @Inject constructor(
             }
             // "Find best match first" auto-runs the scan even without AI auto-select: it verifies
             // sync on top of the classic release-name pick. AI translation is deliberately NOT
-            // auto-activated here — that's what the auto-select toggle controls — and the raw
-            // reference cues stay hidden while scanning, so on no-match the classic pick above
-            // simply returns to screen.
+            // auto-activated here — that's what the auto-select toggle controls. The scan itself is
+            // AI-independent: it shows an optimistic pick immediately, and where no AI translation
+            // is running it then needs the in-player reference, which takes the text track and
+            // hides that pick for the rest of the scan.
             if (aiFindBestMatchFirst && !autoMatchAttempted && !hasManualSubtitleSelection) {
                 autoMatchAttempted = true
                 findBestSubtitleMatch()
             }
+        }
+    }
+
+    /**
+     * Whether the forced rule may run for this film, and which track it picks.
+     * The rule itself lives in [ForcedSubtitles] — pure, and unit-tested there.
+     */
+    /**
+     * Whether forced mode must have the selection decided again.
+     *
+     * Both gates below ([scheduleSubtitleSelection] and the reapply check in
+     * [updatePlayerTextTracks]) judge an existing pick by its LANGUAGE, which in forced mode tells
+     * them nothing: the plain English track and the English forced track are equally English, so
+     * they concluded "already fine" and the rule never ran a second time. On a file with ten
+     * English tracks that made the whole setting look dead.
+     */
+    private fun forcedModeWantsAnotherLook(current: Subtitle?, preference: String): Boolean {
+        if (!_uiState.value.useForcedSubtitles) return false
+        val normalizedPref = normalizeLanguage(preference)
+        if (normalizedPref.isBlank() || isSubtitleDisabledPreference(preference)) return false
+        if (!forcedRuleApplies(normalizedPref)) return false
+        return ForcedSubtitles.needsAnotherLook(current, ruleActive = true)
+    }
+
+    private fun forcedRuleApplies(normalizedPref: String): Boolean =
+        ForcedSubtitles.ruleApplies(currentAudioLanguage, normalizedPref, ::normalizeLanguage)
+
+    /**
+     * Applies the forced pick, including the deliberate "nothing at all" when no forced track
+     * exists: no dropping back to a full track, and no AI translation either — showing the whole
+     * dialogue is the very thing this setting exists to prevent.
+     */
+    private fun selectForcedSubtitle(
+        subtitles: List<Subtitle>,
+        normalizedPref: String,
+        normalizedFallback: String?
+    ) {
+        val match = ForcedSubtitles.pick(subtitles, normalizedPref, normalizedFallback, ::normalizeLanguage)
+        if (_uiState.value.selectedSubtitle?.id == match?.id) return
+
+        cancelFindBestMatch("forced-subtitles mode picked its own track")
+        translationManager.isEnabled = false
+        aiSourceSubtitle = null
+        _uiState.value = _uiState.value.copy(
+            selectedSubtitle = match,
+            isAiTranslating = false,
+            isAiAvailable = false,
+            aiTargetLanguageName = "",
+            subtitleSelectionNonce = _uiState.value.subtitleSelectionNonce + 1
+        )
+        Log.i("SubMatch", "forced mode: target=$normalizedPref picked=\"${match?.label ?: "none"}\"")
+    }
+
+    /**
+     * The language currently being spoken, reported by the player.
+     *
+     * It arrives from [PlayerScreen] because that is the only place that sees the ExoPlayer track
+     * list. It routinely lands AFTER the first subtitle pick and changes again when the viewer
+     * switches audio track, so both cases re-run the selection instead of leaving the forced rule
+     * to decide on a blank.
+     */
+    fun updatePlayerAudioLanguage(language: String?) {
+        val normalized = language?.trim().orEmpty()
+        if (normalized.equals(currentAudioLanguage.orEmpty(), ignoreCase = true)) return
+        currentAudioLanguage = normalized
+        if (!_uiState.value.useForcedSubtitles || hasManualSubtitleSelection) return
+        viewModelScope.launch {
+            applyPreferredSubtitle(
+                getDefaultSubtitle(),
+                _uiState.value.subtitles,
+                currentOriginalLanguage
+            )
         }
     }
 
@@ -1671,32 +2541,40 @@ class PlayerViewModel @Inject constructor(
         return !(externalIsPref && !currentIsPref)
     }
 
-    private fun findAiSourceSubtitle(subtitles: List<Subtitle>): Subtitle? {
-        // Some files label forced tracks "SUBFORCED" without setting SELECTION_FLAG_FORCED
-        fun Subtitle.isEffectivelyForced() = isForced || label.contains("forced", ignoreCase = true)
-        // Bitmap subtitles (PGS/VOBSUB) are images with no text — they can't be translated,
-        // so they must never be chosen as the AI source (would render a blank screen).
-        fun Subtitle.isUsableSource() = !isEffectivelyForced() && !isBitmap && id !in untranslatableSourceIds
-        fun List<Subtitle>.bestEmbedded(): Subtitle? {
-            val embedded = filter { it.isEmbedded }
-            // Prefer plain > SDH/CC; never use forced-only or image-based tracks as AI source
-            return embedded.firstOrNull { it.isUsableSource() && !it.label.contains("SDH", ignoreCase = true) && !it.label.contains("CC", ignoreCase = true) }
-                ?: embedded.firstOrNull { it.isUsableSource() }
-        }
-
-        // AI translation only ever translates a BUILT-IN (embedded) track — English first, else any
-        // other embedded foreign-language track. It must NEVER use an EXTERNAL addon sub as source
-        // (unverified timing, and when the user has target-language addon subs the app should
-        // pick/verify one of those or use the hearing scan — not AI-translate an English addon).
-        // So "no embedded source ⇒ no AI translation": the scan then falls to hearing (if a Gemini
-        // key + AI feature are on), then to the top release-name-scored addon sub.
-        return subtitles.filter { normalizeLanguage(it.lang) == "en" }.bestEmbedded()
-            ?: subtitles.filter { it.lang.isNotBlank() }.bestEmbedded()
-            ?: subtitles.bestEmbedded()
+    /**
+     * Keeps the subtitle menu's AI entry in sync with what the file can actually support: the AI
+     * master toggle on, a preferred language set, and an embedded source track to translate from.
+     * Deliberately independent of the selection flow — see the call site in [updatePlayerTextTracks].
+     * Only ever turns the entry ON; the paths that legitimately retire it (a preferred-language
+     * embedded track winning, an untranslatable source) clear it themselves.
+     */
+    private suspend fun refreshAiAvailability(subtitles: List<Subtitle>) {
+        val preferred = getDefaultSubtitle()
+        val normalizedPref = normalizeLanguage(preferred)
+        if (!aiSubtitleEnabled || normalizedPref.isBlank() || isSubtitleDisabledPreference(preferred)) return
+        if (_uiState.value.isAiAvailable) return
+        val source = findAiSourceSubtitle(subtitles) ?: return
+        aiSourceSubtitle = aiSourceSubtitle ?: source
+        val targetLangName = languageCodeToName(normalizedPref)
+        translationManager.targetLanguage = targetLangName
+        Log.i("SubMatch", "AI available: source=\"${source.label}\" target=$targetLangName")
+        _uiState.value = _uiState.value.copy(
+            isAiAvailable = true,
+            aiTargetLanguageName = targetLangName
+        )
     }
+
+    private fun findAiSourceSubtitle(subtitles: List<Subtitle>): Subtitle? =
+        SubtitleSelectionPolicy.aiSource(
+            subtitles,
+            targetSubtitleLangCode.ifBlank { _uiState.value.aiTargetLanguageName },
+            untranslatableSourceKeys,
+            ::normalizeLanguage
+        )
 
     private fun languageCodeToName(code: String): String {
         return when (code.lowercase().trim()) {
+            "ms", "msa", "may", "malay", "bahasa melayu" -> "Malay"
             "he", "hebrew", "iw" -> "Hebrew"
             "ar", "arabic" -> "Arabic"
             "fa", "persian", "farsi" -> "Persian"
@@ -1807,7 +2685,7 @@ class PlayerViewModel @Inject constructor(
         if (text.contains("x264") || text.contains("h264")) score += 20
         if (stream.behaviorHints?.cached == true || text.contains(" rd+")) score += 500
         if (stream.behaviorHints?.notWebReady == true) score -= 150
-        if (!stream.url.isNullOrBlank() && stream.url.startsWith("http", ignoreCase = true)) score += 100
+        if (isDirectStreamUrl(stream.url)) score += 100
         if (stream.url?.startsWith("magnet:", ignoreCase = true) == true) score -= 800
         score += streamRepository.getAddonHealthBias(stream.addonId)
 
@@ -1822,9 +2700,9 @@ class PlayerViewModel @Inject constructor(
         } else {
             stream.addonId.ifBlank { stream.addonName }
         }
-        val directIndex = currentAddonOrderedIds.indexOfFirst { orderedId ->
-            orderedId == stream.addonId || orderedId == tabId
-        }
+        val tabIndex = currentAddonOrderedIds.indexOf(tabId)
+        if (tabIndex >= 0) return tabIndex
+        val directIndex = currentAddonOrderedIds.indexOf(stream.addonId)
         if (directIndex >= 0) return directIndex
         val fuzzyIndex = currentAddonOrderedIds.indexOfFirst { orderedId ->
             tabId.contains(orderedId) || orderedId.contains(tabId)
@@ -1832,7 +2710,7 @@ class PlayerViewModel @Inject constructor(
         return if (fuzzyIndex >= 0) fuzzyIndex else Int.MAX_VALUE
     }
 
-    fun onPlaybackStarted(startupMs: Long, startupRetries: Int, autoFailovers: Int) {
+    fun onPlaybackStarted(startupMs: Long, startupRetries: Int, autoFailovers: Int, networkTiming: String? = null) {
         playbackErrorReportJob?.cancel()
         val currentState = _uiState.value
         if (
@@ -1853,8 +2731,10 @@ class PlayerViewModel @Inject constructor(
         val addonId = _uiState.value.selectedStream?.addonId?.trim()
             .takeUnless { it.isNullOrBlank() }
             ?: currentPreferredAddonId.orEmpty()
-        if (addonId.isNotBlank()) {
-            streamRepository.noteAddonPlaybackStarted(addonId, startupMs)
+        confirmedStartupMs = startupMs
+        networkTiming?.let {
+            Log.i(TAG, "Playback startup network $it")
+            AppLogger.breadcrumb(tag = "PlaybackTiming", message = it, severity = "info")
         }
         Log.i(
             TAG,
@@ -1868,16 +2748,6 @@ class PlayerViewModel @Inject constructor(
             severity = "info"
         )
         viewModelScope.launch {
-            _uiState.value.selectedStream?.let { stream ->
-                streamRepository.notePlaybackHostSuccess(stream)
-                streamRepository.saveLastGoodPlaybackPreference(
-                    mediaType = currentMediaType,
-                    tmdbId = currentMediaId,
-                    season = currentSeason,
-                    episode = currentEpisode,
-                    stream = stream
-                )
-            }
             playbackTelemetryRepository.recordStartup(
                 startupMs = startupMs,
                 retries = startupRetries,
@@ -1886,15 +2756,44 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    fun onSelectedStreamPlaybackFailure() {
+    /**
+     * The started source is the real video, not an addon's placeholder clip (the player checks
+     * that once its length is known, which can be after the first frame). Only now does it count
+     * as a working source for its addon and host.
+     */
+    fun onSelectedSourceConfirmed() {
+        val stream = _uiState.value.selectedStream ?: return
+        val addonId = stream.addonId.trim().ifBlank { currentPreferredAddonId.orEmpty() }
+        if (addonId.isNotBlank()) {
+            streamRepository.noteAddonPlaybackStarted(addonId, confirmedStartupMs)
+        }
+        val listed = listedSelectedStream
+        viewModelScope.launch {
+            streamRepository.notePlaybackHostSuccess(stream)
+            listed?.takeIf { it.url != stream.url }?.let(streamRepository::notePlaybackHostSuccess)
+            streamRepository.saveLastGoodPlaybackPreference(
+                mediaType = currentMediaType,
+                tmdbId = currentMediaId,
+                season = currentSeason,
+                episode = currentEpisode,
+                stream = stream
+            )
+        }
+    }
+
+    fun onSelectedStreamPlaybackFailure(reportError: Boolean = true) {
         val addonId = _uiState.value.selectedStream?.addonId?.trim()
             .takeUnless { it.isNullOrBlank() }
             ?: currentPreferredAddonId.orEmpty()
         if (addonId.isNotBlank()) {
             streamRepository.noteAddonPlaybackFailure(addonId)
         }
-        streamRepository.notePlaybackHostFailure(_uiState.value.selectedStream, "exo_playback_failure")
-        AppLogger.recordException(
+        val selected = _uiState.value.selectedStream
+        streamRepository.notePlaybackHostFailure(selected, "exo_playback_failure")
+        listedSelectedStream?.takeIf { it.url != selected?.url }?.let {
+            streamRepository.notePlaybackHostFailure(it, "exo_playback_failure_listed")
+        }
+        if (reportError) AppLogger.recordException(
             throwable = IllegalStateException("Selected stream playback failed"),
             context = playbackDiagnosticContext(
                 phase = "selected_stream_playback_failure",
@@ -1921,6 +2820,13 @@ class PlayerViewModel @Inject constructor(
             playbackTelemetryRepository.recordLongRebuffer()
         }
     }
+
+    private suspend fun resolveSourceBadgeLanguage(): String? = runCatching {
+        context.settingsDataStore.data.first()[defaultAudioLanguageKey()]
+    }.getOrNull()
+        ?.trim()
+        ?.takeUnless { it.isBlank() || it.startsWith("Auto", ignoreCase = true) || it.equals("None", ignoreCase = true) }
+        ?.let(::normalizeLanguageCode)
 
     private suspend fun resolvePreferredAudioLanguage(): String {
         val setting = runCatching {
@@ -1981,8 +2887,27 @@ class PlayerViewModel @Inject constructor(
         return out
     }
 
+    fun isEligibleForAutomaticPlayback(stream: StreamSource): Boolean =
+        currentIsLiveStreamPlayback ||
+            com.arflix.tv.ui.screens.details.matchesAutoplayLimits(stream, autoPlayMinimumQuality, autoPlayLimits)
+
+    fun acknowledgeAutoplayNoMatch() {
+        if (_uiState.value.error == PlayerMessage.Res(R.string.stream_no_sources_match)) {
+            _uiState.value = _uiState.value.copy(error = null)
+        }
+    }
+
     private fun autoplaySelectBest(streams: List<StreamSource>, preferredLanguage: String) {
-        val healthyStreams = sortStreamsByQualityAndSize(streams, preferredLanguage)
+        if (!canStartAutoplay()) return
+        val healthyStreams = sortStreamsByQualityAndSize(
+            eligiblePlayerAutoplayStreams(streams, autoPlayMinimumQuality, autoPlayLimits), preferredLanguage
+        )
+        if (healthyStreams.isEmpty()) return
+        // Every autoplay entry point lands here. The source this title was last really watched
+        // from beats the ranking, and while the gate holds nothing else may start.
+        recentSourceGate.onStreams(streams)
+        val recentCandidate = recentSourceGate.recentCandidate(healthyStreams)
+        if (recentCandidate == null && recentSourceGate.isHolding(recentSourceClock())) return
         val hasExplicitPreferred =
             !currentPreferredBingeGroup.isNullOrBlank() ||
                 !currentPreferredAddonId.isNullOrBlank() ||
@@ -2005,7 +2930,7 @@ class PlayerViewModel @Inject constructor(
         }
 
         val stabilitySelected = pickAutoplayTopStream(healthyStreams, preferredLanguage)
-        val selected = if (hasExplicitPreferred) {
+        val selected = recentCandidate ?: if (hasExplicitPreferred) {
             preferredFromBingeGroup ?: preferredNavigationCandidate ?: stabilitySelected ?: healthyStreams.first()
         } else {
             stabilitySelected ?: healthyStreams.first()
@@ -2013,6 +2938,7 @@ class PlayerViewModel @Inject constructor(
         playbackDiag(
             "autoplaySelected selected=${streamDiag(selected)} " +
                 "preferredNavigation=${streamDiag(preferredNavigationCandidate)} " +
+                "usedRecent=${recentCandidate != null} " +
                 "usedPreferred=${hasExplicitPreferred && (selected === preferredFromBingeGroup || selected === preferredNavigationCandidate)}"
         )
         selectStream(selected)
@@ -2070,9 +2996,10 @@ class PlayerViewModel @Inject constructor(
     ): List<StreamSource> {
         return streams.sortedWith(
             compareBy<StreamSource> { streamRepository.getPlaybackHostHealthPenalty(it) }
-                .thenBy { if (it.behaviorHints?.notWebReady == true) 1 else 0 }
-                .thenByDescending { qualityScore(it.quality) }
+                .thenBy { addonOrderIndex(it) }
+                .thenByDescending { qualityScoreForAutoPlay(it) }
                 .thenByDescending { parseSize(it.size) }
+                .thenBy { if (it.behaviorHints?.notWebReady == true) 1 else 0 }
                 .thenByDescending { playbackPriorityScore(it) }
                 .thenByDescending { if (it.behaviorHints?.cached == true) 1 else 0 }
                 .thenByDescending { streamLanguageScore(it, preferredLanguage) }
@@ -2084,7 +3011,9 @@ class PlayerViewModel @Inject constructor(
      *  their streams keep the order the addon returned them in instead of being re-sorted. */
     private fun keepsOwnStreamOrder(stream: StreamSource): Boolean =
         stream.addonName.contains("aiostream", ignoreCase = true) ||
-            stream.addonId.contains("aiostream", ignoreCase = true)
+            stream.addonId.contains("aiostream", ignoreCase = true) ||
+            // YouTube's relevance order (see StreamSelector.keepsOwnStreamOrder).
+            stream.addonId == YouTubeCollection.ADDON_ID
 
     private fun sortStreamsByQualityAndSize(
         streams: List<StreamSource>,
@@ -2142,7 +3071,9 @@ class PlayerViewModel @Inject constructor(
 
     private fun prewarmTopStreams(streams: List<StreamSource>, preferredLanguage: String) {
         if (streams.isEmpty()) return
-        val topStreams = sortStreamsForAutoplay(streams, preferredLanguage).take(3)
+        val topStreams = sortStreamsForAutoplay(
+            eligiblePlayerAutoplayStreams(streams, autoPlayMinimumQuality, autoPlayLimits), preferredLanguage
+        ).take(3)
         val prewarmKey = topStreams.joinToString("|") { stream ->
             "${stream.addonId}:${stream.source}:${stream.url?.substringBefore('|')?.substringBefore('#')}"
         }
@@ -2247,98 +3178,7 @@ class PlayerViewModel @Inject constructor(
      * Normalize language codes to a standard format for matching
      * Maps: "English" -> "en", "eng" -> "en", "Spanish" -> "es", etc.
      */
-    private fun normalizeLanguage(lang: String): String {
-        val lowerLang = lang.lowercase().trim()
-        return when {
-            // Full names
-            lowerLang == "english" || lowerLang.startsWith("english") -> "en"
-            lowerLang == "spanish" || lowerLang.startsWith("spanish") || lowerLang == "espanol" -> "es"
-            lowerLang == "french" || lowerLang.startsWith("french") || lowerLang == "francais" -> "fr"
-            lowerLang == "german" || lowerLang.startsWith("german") || lowerLang == "deutsch" -> "de"
-            lowerLang == "italian" || lowerLang.startsWith("italian") -> "it"
-            lowerLang == "portuguese" -> "pt"
-            lowerLang == "portuguese (brazil)" ||
-                lowerLang == "portuguese-brazil" ||
-                lowerLang == "brazilian portuguese" ||
-                lowerLang == "brazil portuguese" ||
-                lowerLang == "pt-br" ||
-                lowerLang == "ptbr" -> "pt-br"
-            lowerLang.startsWith("portuguese") -> "pt"
-            lowerLang == "dutch" || lowerLang.startsWith("dutch") -> "nl"
-            lowerLang == "russian" || lowerLang.startsWith("russian") -> "ru"
-            lowerLang == "chinese" || lowerLang.startsWith("chinese") -> "zh"
-            lowerLang == "japanese" || lowerLang.startsWith("japanese") || lowerLang == "jp" || lowerLang == "jap" -> "ja"
-            lowerLang == "korean" || lowerLang.startsWith("korean") -> "ko"
-            lowerLang == "arabic" || lowerLang.startsWith("arabic") -> "ar"
-            lowerLang == "hindi" || lowerLang.startsWith("hindi") -> "hi"
-            lowerLang == "turkish" || lowerLang.startsWith("turkish") -> "tr"
-            lowerLang == "polish" || lowerLang.startsWith("polish") -> "pl"
-            lowerLang == "swedish" || lowerLang.startsWith("swedish") -> "sv"
-            lowerLang == "norwegian" || lowerLang.startsWith("norwegian") -> "no"
-            lowerLang == "danish" || lowerLang.startsWith("danish") -> "da"
-            lowerLang == "finnish" || lowerLang.startsWith("finnish") -> "fi"
-            lowerLang == "greek" || lowerLang.startsWith("greek") -> "el"
-            lowerLang == "czech" || lowerLang.startsWith("czech") -> "cs"
-            lowerLang == "hungarian" || lowerLang.startsWith("hungarian") -> "hu"
-            lowerLang == "romanian" || lowerLang.startsWith("romanian") -> "ro"
-            lowerLang == "thai" || lowerLang.startsWith("thai") -> "th"
-            lowerLang == "vietnamese" || lowerLang.startsWith("vietnamese") -> "vi"
-            lowerLang == "indonesian" || lowerLang.startsWith("indonesian") -> "id"
-            lowerLang == "hebrew" || lowerLang.startsWith("hebrew") -> "he"
-            lowerLang == "persian" || lowerLang.startsWith("persian") || lowerLang == "farsi" -> "fa"
-            lowerLang == "ukrainian" || lowerLang.startsWith("ukrainian") -> "uk"
-            lowerLang == "bengali" || lowerLang.startsWith("bengali") -> "bn"
-            lowerLang == "bulgarian" || lowerLang.startsWith("bulgarian") -> "bg"
-            lowerLang == "croatian" || lowerLang.startsWith("croatian") -> "hr"
-            lowerLang == "serbian" || lowerLang.startsWith("serbian") -> "sr"
-            lowerLang == "slovak" || lowerLang.startsWith("slovak") -> "sk"
-            lowerLang == "slovenian" || lowerLang.startsWith("slovenian") -> "sl"
-            lowerLang == "lithuanian" || lowerLang.startsWith("lithuanian") -> "lt"
-            lowerLang == "estonian" || lowerLang.startsWith("estonian") -> "et"
-            // ISO 639-1 codes (2 letter)
-            lowerLang.length == 2 -> lowerLang
-            // ISO 639-2 codes (3 letter)
-            lowerLang == "eng" -> "en"
-            lowerLang == "spa" -> "es"
-            lowerLang == "fra" || lowerLang == "fre" -> "fr"
-            lowerLang == "deu" || lowerLang == "ger" -> "de"
-            lowerLang == "ita" -> "it"
-            lowerLang == "por" -> "pt"
-            lowerLang == "pob" || lowerLang == "pobr" -> "pt-br"
-            lowerLang == "nld" || lowerLang == "dut" -> "nl"
-            lowerLang == "rus" -> "ru"
-            lowerLang == "zho" || lowerLang == "chi" -> "zh"
-            lowerLang == "jpn" -> "ja"
-            lowerLang == "kor" -> "ko"
-            lowerLang == "ara" -> "ar"
-            lowerLang == "hin" -> "hi"
-            lowerLang == "tur" -> "tr"
-            lowerLang == "pol" -> "pl"
-            lowerLang == "swe" -> "sv"
-            lowerLang == "nor" -> "no"
-            lowerLang == "dan" -> "da"
-            lowerLang == "fin" -> "fi"
-            lowerLang == "ell" || lowerLang == "gre" -> "el"
-            lowerLang == "ces" || lowerLang == "cze" -> "cs"
-            lowerLang == "hun" -> "hu"
-            lowerLang == "ron" || lowerLang == "rum" -> "ro"
-            lowerLang == "tha" -> "th"
-            lowerLang == "vie" -> "vi"
-            lowerLang == "ind" -> "id"
-            lowerLang == "heb" || lowerLang == "iw" -> "he"
-            lowerLang == "fas" || lowerLang == "per" -> "fa"
-            lowerLang == "ukr" -> "uk"
-            lowerLang == "ben" -> "bn"
-            lowerLang == "bul" -> "bg"
-            lowerLang == "hrv" -> "hr"
-            lowerLang == "srp" -> "sr"
-            lowerLang == "slk" || lowerLang == "slo" -> "sk"
-            lowerLang == "slv" -> "sl"
-            lowerLang == "lit" -> "lt"
-            lowerLang == "est" -> "et"
-            else -> lowerLang
-        }
-    }
+    private fun normalizeLanguage(lang: String): String = normalizeLanguageCode(lang)
 
     // Track current stream index for auto-retry
     private var currentStreamIndex = 0
@@ -2351,8 +3191,11 @@ class PlayerViewModel @Inject constructor(
      * Select a stream for playback
      */
     fun selectStream(stream: StreamSource, resumePositionMs: Long? = null) {
+        subtitleMenuCandidates.entries.removeAll { it.value.isEmbedded }
         streamSelectionJob?.cancel()
         playbackErrorReportJob?.cancel()
+        listedSelectedStream = stream
+        iptvBusyOnProvidedPath = false
         streamSelectionJob = viewModelScope.launch {
             val selectionStartMs = System.currentTimeMillis()
             val requestedResumePosition = resumePositionMs?.coerceAtLeast(0L)
@@ -2363,7 +3206,7 @@ class PlayerViewModel @Inject constructor(
                 isLoading = true,
                 isLoadingStreams = false,
                 streamProgress = null,
-                streamLoadPhase = "Preparing stream",
+                streamLoadPhase = PlayerMessage.Res(R.string.player_phase_preparing_stream),
                 error = null,
                 isSetupError = false
             )
@@ -2393,7 +3236,7 @@ class PlayerViewModel @Inject constructor(
                     sourceSearchActive = false,
                     streamProgress = null,
                     streamLoadPhase = null,
-                    error = "Failed to resolve stream. Try another source."
+                    error = PlayerMessage.Res(R.string.player_error_resolve_stream_failed)
                 )
                 return@launch
             }
@@ -2419,9 +3262,9 @@ class PlayerViewModel @Inject constructor(
                     streamProgress = null,
                     streamLoadPhase = null,
                     error = if (isP2p) {
-                        "P2P stream requires TorrServer. Install TorrServer and set its URL in Settings > Addons."
+                        PlayerMessage.Res(R.string.player_error_p2p_needs_torrserver)
                     } else {
-                        "Failed to resolve stream. Try another source."
+                        PlayerMessage.Res(R.string.player_error_resolve_stream_failed)
                     }
                 )
                 return@launch
@@ -2470,13 +3313,29 @@ class PlayerViewModel @Inject constructor(
             // the stale list and map onto an arbitrary track of the new file, while the fresh
             // embedded tracks arriving later would be ignored because the selection "already
             // matches" (no nonce bump → the override is never applied to the new media item).
-            cancelFindBestMatch()
+            cancelFindBestMatch("selectStream (source switch)")
+            cancelSubtitleLocalization()
+            resetPlaybackClock()
             hasManualSubtitleSelection = false
             userPickedSubtitle = false
+            userLockedSubtitleKey = null
             autoMatchAttempted = false
             aiSourceSubtitle = null
-            untranslatableSourceIds.clear()
+            untranslatableSourceKeys.clear()
             translationManager.isEnabled = false
+
+            if (admitIptvVodStream(resolvedStream) is IptvAdmission.Full) {
+                _uiState.value = _uiState.value.copy(
+                    selectedStream = resolvedStream,
+                    selectedStreamUrl = null,
+                    isLoading = false,
+                    isLoadingStreams = false,
+                    streamProgress = null,
+                    streamLoadPhase = null,
+                    error = IPTV_ACCOUNT_BUSY_MESSAGE
+                )
+                return@launch
+            }
 
             // Direct URL - use immediately (ExoPlayer handles redirects)
             _uiState.value = _uiState.value.copy(
@@ -2495,6 +3354,9 @@ class PlayerViewModel @Inject constructor(
                 error = null,
                 isSetupError = false
             )
+            preparedStream = resolvedStream
+            prefetchSubtitleIndex(onlyForAutoScan = true)
+            audioSyncOnStream()
 
             // Re-run subtitle selection now that streamSrc is known — scores are now meaningful
             scheduleSubtitleSelection(currentOriginalLanguage)
@@ -2591,8 +3453,26 @@ class PlayerViewModel @Inject constructor(
         return DEBRID_CDN_DOMAINS.any { domain -> host == domain || host.endsWith(".$domain") }
     }
 
-    fun reportPlaybackError(message: String) {
+    /**
+     * Stable English identifier for telemetry. The displayed text is localized per user, so the
+     * message itself would make error reports unsortable across languages; the resource entry
+     * name ("player_fail_render_failed") never changes with the locale.
+     */
+    private fun telemetryKeyOf(message: PlayerMessage): String = when (message) {
+        is PlayerMessage.Raw -> message.text
+        is PlayerMessage.Res -> runCatching {
+            context.resources.getResourceEntryName(message.resourceId)
+        }.getOrDefault(message.resourceId.toString())
+    }
+
+    fun reportPlaybackError(message: PlayerMessage) {
         playbackErrorReportJob?.cancel()
+        val current = _uiState.value
+        val fallback = current.selectedStream?.youTubeFallbackUrl
+        if (current.selectedStream?.addonId == YouTubeCollection.ADDON_ID && !fallback.isNullOrBlank()) {
+            selectStream(current.selectedStream.copy(url = fallback, youTubeAudioUrl = null, youTubeFallbackUrl = null))
+            return
+        }
         val errorSelectionNonce = _uiState.value.streamSelectionNonce
         val errorSelectedUrl = _uiState.value.selectedStreamUrl
         playbackErrorReportJob = viewModelScope.launch {
@@ -2616,20 +3496,23 @@ class PlayerViewModel @Inject constructor(
                 throwable = IllegalStateException("Playback error displayed"),
                 context = playbackDiagnosticContext(
                     phase = "playback_error_displayed",
-                    extra = mapOf("playback_error_message" to message)
+                    extra = mapOf("playback_error_message" to telemetryKeyOf(message))
                 )
             )
         }
     }
 
     fun updatePlayerTextTracks(playerTextTracks: List<Subtitle>) {
+        // Being called at all means the player has reported its track list, so "no embedded track
+        // yet" can be told apart from "this file has none" — see the AI-interim wait.
+        playerTextTracksResolved = true
         viewModelScope.launch {
             val current = _uiState.value.subtitles
-            val trackBackedIds = playerTextTracks.map { it.id }.toSet()
+            val trackBackedIds = playerTextTracks.map { it.provider to it.id }.toSet()
 
             // Keep external subtitle entries that haven't been mapped to concrete track indices yet.
             val unresolvedExternal = current.filter { subtitle ->
-                !subtitle.isEmbedded && subtitle.url.isNotBlank() && subtitle.id !in trackBackedIds
+                !subtitle.isEmbedded && subtitle.url.isNotBlank() && (subtitle.provider to subtitle.id) !in trackBackedIds
             }
 
             // Preserve existing embedded subs when playerTextTracks has none — ExoPlayer fires
@@ -2644,8 +3527,7 @@ class PlayerViewModel @Inject constructor(
             val merged = (effectiveEmbedded + playerTextTracks.filter { !it.isEmbedded } + unresolvedExternal)
                 .distinctBy { subtitle ->
                     val normalizedId = subtitle.id.trim()
-                    if (normalizedId.isNotBlank()) normalizedId
-                    else "${subtitle.lang}|${subtitle.label}|${subtitle.url}"
+                    subtitle.provider to normalizedId.ifBlank { "${subtitle.lang}|${subtitle.label}|${subtitle.url}" }
                 }
 
             // Apply the same language filter used for fetched external subs so that
@@ -2655,39 +3537,35 @@ class PlayerViewModel @Inject constructor(
             // Always keep the currently selected subtitle visible even if it doesn't
             // match the preferred language filter so the active selection stays consistent.
             val selected = _uiState.value.selectedSubtitle
-            val finalList = if (selected != null && filtered.none { it.id == selected.id }) {
-                (filtered + selected).distinctBy { s ->
-                    s.id.trim().ifBlank { "${s.lang}|${s.label}|${s.url}" }
-                }
-            } else {
-                filtered
-            }
+            // Resolve against the fresh list BEFORE appending the old selection: otherwise its
+            // stale embedded id matches itself and prevents re-indexing after a MediaItem rebuild.
+            val resolvedSelected = SubtitleSelectionPolicy.resolveSelected(selected, filtered)
+            val finalList = if (resolvedSelected != null && filtered.none {
+                    it.provider == resolvedSelected.provider && it.id == resolvedSelected.id
+                }) filtered + resolvedSelected else filtered
 
-            val resolvedSelected = if (selected != null) {
-                if (!selected.isEmbedded && selected.url.startsWith("file:")) {
-                    // A matched subtitle localized to a cache file — keep it as-is. Remapping to
-                    // the addon-list entry (same id) would swap the URL back to the remote server
-                    // and re-trigger a MediaItem rebuild with the slow remote source.
-                    selected
-                } else {
-                    finalList.firstOrNull { it.id == selected.id }
-                        ?: finalList.firstOrNull { selected.url.isNotBlank() && it.url == selected.url }
-                        // After MediaItem rebuild groupIndex can change, making generated IDs stale.
-                        // Fall back to lang+label match for embedded subs so the nonce-based
-                        // LaunchedEffect fires with the freshly-indexed version.
-                        ?: if (selected.isEmbedded) finalList.firstOrNull {
-                            it.isEmbedded && it.lang == selected.lang && it.label == selected.label
-                        } else null
-                        ?: selected
-                }
-            } else {
-                null
-            }
-
+            // Only the same provider's re-indexed track may carry the user's lock forward.
+            if (selected != null && resolvedSelected != null &&
+                userLockedSubtitleKey == SubtitleSelectionPolicy.key(selected)
+            ) userLockedSubtitleKey = SubtitleSelectionPolicy.key(resolvedSelected)
+            if (selected != null && resolvedSelected != null && _uiState.value.isAiTranslating &&
+                aiSourceSubtitle?.let(SubtitleSelectionPolicy::key) == SubtitleSelectionPolicy.key(selected)
+            ) aiSourceSubtitle = resolvedSelected
             _uiState.value = _uiState.value.copy(
                 subtitles = finalList,
                 selectedSubtitle = resolvedSelected
             )
+
+            // Whether AI translation CAN run is a property of the file and the settings — the AI
+            // master toggle, a preferred language, and an embedded source track to translate from.
+            // It is not a property of the auto-selection flow. It used to be set only as a side
+            // effect of applyPreferredSubtitle, which stops running the moment anything is selected
+            // (`if (hasManualSubtitleSelection) return`) — so once auto-match's optimistic pick
+            // selects a subtitle *before* the player exposes its embedded tracks, that function
+            // never ran again and the AI entry was missing from the subtitle menu entirely, with
+            // no way for the user to turn translation on. Refresh it here, where the embedded
+            // tracks actually arrive, independent of what is selected.
+            refreshAiAvailability(finalList)
 
             // Late AI-interim activation for a running scan. The preload gate defers prepare
             // until the addon-subtitle fetch completes, so the scan now reliably STARTS before
@@ -2695,11 +3573,21 @@ class PlayerViewModel @Inject constructor(
             // and went silent, and autoMatchAttempted blocks any re-run (the pre-preload flow
             // only worked because prepare raced ahead of the fetch). Join the interim as soon
             // as an embedded source appears while the scan is still running.
+            // …but NOT over the scan's own optimistic pick. This hook exists for a scan that
+            // started with nothing on screen (the preload gate defers prepare until after the
+            // addon fetch, so the scan reliably begins before any embedded track is exposed). Once
+            // the optimistic pick is showing, the screen is no longer blank and there is nothing to
+            // rescue — activating AI here would rip away a subtitle the user can already read, in
+            // favour of a translation that is about to be replaced by the scan's verdict anyway.
+            // (From S03E02 on the Mi Box, Sept 2026: perfect subtitle shown, then AI took over
+            // ~15s later when the embedded English track finally resolved.)
             if (_uiState.value.isFindingBestMatch && !_uiState.value.isAiTranslating &&
+                _uiState.value.provisionalMatch == null &&
                 aiSubtitleEnabled && aiSubtitleAutoSelect &&
                 findAiSourceSubtitle(finalList) != null
             ) {
-                activateAiTranslation()
+                Log.i("SubMatch", "late AI interim: embedded source arrived mid-scan, nothing on screen")
+                activateAiTranslation(isUserAction = false)
             }
 
             val currentSel = _uiState.value.selectedSubtitle
@@ -2707,6 +3595,10 @@ class PlayerViewModel @Inject constructor(
             val normalizedPref = normalizeLanguage(preferred)
             val shouldReapply = when {
                 currentSel == null -> true
+                // Forced mode judges the pick itself, not its language — see
+                // forcedModeWantsAnotherLook. Without this the forced track arriving later than a
+                // plain one of the same language never displaces it.
+                forcedModeWantsAnotherLook(currentSel, preferred) -> true
                 // AI is active (source track is embedded): re-check any time embedded tracks arrive
                 // so a preferred-language built-in that arrives late can displace the AI source.
                 _uiState.value.isAiTranslating && finalList.any { it.isEmbedded } -> true
@@ -2726,43 +3618,355 @@ class PlayerViewModel @Inject constructor(
                         )
                     }
             }
-            if (shouldReapply) {
+            // A late embedded track must not cancel the user's pending local decode, even if
+            // applyPreferredSubtitle itself would decline to change the locked selection.
+            if (shouldReapply && userLockedSubtitleKey == null) {
                 subtitleSelectionJob?.cancel()
+                cancelSubtitleLocalization()
                 applyPreferredSubtitle(preferred, finalList, currentOriginalLanguage)
             }
         }
     }
 
     fun selectSubtitle(subtitle: Subtitle, isUserAction: Boolean = true) {
+        val locked = userLockedSubtitleKey
+        if (!isUserAction && locked != null &&
+            (SubtitleSelectionPolicy.key(subtitle) != locked || subtitleLocalizeJob?.isActive == true)
+        ) {
+            Log.i("SubMatch", "automatic pick \"${subtitle.label}\" ignored: the user owns this selection")
+            return
+        }
+        if (isUserAction) userLockedSubtitleKey = SubtitleSelectionPolicy.key(subtitle)
         hasManualSubtitleSelection = true
-        userPickedSubtitle = isUserAction
+        userPickedSubtitle = isUserAction || locked != null
         if (isUserAction) {
-            cancelFindBestMatch()
+            // The user's own pick — the ground truth a scan verdict is judged against.
+            Log.i(
+                "SubMatch",
+                "manual pick: \"${subtitle.label}\" ${subtitle.provider}:${subtitle.id} lang=${subtitle.lang} " +
+                    "embedded=${subtitle.isEmbedded} (was \"${_uiState.value.selectedSubtitle?.label ?: "-"}\", " +
+                    "auto-correction ${_uiState.value.autoSync?.offsetMs ?: 0}ms)"
+            )
+            // cancelFindBestMatch also drops any auto-match timing correction: the user's own pick
+            // owns its timing from here on (the manual delay knob still applies).
+            cancelFindBestMatch("user picked a subtitle")
             updateMatchCacheForManualPick(subtitle)
+            if (!audioSyncSwitching) {
+                audioSyncTarget = null
+                audioSync?.stop()
+            }
         }
         subtitleSelectionJob?.cancel()
+        cancelSubtitleLocalization()
+        // Translation goes off when the new subtitle LANDS (applySelectedSubtitle), not here: a
+        // pick that is still being downloaded left the AI source track on screen, marked as AI,
+        // with translation already off — its English lines shown as the "AI" subtitle until the
+        // download finished, or for good when the download was superseded (The Office S05E02,
+        // Sept 2026: AI after a failed audio sync appeared in English; picking AI again fixed it).
+
+        // Handing ExoPlayer the addon URL makes media3 decode the file as UTF-8, which turns a
+        // legacy code page (windows-1255 Hebrew is still common) into rows of U+FFFD. Only a
+        // locally decoded copy is safe — the same reason the matched/remembered paths localize.
+        // Preload covers the first MAX_PRELOAD_SUBS tracks; anything past that (or picked before
+        // preload finished) must be fetched here, or it renders as symbols.
+        // Recorded at pick time, not after the download: the user's choice of language counts
+        // even if the localization is later cancelled or falls back to the remote URL.
+        recordSubtitleUsage(subtitle)
+
+        val preloaded = preloadedCopyFor(subtitle)
+        if (preloaded != null || !needsLocalDecode(subtitle)) {
+            applySelectedSubtitle(preloaded ?: subtitle)
+            return
+        }
+        // Generation token: cancelling the job is not enough on its own, because the apply below is
+        // a plain state write with no suspension point — a job cancelled after its last suspension
+        // would still land, re-enabling subtitles that were turned off or applying the previous
+        // episode's pick. Every path that abandons the selection bumps this.
+        val generation = ++subtitleLocalizeGeneration
+        subtitleLocalizeJob = viewModelScope.launch {
+            // Bounded: a slow addon must not hold the pick hostage — falling back to the remote
+            // URL is exactly today's behaviour, so the worst case is unchanged. The bound is real
+            // because SubtitleSyncMatcher.loadRaw is cancellation-aware (enqueue + Call.cancel).
+            val localized = withTimeoutOrNull(SUBTITLE_LOCALIZE_TIMEOUT_MS) {
+                SubtitleSyncMatcher.loadRaw(subtitle.url, subtitle.lang)
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { raw -> localizeSubtitle(subtitle, raw) }
+                    ?.takeIf { it.url.startsWith("file:") }
+            }
+            if (generation != subtitleLocalizeGeneration) {
+                Log.i("SubMatch", "stale subtitle localization dropped: ${subtitle.label}")
+                return@launch
+            }
+            if (localized == null) {
+                Log.w("SubMatch", "manual pick not localized (serving remote): ${subtitle.label}")
+            }
+            applySelectedSubtitle(localized ?: subtitle)
+        }
+    }
+
+    /**
+     * Abandons any in-flight manual-pick localization: cancels the download *and* invalidates its
+     * result, so a request already past its last suspension point cannot apply a subtitle the user
+     * has since replaced, turned off, or left behind with the previous media.
+     */
+    private fun cancelSubtitleLocalization() {
+        subtitleLocalizeGeneration++
+        subtitleLocalizeJob?.cancel()
+        subtitleLocalizeJob = null
+    }
+
+    /** True for external subtitles still pointing at a remote URL of unknown character encoding. */
+    private fun needsLocalDecode(subtitle: Subtitle): Boolean =
+        !subtitle.isEmbedded &&
+            subtitle.url.isNotBlank() &&
+            !subtitle.url.startsWith("file:")
+
+    /** An already-downloaded local copy of [subtitle] from the preload pass, if there is one. */
+    private fun preloadedCopyFor(subtitle: Subtitle): Subtitle? {
+        if (subtitle.isEmbedded) return null
+        val key = "${subtitle.provider}|${subtitle.id}"
+        return _uiState.value.preloadedSubtitles.firstOrNull {
+            it.url.startsWith("file:") && "${it.provider}|${it.id}" == key
+        }
+    }
+
+    /** Commits [served] as the playing subtitle (a local copy of the user's pick, or the pick). */
+    private fun applySelectedSubtitle(served: Subtitle) {
         translationManager.isEnabled = false
         // Keep isAiAvailable/aiTargetLanguageName so the AI entry stays in the menu for re-selection
         _uiState.value = _uiState.value.copy(
-            selectedSubtitle = subtitle,
+            selectedSubtitle = served,
             isAiTranslating = false,
             subtitleSelectionNonce = _uiState.value.subtitleSelectionNonce + 1
         )
-        recordSubtitleUsage(subtitle)
     }
 
     /** Cancel a running/queued "Find best match" scan and clear its transient state. */
-    private fun cancelFindBestMatch() {
+    private fun cancelFindBestMatch(reason: String = "unspecified") {
+        stopAudioSync()
+        // A cancelled scan leaves NO verdict line in the log — every diagnostic after the reference
+        // collection is simply never reached — so a silent tail looks identical to a hang.
+        if (_uiState.value.isFindingBestMatch) Log.i("SubMatch", "scan cancelled: $reason")
         findMatchJob?.cancel()
+        // A pending "remember this match" belongs to the verdict being abandoned. (A manual pick
+        // re-schedules its own dwell immediately after this, via updateMatchCacheForManualPick.)
+        matchCacheConfirmJob?.cancel()
+        matchCacheConfirmed = false
+        // Frees the shadow player AND its prepared URL, so the next scan re-opens on the new source
+        // rather than probing the stream that was just abandoned.
         collectingReference = false
         matchPreviousTexts = null
+        applyAutoSync(null, null)
         if (_uiState.value.isFindingBestMatch || _uiState.value.isLiveAudioTranslating) {
             geminiLiveService.disconnect()
             _uiState.value = _uiState.value.copy(
                 isFindingBestMatch = false,
                 isLiveAudioTranslating = false,
-                matchStatusText = ""
+                provisionalMatch = null
             )
+        }
+    }
+
+    fun setAutoPlayNext(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(autoPlayNext = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[autoPlayNextKey()] = enabled
+            }
+        }
+    }
+
+    fun setAutoSkipIntro(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(autoSkipIntro = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("auto_skip_intro")] = enabled
+            }
+        }
+    }
+
+    fun setAutoSkipOutro(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(autoSkipOutro = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("auto_skip_outro")] = enabled
+            }
+        }
+    }
+
+    fun setAudioDelayMs(delayMs: Long) {
+        _uiState.value = _uiState.value.copy(audioDelayMs = delayMs)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileLongKey("audio_delay_ms")] = delayMs
+            }
+        }
+    }
+
+    fun setAudioNormalization(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(audioNormalization = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("audio_normalization")] = enabled
+            }
+        }
+    }
+
+    fun setSubtitleSizePref(size: String) {
+        val mappedPct = when (size.lowercase()) {
+            "small" -> 80
+            "large" -> 120
+            "extra large" -> 140
+            else -> 100
+        }
+        _uiState.value = _uiState.value.copy(subtitleSize = size, subtitleSizePct = mappedPct)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_size")] = size
+                prefs[profileManager.profileIntKey("subtitle_size_pct")] = mappedPct
+            }
+        }
+    }
+
+    fun setSubtitleSizePct(pct: Int) {
+        val clamped = pct.coerceIn(50, 250)
+        val name = when {
+            clamped <= 80 -> "Small"
+            clamped >= 130 -> "Extra Large"
+            clamped >= 115 -> "Large"
+            else -> "Medium"
+        }
+        _uiState.value = _uiState.value.copy(subtitleSizePct = clamped, subtitleSize = name)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileIntKey("subtitle_size_pct")] = clamped
+                prefs[profileManager.profileStringKey("subtitle_size")] = name
+            }
+        }
+    }
+
+    fun setSubtitleVerticalPct(pct: Int) {
+        val clamped = pct.coerceIn(1, 88)
+        val name = when {
+            clamped >= 60 -> "Top"
+            clamped >= 25 -> "High"
+            clamped >= 12 -> "Medium"
+            clamped >= 5 -> "Low"
+            else -> "Bottom"
+        }
+        _uiState.value = _uiState.value.copy(subtitleVerticalPct = clamped, subtitleOffset = name)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileIntKey("subtitle_vertical_pct")] = clamped
+                prefs[profileManager.profileStringKey("subtitle_offset")] = name
+            }
+        }
+    }
+
+    fun setSubtitlePreloadEnabled(enabled: Boolean) {
+        subtitlePreloadEnabled = enabled
+        _uiState.value = _uiState.value.copy(subtitlePreloadEnabled = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[subtitlePreloadKey] = enabled
+            }
+        }
+    }
+
+    fun setFilterSubtitlesByLanguage(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(filterSubtitlesByLanguage = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[filterSubtitlesByLanguageKey()] = enabled
+            }
+            val filtered = filterSubsByPreferredLanguage(subtitleMenuCandidates.values.toList())
+            val selected = _uiState.value.selectedSubtitle
+            _uiState.value = _uiState.value.copy(
+                subtitles = (filtered + listOfNotNull(selected)).distinctBy { it.provider to it.id }
+            )
+        }
+    }
+
+    fun setUseForcedSubtitles(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(useForcedSubtitles = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[useForcedSubtitlesKey()] = enabled
+            }
+            // Re-decide right away: flipping this while a film runs should be visible at once,
+            // not only on the next one.
+            if (!hasManualSubtitleSelection) {
+                applyPreferredSubtitle(
+                    getDefaultSubtitle(),
+                    _uiState.value.subtitles,
+                    currentOriginalLanguage
+                )
+            }
+        }
+    }
+
+    fun setSubtitleRemoveHearingImpaired(enabled: Boolean) {
+        translationManager.removeSubtitleHearingImpaired = enabled
+        _uiState.value = _uiState.value.copy(subtitleRemoveHearingImpaired = enabled)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("subtitle_remove_hearing_impaired")] = enabled
+            }
+        }
+    }
+
+    fun setSubtitleColorPref(color: String) {
+        _uiState.value = _uiState.value.copy(subtitleColor = color)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_color")] = color
+            }
+        }
+    }
+
+    fun setSubtitleOffsetPref(offset: String) {
+        _uiState.value = _uiState.value.copy(subtitleOffset = offset)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_offset")] = offset
+            }
+        }
+    }
+
+    fun setVolumeBoostDb(boostDb: Int) {
+        val clamped = boostDb.coerceIn(0, 15)
+        _uiState.value = _uiState.value.copy(volumeBoostDb = clamped)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("volume_boost_db")] = clamped.toString()
+            }
+        }
+    }
+
+    fun setSubtitleStylePref(style: String) {
+        _uiState.value = _uiState.value.copy(subtitleStyle = style)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_style")] = style
+            }
+        }
+    }
+
+    fun setSubtitleFontPref(font: String) {
+        _uiState.value = _uiState.value.copy(subtitleFont = font)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileStringKey("subtitle_font")] = font
+            }
+        }
+    }
+
+    fun setSubtitleStylizedPref(stylized: Boolean) {
+        _uiState.value = _uiState.value.copy(subtitleStylized = stylized)
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[profileManager.profileBooleanKey("subtitle_stylized")] = stylized
+            }
         }
     }
 
@@ -2775,7 +3979,7 @@ class PlayerViewModel @Inject constructor(
         if (aiFindBestMatchFirst) {
             runFindBestMatch(isUserAction = false)
         } else {
-            activateAiTranslation()
+            activateAiTranslation(isUserAction = false)
         }
     }
 
@@ -2784,6 +3988,16 @@ class PlayerViewModel @Inject constructor(
      * found, fall back to the AI translation option when one is available.
      */
     fun runFindBestMatch(isUserAction: Boolean = true) {
+        if (!isUserAction && userLockedSubtitleKey != null) {
+            Log.i("SubMatch", "auto scan skipped: the user chose a subtitle track")
+            return
+        }
+        if (isUserAction) {
+            userLockedSubtitleKey = null
+            userPickedSubtitle = false
+            subtitleSelectionJob?.cancel()
+            cancelSubtitleLocalization()
+        }
         // The timing-based scan is AI-independent — no aiSubtitleEnabled gate. Only the optional
         // AI interim below and the hearing fallback (gated at the scoring dispatch) need AI.
         // A user-triggered rescan means the current (possibly remembered) pick is unwanted —
@@ -2798,12 +4012,12 @@ class PlayerViewModel @Inject constructor(
         // AI translation entirely: the scan runs "silent" (reference cues hidden, zero AI/API
         // usage) and falls back to whatever was selected before.
         val source = if (aiSubtitleEnabled && aiSubtitleAutoSelect) {
-            findAiSourceSubtitle(_uiState.value.subtitles) ?: aiSourceSubtitle
+            findAiSourceSubtitle(_uiState.value.subtitles) ?: findAiSourceSubtitle(listOfNotNull(aiSourceSubtitle))
         } else {
             null
         }
         if (source != null) {
-            activateAiTranslation()
+            activateAiTranslation(isUserAction = false)
             findBestSubtitleMatch(
                 onNoMatch = { score ->
                     // Staying on the AI fallback — re-activate to upgrade the translation source:
@@ -2811,11 +4025,16 @@ class PlayerViewModel @Inject constructor(
                     // activation could still be translating an external fallback source. Say so —
                     // otherwise the searching indicator just vanishes with no visible outcome.
                     if (_uiState.value.isAiTranslating) {
-                        activateAiTranslation()
+                        activateAiTranslation(isUserAction = false)
                         showMatchToast(
-                            "No well-synced subtitle found" +
-                                (score?.let { " (best ${(it * 100).toInt()}%)" } ?: "") +
-                                " — keeping AI translation"
+                            if (score == null) {
+                                PlayerMessage.Res(R.string.player_match_none_keeping_ai)
+                            } else {
+                                PlayerMessage.Res(
+                                    R.string.player_match_none_score_keeping_ai,
+                                    listOf((score * 100).toInt())
+                                )
+                            }
                         )
                     }
                 },
@@ -2829,16 +4048,16 @@ class PlayerViewModel @Inject constructor(
 
     /**
      * Scan-failure fallback: activate AI translation when the feature can run (master toggle on,
-     * key present, source available). Deliberately NOT gated on auto-select — that setting only
+     * translation service configured, source available). Deliberately NOT gated on auto-select — that setting only
      * governs unprompted activation at playback start; a failed scan explicitly asked for the
      * best available subtitle, and AI timing (from the built-in track) beats an unverified addon
      * pick. Returns true when AI took over.
      */
     private fun tryAiFallbackAfterScan(): Boolean {
-        if (!aiSubtitleEnabled || aiApiKey.isBlank()) return false
+        if (userLockedSubtitleKey != null || !aiSubtitleEnabled || !translationService.isConfigured()) return false
         if (findAiSourceSubtitle(_uiState.value.subtitles) == null) return false
-        activateAiTranslation()
-        showMatchToast("No well-synced subtitle found — using AI translation")
+        activateAiTranslation(isUserAction = false)
+        showMatchToast(PlayerMessage.Res(R.string.player_match_none_using_ai))
         return true
     }
 
@@ -2851,11 +4070,11 @@ class PlayerViewModel @Inject constructor(
         if (!_uiState.value.isAiTranslating) return
         val current = aiSourceSubtitle ?: return
         // add() is false when already flagged — keeps this to one pass per source.
-        if (!untranslatableSourceIds.add(current.id)) return
+        if (!untranslatableSourceKeys.add(SubtitleSelectionPolicy.key(current))) return
         val next = findAiSourceSubtitle(_uiState.value.subtitles)
-        if (next != null && next.id != current.id) {
+        if (next != null && SubtitleSelectionPolicy.key(next) != SubtitleSelectionPolicy.key(current)) {
             android.util.Log.i("SubMatch", "AI source '${current.label}' has no text (image track) - switching to '${next.label}'")
-            activateAiTranslation()
+            activateAiTranslation(isUserAction = false)
         } else {
             android.util.Log.i("SubMatch", "AI source '${current.label}' has no text (image track) - no text source available, AI off")
             translationManager.isEnabled = false
@@ -2863,25 +4082,27 @@ class PlayerViewModel @Inject constructor(
             _uiState.value = _uiState.value.copy(
                 isAiTranslating = false,
                 isAiAvailable = false,
-                aiErrorToast = context.getString(R.string.player_ai_no_text_source)
+                aiErrorToast = PlayerMessage.Res(R.string.player_ai_no_text_source)
             )
         }
     }
 
-    /** Existing behavior: translate the built-in/source subtitle to the target language. */
-    fun activateAiTranslation() {
-        // Defense-in-depth: every caller is already gated on the AI master toggle (menu entry via
-        // isAiAvailable, interim via auto-select, fallback via tryAiFallbackAfterScan), but AI
-        // must never activate — and never spend API requests — when the feature is off.
-        if (!aiSubtitleEnabled) return
-        // Re-resolve the source on every activation: an early activation (before embedded tracks
-        // resolve) may have cached an external fallback source, and translation inherits the
-        // source's timing — keep the cached one only when nothing better is available now.
-        val source = findAiSourceSubtitle(_uiState.value.subtitles) ?: aiSourceSubtitle ?: return
+    /** Explicit AI replaces the user's pick; automatic AI must never replace a locked pick. */
+    fun activateAiTranslation(isUserAction: Boolean = true) {
+        if (!aiSubtitleEnabled || (!isUserAction && userLockedSubtitleKey != null)) return
+        // Cached sources obey the same rules as fresh ones: embedded text only, not the target
+        // language, and never a source already observed to contain no text at runtime.
+        val source = findAiSourceSubtitle(_uiState.value.subtitles)
+            ?: findAiSourceSubtitle(listOfNotNull(aiSourceSubtitle)) ?: return
+        if (isUserAction) {
+            userLockedSubtitleKey = null
+            cancelFindBestMatch("user chose AI translation")
+            subtitleSelectionJob?.cancel()
+        }
         aiSourceSubtitle = source
+        cancelSubtitleLocalization()
         hasManualSubtitleSelection = true
-        // AI activation is not a specific user track pick — a late embedded preferred-language
-        // track may still displace it.
+        // A late preferred-language embedded track can still displace automatic AI.
         userPickedSubtitle = false
         // The silent-scan path never populates aiTargetLanguageName (it's set only when a source
         // existed at scan start) — resolve from the preferred-language code so a late activation
@@ -2924,6 +4145,7 @@ class PlayerViewModel @Inject constructor(
             // a subtitle on top of the live AI overlay, since it only checks this flag.
             hasManualSubtitleSelection = true
             subtitleSelectionJob?.cancel()
+            cancelSubtitleLocalization()
             translationManager.isEnabled = false
             subtitleBeforeLiveAudio = _uiState.value.selectedSubtitle
             targetSubtitleLangCode.takeIf { it.isNotBlank() }?.let { geminiLiveService.targetLanguageCode = it }
@@ -2944,7 +4166,7 @@ class PlayerViewModel @Inject constructor(
      * on-screen cue matches what was spoken at that moment (see [SubtitleSyncMatcher]).
      */
     fun findBestSubtitleMatch(onNoMatch: ((Double?) -> Unit)? = null, useCache: Boolean = true) {
-        if (_uiState.value.isFindingBestMatch) return
+        if (userLockedSubtitleKey != null || _uiState.value.isFindingBestMatch) return
         val previousSubtitle = _uiState.value.selectedSubtitle
         findMatchJob?.cancel()
         findMatchJob = viewModelScope.launch {
@@ -2952,16 +4174,47 @@ class PlayerViewModel @Inject constructor(
             val targetLangName = languageCodeToName(targetLang)
             // Include the best (rejected) score so a fast verdict is visibly a real scan result.
             val noMatch = onNoMatch ?: { score ->
+                // "No well-synced subtitle found" is only true when nothing is on screen. When the
+                // scan ends without evidence but a preferred-language subtitle IS selected — the
+                // release-name pick, kept by selectLastResort — that message contradicts what the
+                // user is watching. The Office S01E01 (Sept 2026): a failover landed on a remux
+                // whose only embedded track was PGS and whose container indexed no subtitle cues,
+                // so nothing could be measured; the subtitle chosen was perfect, and the app
+                // announced that it had found none. Report what happened: it was kept, unverified.
+                val kept = _uiState.value.selectedSubtitle
+                    ?.takeIf { !it.isEmbedded && normalizeLanguage(it.lang) == targetLang }
                 showMatchToast(
-                    "No well-synced $targetLangName subtitle found" +
-                        (score?.let { " (best ${(it * 100).toInt()}%)" } ?: "")
+                    when {
+                        kept != null && score == null -> PlayerMessage.Res(
+                            R.string.player_match_kept_unverified,
+                            listOf(kept.label)
+                        )
+                        kept != null && score != null -> PlayerMessage.Res(
+                            R.string.player_match_kept_unverified_score,
+                            listOf(kept.label, (score * 100).toInt())
+                        )
+                        score == null -> PlayerMessage.Res(
+                            R.string.player_match_none_language,
+                            listOf(targetLangName)
+                        )
+                        else -> PlayerMessage.Res(
+                            R.string.player_match_none_language_score,
+                            listOf(targetLangName, (score * 100).toInt())
+                        )
+                    }
                 )
             }
             if (targetLang.isBlank() || isSubtitleDisabledPreference(targetLang)) {
                 noMatch(null)
                 return@launch
             }
-            beginMatch("Finding best subtitle…")
+            beginMatch()
+            // Phase timing: the scan is a pipeline (source wait → download → reference collection →
+            // verdict) and only measurement says which stage owns the user-visible delay.
+            val scanStartedAt = System.currentTimeMillis()
+            fun logPhase(name: String, extra: String = "") {
+                Log.i("SubMatch", "phase=$name elapsed=${System.currentTimeMillis() - scanStartedAt}ms $extra".trim())
+            }
 
             // Subtitle sources resolve asynchronously after playback starts: embedded tracks a beat
             // later, addon subtitles when their fetch completes. Wait for both a usable muxed
@@ -2970,47 +4223,184 @@ class PlayerViewModel @Inject constructor(
             // meanwhile, so waiting here costs the user nothing.)
             val waitStart = System.currentTimeMillis()
             var playingSinceMs = -1L
-            while (true) {
-                val nowMs = System.currentTimeMillis()
-                val elapsed = nowMs - waitStart
-                // Grace periods count *continuous playback* time, not wall time: embedded tracks
-                // cannot resolve before the stream actually plays, so a scan that gives up while
-                // the player is still buffering (e.g. right after a source switch) is meaningless.
-                if (lastIsPlaying) {
-                    if (playingSinceMs < 0) playingSinceMs = nowMs
-                } else {
-                    playingSinceMs = -1L
+            // Two passes over the same budget. The FIRST needs only target-language candidates —
+            // that is all the optimistic pick requires, and it lets subtitles appear without waiting
+            // out the embedded-track grace period (which on a file with no embedded text track runs
+            // to its full timeout and used to leave the screen blank for the whole scan). The
+            // SECOND waits for the embedded reference, which only the timing scan needs.
+            suspend fun awaitSources(requireEmbedded: Boolean) {
+                while (true) {
+                    val nowMs = System.currentTimeMillis()
+                    val elapsed = nowMs - waitStart
+                    // Grace periods count *continuous playback* time, not wall time: embedded tracks
+                    // cannot resolve before the stream actually plays, so a scan that gives up while
+                    // the player is still buffering (e.g. right after a source switch) is meaningless.
+                    if (lastIsPlaying) {
+                        if (playingSinceMs < 0) playingSinceMs = nowMs
+                    } else {
+                        playingSinceMs = -1L
+                    }
+                    val playingFor = if (playingSinceMs < 0) -1L else nowMs - playingSinceMs
+                    val current = _uiState.value.subtitles
+                    val hasEmbedded = current.any { it.isEmbedded && !it.isBitmap && !it.isForced }
+                    val hasCandidates = current.any {
+                        !it.isEmbedded && !it.isBitmap && it.url.isNotBlank() &&
+                            normalizeLanguage(it.lang) == targetLang
+                    }
+                    if (hasCandidates && (hasEmbedded || !requireEmbedded)) break
+                    // The only reason to wait for an embedded track is to give the TIMING SCAN a
+                    // reference. An exact release-name match skips the scan entirely, so once one is
+                    // on the table there is nothing left to wait for — stop immediately instead of
+                    // burning MATCH_SOURCES_WAIT_MS. Matters most on PGS-only files, where no usable
+                    // embedded reference will EVER appear and the loop would always run to timeout.
+                    if (hasCandidates) {
+                        val srcNow = _uiState.value.selectedStream?.source.orEmpty()
+                        if (srcNow.isNotBlank() && current.any {
+                                !it.isEmbedded && !it.isBitmap && it.url.isNotBlank() &&
+                                    normalizeLanguage(it.lang) == targetLang &&
+                                    weightedSubtitleScore(srcNow, it.id) >= 100
+                            }
+                        ) break
+                    }
+
+                    if (playerTextTracksResolved && lastIsPlaying && playingFor >= 0 &&
+                        !_uiState.value.isLoadingSubtitles && hasCandidates
+                    ) {
+                        Log.i("SubMatch", "sources: track list final and addons done after ${elapsed}ms — not waiting further")
+                        break
+                    }
+                    if (playingFor >= MATCH_SOURCES_WAIT_MS) break
+                    // Past the embedded grace period and the addon fetch is done — whatever is
+                    // missing now isn't coming; proceed with what we have.
+                    if (playingFor >= MATCH_EMBEDDED_WAIT_MS && !_uiState.value.isLoadingSubtitles) break
+                    // Stream never started (stall/error) — stop waiting eventually.
+                    if (elapsed >= MATCH_PLAYBACK_WAIT_CAP_MS) break
+                    delay(200)
                 }
-                val playingFor = if (playingSinceMs < 0) -1L else nowMs - playingSinceMs
-                val current = _uiState.value.subtitles
-                val hasEmbedded = current.any { it.isEmbedded && !it.isBitmap && !it.isForced }
-                val hasCandidates = current.any {
+            }
+
+            awaitSources(requireEmbedded = false)
+            logPhase("candidates")
+
+            // ── Optimistic pick ──────────────────────────────────────────────────────────────
+            // Show the best release-name-scored candidate the moment its text is in, instead of
+            // leaving the screen blank for the length of the scan. Provisional: unverified, never
+            // cached, no toast — the verdict below keeps it, corrects its timing, or replaces it.
+            //
+            // It must NOT depend on an embedded reference existing: with no reference there is no
+            // timing scan to conflict with, and that is precisely the case that left the user with
+            // nothing. Where a scan does follow and needs the in-player reference, that path takes
+            // the text track and displaces this pick (`provisionalDisplaced`).
+            var provisional: Subtitle? = null
+            // True when AI translation is holding the screen for the duration of the scan, so the
+            // winner must always be selected explicitly rather than "kept" as an already-showing pick.
+            var aiInterim = false
+            if (_uiState.value.isAiTranslating) {
+                // AI is already holding the screen — exactly what a first scan sets up as its
+                // interim, so the scan must run the same way: read the AI source track's own lines
+                // from the player (aiOwnsReference) and let AI verify the pick. Treating this as
+                // "not interim" sent a manual rescan to the text-free index path, where AI cannot
+                // check anything: The Shards S01E04 (Sept 2026) — the first scan's AI check rejected
+                // a subtitle 13s out, and a manual rescan minutes later applied that same subtitle.
+                aiInterim = true
+                applyAutoSync(null, null)
+                // Re-activating re-resolves the source (an embedded track may have appeared since).
+                activateAiTranslation(isUserAction = false)
+                Log.i("SubMatch", "interim: AI already on screen — scanning as on first load (source=\"${aiSourceSubtitle?.label}\")")
+                matchStep("1· translating with AI while checking subtitles…")
+            } else {
+                val earlySrc = _uiState.value.selectedStream?.source.orEmpty()
+                // The most-scored subtitle — the same order the subtitle menu shows. Where the scan
+                // cannot verify (no usable reference) this pick IS the answer, so the score has to
+                // rank by what decides the cut (see weightedSubtitleScore's episode-title rule).
+                val ranked = _uiState.value.subtitles.filter {
                     !it.isEmbedded && !it.isBitmap && it.url.isNotBlank() &&
                         normalizeLanguage(it.lang) == targetLang
-                }
-                if (hasEmbedded && hasCandidates) break
-                // The only reason to wait for an embedded track is to give the TIMING SCAN a
-                // reference. An exact release-name match skips the scan entirely, so once one is
-                // on the table there is nothing left to wait for — stop immediately instead of
-                // burning MATCH_SOURCES_WAIT_MS. Matters most on PGS-only files, where no usable
-                // embedded reference will EVER appear and the loop would always run to timeout.
-                if (hasCandidates) {
-                    val srcNow = _uiState.value.selectedStream?.source.orEmpty()
-                    if (srcNow.isNotBlank() && current.any {
-                            !it.isEmbedded && !it.isBitmap && it.url.isNotBlank() &&
-                                normalizeLanguage(it.lang) == targetLang &&
-                                weightedSubtitleScore(srcNow, it.id) >= 100
+                }.sortedByDescending { weightedSubtitleScore(earlySrc, it.id) }
+                // The optimistic pick ranks the list as it stands NOW — before the source wait and
+                // possibly before preload finishes — while the scan re-ranks a settled list later.
+                // weightedSubtitleScore returns 0 for every subtitle when the stream source is
+                // blank, and a stable sort over all-zero scores just preserves arrival order, so
+                // the two can disagree about which subtitle is "first". Log both inputs.
+                Log.d(
+                    "SubMatch",
+                    "ranking(provisional) src=\"$earlySrc\" n=${ranked.size} -> " +
+                        ranked.take(3).joinToString(" | ") {
+                            "${weightedSubtitleScore(earlySrc, it.id)}:${it.label.take(40)}"
                         }
-                    ) break
+                )
+                // What to SHOW while the scan runs. The optimistic pick's timing is a guess from the
+                // filename — it has been 8.5s late, a different cut, and outright wrong — and the
+                // user stares at it for the length of the scan. AI translation is driven by the
+                // embedded track, so its timing is correct by construction. When AI can run it is
+                // therefore the better stopgap, and it yields the moment a real subtitle is
+                // verified (a human translation beats a machine one, especially in Hebrew, where
+                // grammatical gender matters). Deliberately NOT gated on the auto-select setting:
+                // this is a stopgap during a scan the user already asked for, not AI becoming their
+                // subtitle. The first candidate is still evaluated either way — that happens on
+                // parsed cues, not on what is displayed.
+                // AI needs an embedded English track, and the player exposes its tracks a good
+                // while after this point — 12s on one measured run — because the optimistic pick
+                // deliberately runs before the source wait. Waiting the whole grace period would
+                // mean a long blank screen, so wait a short bounded time only: long enough for
+                // tracks to appear on a normal start, short enough that a source without an
+                // embedded English track falls back to the optimistic pick quickly.
+                val aiPossible = aiSubtitleEnabled && translationService.isConfigured()
+                val aiInterimSource = if (!aiPossible) null else {
+                    // The scan begins BEFORE the player has opened the file — preload mode gates
+                    // prepare on the addon-subtitle fetch, and that same fetch triggers the scan.
+                    // So asking "does this file have an English track?" at scan start is asking
+                    // before anyone has read the file, and the answer is always no. Any fixed
+                    // timeout is therefore guesswork: 8s expired 3.8s before the track appeared on
+                    // a BluRay remux (The Office S01E01, Sept 2026).
+                    //
+                    // The right condition is not a clock. Wait until the player has REPORTED its
+                    // tracks — that is the first moment the question can be answered — and bail the
+                    // instant playback starts. Until playback starts there is nothing on screen to
+                    // miss, so this wait is free; once it starts, a video must never be left
+                    // without subtitles while we deliberate.
+                    val startedAt = System.currentTimeMillis()
+                    val deadline = startedAt + MATCH_AI_INTERIM_WAIT_MS
+                    var source = findAiSourceSubtitle(_uiState.value.subtitles)
+                    while (source == null && !playerTextTracksResolved && !lastIsPlaying &&
+                        System.currentTimeMillis() < deadline
+                    ) {
+                        delay(250)
+                        source = findAiSourceSubtitle(_uiState.value.subtitles)
+                    }
+                    Log.i(
+                        "SubMatch",
+                        "interim: waited ${System.currentTimeMillis() - startedAt}ms " +
+                            "(tracksResolved=$playerTextTracksResolved playing=$lastIsPlaying) -> " +
+                            (source?.let { "AI source \"${it.label}\"" } ?: "no AI source, using the first pick")
+                    )
+                    source
                 }
-                if (playingFor >= MATCH_SOURCES_WAIT_MS) break
-                // Past the embedded grace period and the addon fetch is done — whatever is missing
-                // now isn't coming; proceed with what we have.
-                if (playingFor >= MATCH_EMBEDDED_WAIT_MS && !_uiState.value.isLoadingSubtitles) break
-                // Stream never started (stall/error) — stop waiting eventually.
-                if (elapsed >= MATCH_PLAYBACK_WAIT_CAP_MS) break
-                delay(200)
+                if (aiInterimSource != null) {
+                    aiInterim = true
+                    applyAutoSync(null, null)
+                    activateAiTranslation(isUserAction = false)
+                    Log.i("SubMatch", "interim: AI translation while scanning (source=\"${aiInterimSource.label}\")")
+                    matchStep("1· translating with AI while checking subtitles…")
+                } else {
+                    for (sub in ranked) {
+                        val raw = SubtitleSyncMatcher.loadRaw(preloadedCopyFor(sub)?.url ?: sub.url, sub.lang)
+                            ?.takeIf { SubtitleSyncMatcher.parseCues(it).isNotEmpty() } ?: continue
+                        provisional = sub
+                        applyAutoSync(null, null)
+                        val served = localizeSubtitle(sub, raw)
+                        _uiState.value = _uiState.value.copy(provisionalMatch = served)
+                        selectSubtitle(served, isUserAction = false)
+                        logPhase("provisional", "label=\"${sub.label}\"")
+                        matchStep("1· selected \"${sub.label}\" — verifying sync…")
+                        break
+                    }
+                    if (provisional == null) matchStep("1· no first pick (no candidate text yet)")
+                }
             }
+
+            awaitSources(requireEmbedded = true)
+            logPhase("sources")
             val subs = _uiState.value.subtitles
 
             // An embedded target-language track is muxed into the media → guaranteed in sync.
@@ -3021,20 +4411,53 @@ class PlayerViewModel @Inject constructor(
             }
             if (embedded != null) {
                 endMatch()
+                applyAutoSync(null, null)
                 selectSubtitle(embedded, isUserAction = false)
-                showMatchToast("Matched: embedded $targetLangName subtitle (in sync)")
+                showMatchToast(
+                    PlayerMessage.Res(
+                        R.string.player_match_embedded,
+                        listOf(targetLangName)
+                    )
+                )
                 return@launch
             }
 
-            // Cap the number of candidates we download/score — addons can return dozens. Rank by
-            // the release-name heuristic first so the subs most likely cut for this rip survive.
+            // The WHOLE same-language pool. It used to be the ten
+            // best release-name matches, and release names are exactly what cannot be compared
+            // across addons: Wizdom and Ktuvit publish full release names, OpenSubtitles publishes
+            // numeric ids, so OpenSubtitles never ranked into the ten. Peaky Blinders S01E04 (Sept
+            // 2026): ten slots went to Wizdom/Ktuvit, which held only TWO distinct files between
+            // them (the same BluRay and HDTV cuts, mirrored), neither fit the source — and the
+            // OpenSubtitles subtitle picked as a perfect match was never downloaded.
+            // What bounds the cost now is not the count: downloads and parses are throttled
+            // (MATCH_PARALLEL_DOWNLOADS / MATCH_PARALLEL_PARSES), identical timings collapse into
+            // one family (see loadAll), and the first candidate alone still decides the common case.
+            // Ranked by release name, then providers in turn (MatchCandidatePool.providerInterleaved)
+            // so the unrankable tail is reached early and a bounded pool keeps every provider.
             val streamSrc = _uiState.value.selectedStream?.source.orEmpty()
             val candidates = subs.filter {
                 !it.isEmbedded && !it.isBitmap && it.url.isNotBlank() &&
-                    normalizeLanguage(it.lang) == targetLang
+                    normalizeLanguage(it.lang) == targetLang &&
+                    // A copy this scan served earlier (rewritten timings) — scored again it would
+                    // match its own reference at ~0.96 and could be remembered under an id that
+                    // does not exist on the next playback.
+                    !it.id.endsWith(RETIMED_SUBTITLE_ID_SUFFIX)
             }
+                .distinctBy { it.url }
                 .sortedByDescending { weightedSubtitleScore(streamSrc, it.id) }
-                .take(MATCH_MAX_CANDIDATES)
+                .let { ranked ->
+                    com.arflix.tv.ui.screens.player.subtitles.MatchCandidatePool
+                        .providerInterleaved(ranked) { it.provider }
+                }
+                .also { ranked ->
+                    Log.d(
+                        "SubMatch",
+                        "ranking(scan) src=\"$streamSrc\" n=${ranked.size} -> " +
+                            ranked.take(3).joinToString(" | ") {
+                                "${weightedSubtitleScore(streamSrc, it.id)}:${it.label.take(40)}"
+                            }
+                    )
+                }
             if (candidates.isEmpty()) {
                 endMatch()
                 // No candidates at all in the target language — AI translation is the only
@@ -3056,7 +4479,10 @@ class PlayerViewModel @Inject constructor(
                     // slow addon server (download bounded by the matcher's client timeouts).
                     // Re-bake the remembered rescue offset, if any.
                     val offsetMs = cached.offsetMs
-                    val raw = SubtitleSyncMatcher.loadRaw(remembered.url)
+                    val raw = SubtitleSyncMatcher.loadRaw(
+                        preloadedCopyFor(remembered)?.url ?: remembered.url,
+                        remembered.lang
+                    )
                     // A remembered OFFSET can only be honoured if we can download the text to bake
                     // the shift in. If that download fails, DON'T serve the un-shifted remote copy
                     // under an "auto-offset" label (the sub would be mistimed while the UI claims it
@@ -3064,11 +4490,31 @@ class PlayerViewModel @Inject constructor(
                     if (raw == null && offsetMs != 0L) {
                         Log.w("SubMatch", "remembered offset download failed — rescanning instead of serving unshifted")
                     } else {
-                        val local = raw?.let { localizeSubtitle(remembered, it, offsetMs) } ?: remembered
+                        // The only exit from a scan that used to leave no trace in the log — which is
+                        // how a stale remembered match replayed on a tester's phone looked like a scan
+                        // that silently stopped (Sept 2026).
+                        Log.i(
+                            "SubMatch",
+                            "remembered match: \"${remembered.label}\" ${remembered.provider}:${remembered.id} " +
+                                "offset=${offsetMs}ms — applied without scanning (tap Find Best Match to rescan)"
+                        )
+                        val local = raw?.let { localizeSubtitle(remembered, it) } ?: remembered
                         endMatch()
+                        applyAutoSync(remembered, SubtitleAutoSync.ofMs(offsetMs))
                         selectSubtitle(local, isUserAction = false)
-                        val offsetNote = if (offsetMs != 0L) " (auto-offset ${formatMatchOffset(offsetMs)})" else ""
-                        showMatchToast("Matched: ${remembered.label} (remembered)$offsetNote")
+                        showMatchToast(
+                            if (offsetMs != 0L) {
+                                PlayerMessage.Res(
+                                    R.string.player_match_remembered_offset,
+                                    listOf(remembered.label, formatMatchOffset(offsetMs))
+                                )
+                            } else {
+                                PlayerMessage.Res(
+                                    R.string.player_match_remembered,
+                                    listOf(remembered.label)
+                                )
+                            }
+                        )
                         return@launch
                     }
                 }
@@ -3085,13 +4531,22 @@ class PlayerViewModel @Inject constructor(
             if (exactNameMatch != null) {
                 // Serve from a local copy for the same reason the remembered path does: the
                 // MediaItem rebuild would otherwise stall on a slow addon server.
-                val exactRaw = SubtitleSyncMatcher.loadRaw(exactNameMatch.url)
+                val exactRaw = SubtitleSyncMatcher.loadRaw(
+                    preloadedCopyFor(exactNameMatch)?.url ?: exactNameMatch.url,
+                    exactNameMatch.lang
+                )
                 val exactLocal = exactRaw?.let { localizeSubtitle(exactNameMatch, it) } ?: exactNameMatch
                 endMatch()
+                applyAutoSync(null, null)
                 selectSubtitle(exactLocal, isUserAction = false)
                 writeCachedMatch(exactNameMatch)
                 Log.i("SubMatch", "exact release-name match — scan skipped: ${exactNameMatch.label}")
-                showMatchToast("Matched: ${exactNameMatch.label} (exact release name)")
+                showMatchToast(
+                    PlayerMessage.Res(
+                        R.string.player_match_exact_release_name,
+                        listOf(exactNameMatch.label)
+                    )
+                )
                 return@launch
             }
 
@@ -3103,37 +4558,280 @@ class PlayerViewModel @Inject constructor(
             }
             val builtInReference = embeddedRefs.firstOrNull { normalizeLanguage(it.lang) == "en" }
                 ?: embeddedRefs.firstOrNull()
-            val sourceLabel = if (builtInReference != null) "Built-in" else "Hearing"
+            // Image-based (PGS/VOBSUB) or forced embedded tracks are excluded above because they
+            // carry no TEXT — nothing to translate, nothing to compare lines against. Their cue
+            // TIMINGS are a different matter: the container's Cues index stores them exactly like a
+            // text track's, so on a file whose only embedded subtitles are images the index can
+            // still supply a whole-file timing reference. Kept separate from [embeddedRefs] so it
+            // can never be mistaken for a text reference.
+            // Every embedded text track was excluded above as forced (flag or name). dont trust that flag:
+            // web releases mark their only FULL subtitle forced so
+            // it shows by default, and the container index can tell a real timeline from a few
+            // signs by its density. Tried before the image fallback, and through the index only —
+            // see the timing-shape branch of the scan.
+            val forcedTextReference = if (builtInReference != null) {
+                null
+            } else {
+                subs.firstOrNull { it.isEmbedded && !it.isBitmap && normalizeLanguage(it.lang) == "en" }
+                    ?: subs.firstOrNull { it.isEmbedded && !it.isBitmap }
+            }
+            // The player reported no embedded subtitle track at all.
+            // A placeholder only: in timing-shape mode the index chooses the track itself. On a
+            // non-Matroska file (MP4) the probe ends after the first read.
+            val indexProbeReference = if (builtInReference == null && subs.none { it.isEmbedded }) {
+                Subtitle(id = "container-index", url = "", lang = "en", label = "container index", isEmbedded = true)
+            } else null
+            val bitmapReference = if (builtInReference != null) {
+                null
+            } else {
+                subs.firstOrNull { it.isEmbedded && it.isBitmap && normalizeLanguage(it.lang) == "en" }
+                    ?: subs.firstOrNull { it.isEmbedded && it.isBitmap }
+            }
+            // What the reference will PROBABLY be. Both are reassigned the moment something
+            // actually supplies one, because this guess is wrong whenever the container index
+            // steps in: with AI off and only an image track, "Hearing" was printed and then shown
+            // to the user in the match toast, while no hearing scan had run or could run (The
+            // Office S01E05, Sept 2026). A label must describe what happened, not what was likely.
+            var sourceLabel = if (builtInReference != null) "Built-in" else "Hearing"
+            var sourceLabelRes = if (builtInReference != null) {
+                R.string.player_match_source_builtin
+            } else {
+                R.string.player_match_source_hearing
+            }
+            fun useContainerIndexLabel() {
+                sourceLabel = "Container index"
+                sourceLabelRes = R.string.player_match_source_index
+            }
+            // ── Scan inventory ─────────────────────────────────────────────────────────────
+            // What was played, what the file carries, and every candidate considered. Diagnosing
+            // a verdict from a user report needs all three, and none was logged: which source it
+            // was, why an embedded track was or was not a reference, and whether a subtitle the
+            // user later picked by hand was even in the pool.
+            // Sync by hearing: listen while the scan runs, so a takeover starts with audio heard.
+            armAudioSync()
+            _uiState.value.selectedStream?.let { stream ->
+                android.util.Log.i(
+                    "SubMatch",
+                    "stream: \"${stream.source}\" addon=\"${stream.addonName}\" quality=${stream.quality} " +
+                        "size=${stream.size} host=${runCatching { java.net.URI(_uiState.value.selectedStreamUrl.orEmpty()).host }.getOrNull() ?: "-"}"
+                )
+            }
+            subs.filter { it.isEmbedded }.forEach { track ->
+                val role = when {
+                    track === builtInReference -> "REFERENCE"
+                    track === forcedTextReference -> "forced-text fallback"
+                    track === bitmapReference -> "image fallback"
+                    track in embeddedRefs -> "text (not chosen)"
+                    track.isBitmap -> "image (excluded)"
+                    else -> "forced (excluded)"
+                }
+                android.util.Log.i(
+                    "SubMatch",
+                    "embedded: \"${track.label}\" lang=${track.lang.ifBlank { "-" }} forced=${track.isForced}" +
+                        "(flag=${track.hasForcedFlag}) image=${track.isBitmap} " +
+                        "group=${track.groupIndex}/${track.trackIndex} -> $role"
+                )
+            }
+            candidates.chunked(8).forEachIndexed { page, chunk ->
+                android.util.Log.i(
+                    "SubMatch",
+                    "pool ${page * 8 + 1}-${page * 8 + chunk.size}/${candidates.size}: " +
+                        chunk.joinToString(" | ") { "${it.provider}:${it.id.take(60)} name=${weightedSubtitleScore(streamSrc, it.id)}" }
+                )
+            }
             android.util.Log.i(
                 "SubMatch",
-                "reference source=$sourceLabel embeddedRefs=${embeddedRefs.size} " +
+                "reference source=$sourceLabel (provisional label) embeddedRefs=${embeddedRefs.size} " +
                     "ref=\"${builtInReference?.label ?: "-"}\" (lang=${builtInReference?.lang}) " +
                     "allEmbedded=${subs.count { it.isEmbedded }}"
             )
-            updateMatchStatus("Finding best subtitle ($sourceLabel)…")
 
             // Keep the raw text alongside the parsed cues: the winning subtitle is later served to
             // ExoPlayer from a local cache file (already downloaded here) instead of re-fetching
             // a possibly slow addon server during the MediaItem rebuild.
-            val loadedRaw = candidates.map { sub ->
-                async { sub to SubtitleSyncMatcher.loadRaw(sub.url) }
-            }.awaitAll()
-            val rawBySubKey = loadedRaw.mapNotNull { (sub, raw) ->
-                raw?.let { "${sub.provider}|${sub.id}" to it }
-            }.toMap()
-            val loaded = loadedRaw.mapNotNull { (sub, raw) ->
-                val cues = raw?.let { SubtitleSyncMatcher.parseCues(it) }.orEmpty()
-                if (cues.isEmpty()) null else sub to cues
+            // Preload mode has already downloaded these to local UTF-8 files before prepare — read
+            // those instead of hitting the addon servers again (a slow provider like AIOStreams
+            // costs 8-12s here, for text we already have on disk).
+            val candidateSources = candidates.map { sub -> sub to (preloadedCopyFor(sub)?.url ?: sub.url) }
+            val localHits = candidateSources.count { it.second.startsWith("file:") }
+
+            // Parsed cues are held in memory for the whole scan — ~740 TimedCue objects per
+            // subtitle, plus its raw text as a UTF-16 String. Loading all ten up front cost 10–15 MB
+            // at exactly the moment the player is filling its own (80 MB) video buffer, on a device
+            // whose entire app heap is 224 MB. So load LAZILY: the first candidate is almost always
+            // the answer, and the other nine are only ever needed if it fails.
+            val rawBySubKey = java.util.concurrent.ConcurrentHashMap<String, String>()
+            val parsedCues = java.util.concurrent.ConcurrentHashMap<String, List<SubtitleSyncMatcher.TimedCue>>()
+            val poolStartedAt = android.os.SystemClock.elapsedRealtime()
+            val downloadPermits = kotlinx.coroutines.sync.Semaphore(MATCH_PARALLEL_DOWNLOADS)
+            val parsePermits = kotlinx.coroutines.sync.Semaphore(MATCH_PARALLEL_PARSES)
+            suspend fun load(sub: Subtitle): List<SubtitleSyncMatcher.TimedCue>? {
+                val key = "${sub.provider}|${sub.id}"
+                parsedCues[key]?.let { return it }
+                val remainingMs = MATCH_POOL_BUDGET_MS - (android.os.SystemClock.elapsedRealtime() - poolStartedAt)
+                if (remainingMs <= 0) return null
+                val url = candidateSources.firstOrNull { it.first === sub }?.second ?: sub.url
+                val raw = withTimeoutOrNull(remainingMs) {
+                    downloadPermits.acquire()
+                    try { SubtitleSyncMatcher.loadRaw(url, sub.lang) } finally { downloadPermits.release() }
+                } ?: return null
+                val cues = parsePermits.acquire().let {
+                    try {
+                        withContext(Dispatchers.Default) { SubtitleSyncMatcher.parseCues(raw) }
+                    } finally {
+                        parsePermits.release()
+                    }
+                }
+                if (cues.isEmpty()) return null
+                rawBySubKey[key] = raw
+                parsedCues[key] = cues
+                return cues
+            }
+            val familyMembers = HashMap<String, List<Pair<Subtitle, Long>>>()
+            var loadedPool: List<Pair<Subtitle, List<SubtitleSyncMatcher.TimedCue>>>? = null
+            /**
+             * The candidates, parsed, one per timing family. Bounded (MatchCandidatePool.loadBounded):
+             * batches of MATCH_PARALLEL_DOWNLOADS, at most MATCH_POOL_MAX_CANDIDATES, and a shared
+             * download deadline starting with the first candidate. Reuse the completed pool on
+             * later scoring passes, even after its budget expires.
+             */
+            suspend fun loadAll(): List<Pair<Subtitle, List<SubtitleSyncMatcher.TimedCue>>> {
+                loadedPool?.let { return it }
+                val (completed, tried) = com.arflix.tv.ui.screens.player.subtitles.MatchCandidatePool.loadBounded(
+                    pool = candidates,
+                    batchSize = MATCH_PARALLEL_DOWNLOADS,
+                    maxItems = MATCH_POOL_MAX_CANDIDATES,
+                    budgetMs = MATCH_POOL_BUDGET_MS,
+                    startedAtMs = poolStartedAt,
+                    now = android.os.SystemClock::elapsedRealtime,
+                    load = { sub -> load(sub) }
+                )
+                // Keep the initial pick and any fully parsed candidates when the deadline
+                // expires between a completed load and the pool's result publication.
+                val all = (completed + candidates.mapNotNull { sub ->
+                    parsedCues["${sub.provider}|${sub.id}"]?.let { sub to it }
+                }).distinctBy { (sub, _) -> "${sub.provider}|${sub.id}" }
+                if (tried < candidates.size) {
+                    Log.i(
+                        "SubMatch",
+                        "pool bounded: tried $tried of ${candidates.size} candidates " +
+                            "(cap $MATCH_POOL_MAX_CANDIDATES, budget ${MATCH_POOL_BUDGET_MS / 1000}s)"
+                    )
+                }
+                val representatives = ArrayList<Pair<Subtitle, List<SubtitleSyncMatcher.TimedCue>>>()
+                familyMembers.clear()
+                for ((sub, cues) in all) {
+                    val family = representatives.firstNotNullOfOrNull { (rep, repCues) ->
+                        constantTimelineShiftMs(repCues, cues)?.let { rep to it }
+                    }
+                    if (family == null) {
+                        representatives += sub to cues
+                        familyMembers["${sub.provider}|${sub.id}"] = listOf(sub to 0L)
+                    } else {
+                        val (rep, shift) = family
+                        val repKey = "${rep.provider}|${rep.id}"
+                        familyMembers[repKey] = familyMembers[repKey].orEmpty() + (sub to shift)
+                        // The member's parsed cues are never scored — drop them; its raw text stays
+                        // (rawBySubKey) in case it is the one served.
+                        parsedCues.remove("${sub.provider}|${sub.id}")
+                    }
+                }
+                if (representatives.size < all.size) {
+                    Log.i(
+                        "SubMatch",
+                        "timing families: ${all.size} candidates -> ${representatives.size} distinct " +
+                            representatives.joinToString(prefix = "[", postfix = "]") { (rep, _) ->
+                                val members = familyMembers["${rep.provider}|${rep.id}"].orEmpty()
+                                "\"${rep.label.take(40)}\"×${members.size}" +
+                                    members.filter { it.second != 0L }.joinToString("") { " ${it.second}ms" }
+                            }
+                    )
+                }
+                loadedPool = representatives
+                return representatives
             }
 
             /**
-             * Select [sub], serving it from a local file when its text was downloaded. A non-zero
-             * [offsetMs] is baked into that local copy (constant-offset rescue).
+             * The family member to serve for [winner]: a constant correction [winner] needs may be
+             * exactly the shift between two members, and then one of them is already in sync and
+             * should be served as published instead of the representative with an offset. A
+             * cue-by-cue retime is specific to the representative's cues, so it stays as it is.
              */
-            fun selectServedLocally(sub: Subtitle, offsetMs: Long = 0L) {
+            fun familyMemberFor(winner: ScoredCandidate): ScoredCandidate {
+                if (winner.retime?.uniform == false) return winner
+                val members = familyMembers["${winner.sub.provider}|${winner.sub.id}"] ?: return winner
+                val (member, shift) = members.minByOrNull { (_, shift) -> kotlin.math.abs(winner.offsetMs - shift) }
+                    ?: return winner
+                if (member === winner.sub) return winner
+                val remaining = (winner.offsetMs - shift).takeIf { kotlin.math.abs(it) >= MATCH_OFFSET_MIN_MS } ?: 0L
+                if (kotlin.math.abs(remaining) >= kotlin.math.abs(winner.offsetMs)) return winner
+                Log.i(
+                    "SubMatch",
+                    "family: serving \"${member.label}\" (${shift}ms from \"${winner.sub.label}\") " +
+                        "— correction ${winner.offsetMs}ms -> ${remaining}ms"
+                )
+                return winner.copy(sub = member, offsetMs = remaining)
+            }
+
+            // The sync reference comes from the player that is ALREADY running, never a second
+            // one. While AI translation is on screen it is translating from the embedded English
+            // track, so that track is selected and its decoded cues are the reference — free.
+            //
+            // A headless second player used to cover the non-AI case too (ported from
+            // ProdigyV21/ARVIO#625). It was removed in Sept 2026 after measurement: on From S01E10,
+            // identical runs with and without it peaked at 536MB vs 276MB of Java heap and
+            // allocated 1435MB vs 651MB. The cost is inherent to the approach, not to the
+            // implementation — the subtitle track is muxed, so reaching its cues means demuxing the
+            // interleaved 2160p video, and it read 44MB to harvest 7 cues where the running
+            // player's own buffer gave 9 for nothing. Without AI the scan falls back to the
+            // in-player reference below, which is what main has always done.
+            val aiOwnsReference = aiInterim && builtInReference != null &&
+                _uiState.value.isAiTranslating &&
+                aiSourceSubtitle?.let {
+                    it.provider == builtInReference.provider && it.id == builtInReference.id
+                } == true
+
+            // The optimistic pick is the one the user is watching, so it is the one we verify first.
+            val firstChoice = provisional ?: candidates.firstOrNull()
+            var loaded = firstChoice?.let { sub -> load(sub)?.let { listOf(sub to it) } }.orEmpty()
+            // First choice unreadable (bad encoding, empty file) — fall back to the whole pack.
+            if (loaded.isEmpty()) loaded = loadAll()
+            logPhase("download", "candidates=${candidates.size} preloaded=$localHits parsed=${loaded.size}")
+
+            /**
+             * Select [sub], serving it from a local file when its text was downloaded, and bind
+             * [sync] (the auto-match timing correction) to it — applied live by the text renderer,
+             * so no MediaItem rebuild and nothing baked into the file.
+             */
+            fun selectServedLocally(sub: Subtitle, sync: SubtitleAutoSync? = null) {
                 val localized = rawBySubKey["${sub.provider}|${sub.id}"]
-                    ?.let { localizeSubtitle(sub, it, offsetMs) } ?: sub
+                    ?.let { localizeSubtitle(sub, it) } ?: sub
+                applyAutoSync(sub, sync)
                 selectSubtitle(localized, isUserAction = false)
+            }
+
+            /**
+             * Serve [sub] with its timings rewritten cue by cue per [plan]. Every cue the retimer
+             * paired gets its new time; anything it never saw (a cue the parser dropped) follows
+             * the coarse affine transform, so nothing is left on the old clock. Served under a
+             * distinct id ([RETIMED_SUBTITLE_ID_SUFFIX]) so the player loads this file rather than
+             * switching back to the attached original. False when the text is not in hand.
+             */
+            fun selectRetimedLocally(sub: Subtitle, plan: RetimePlan): Boolean {
+                val raw = rawBySubKey["${sub.provider}|${sub.id}"] ?: return false
+                val moved = HashMap<Pair<Long, Long>, Pair<Long, Long>>()
+                plan.result.cues.forEach {
+                    moved.putIfAbsent(it.originalStartTimeMs to it.originalEndTimeMs, it.startTimeMs to it.endTimeMs)
+                }
+                val scale = plan.result.alignmentScale
+                val intercept = plan.result.alignmentInterceptMs
+                val rewritten = SubtitleSyncMatcher.retimeTimestamps(raw) { start, end ->
+                    moved[start to end] ?: ((start * scale + intercept).toLong() to (end * scale + intercept).toLong())
+                }
+                val served = localizeSubtitle(sub.copy(id = sub.id + RETIMED_SUBTITLE_ID_SUFFIX), rewritten)
+                applyAutoSync(sub, null)
+                selectSubtitle(served, isUserAction = false)
+                return true
             }
 
             // Last resort when the scan fails outright and no AI fallback is active: behave like
@@ -3149,64 +4847,1322 @@ class PlayerViewModel @Inject constructor(
                 if (tryAiFallbackAfterScan()) return
                 val current = _uiState.value.selectedSubtitle
                 if (current != null && normalizeLanguage(current.lang) == targetLang) return
+                // The most-scored candidate (the pool keeps the best-named first).
                 candidates.firstOrNull()?.let {
                     selectServedLocally(it)
-                    showMatchToast("Selected ${it.label} (sync unverified)")
+                    showMatchToast(
+                        PlayerMessage.Res(
+                            R.string.player_match_sync_unverified,
+                            listOf(it.label)
+                        )
+                    )
                 }
             }
 
             if (loaded.isEmpty()) {
                 endMatch()
                 restoreSubtitle(previousSubtitle)
-                noMatch(null)
-                selectLastResort()
+                // Nothing verified: the audio next, then the usual fallback (AI, or the pick as is).
+                val hearing = candidates.firstOrNull()?.let { pick ->
+                    startHearingFallback(pick) { noMatch(null); selectLastResort() }
+                } == true
+                if (!hearing) {
+                    noMatch(null)
+                    selectLastResort()
+                }
                 return@launch
             }
 
-            val scored = when {
-                builtInReference != null ->
-                    scoreAgainstBuiltIn(loaded, builtInReference, sourceLabel, previousSubtitle)
+            var referenceRefs: List<Pair<Long, Long>> = emptyList()
+            // The file's other dialogue tracks, when the reference came from the container index.
+            var alternateRefs: List<IndexedReference> = emptyList()
+            // The preferred track's full indexed timeline, when the reference came from the index.
+            var primaryTimeline: IndexedReference? = null
+            // Set when an alternate replaced the reference: the text track AI reads is then no
+            // longer the timing reference, so AI can still vouch for the dialogue but not the timing.
+            var alternateReferenceInUse = false
+            // Set when the reference is a TEXT track read through the index without a text
+            // reference in the player (the forced-flagged fallback) — the retimer may use it.
+            var textIndexReference = false
+            // Set when the reference track turned out to hold no dialogue (see runInPlayerReference).
+            // AI translation from it produces nothing either, so the verdict replaces the AI stopgap.
+            var referenceNotDialogue = false
+            // The same reference cues WITH text — only AI line-matching uses them.
+            var referenceCues: List<SubtitleSyncMatcher.TimedCue> = emptyList()
+            // Set when the in-player reference path took over — it selects the reference track, so
+            // the optimistic pick is no longer what's on screen.
+            var provisionalDisplaced = false
+            /**
+             * The in-player reference: selects the embedded track on the VISIBLE player and builds
+             * the reference from its cues as they buffer and render.
+             *
+             * It takes the text track, so any optimistic pick stops being what's on screen — that
+             * has to be recorded (`provisionalDisplaced`), or the verdict logic below still believes
+             * the pick is displayed and neither keeps nor restores the right thing. The probe branch
+             * used to own this bookkeeping; when the probe went, every caller inherited it, so it
+             * lives here once instead of at each call site.
+             */
+            suspend fun runInPlayerReference(reference: Subtitle): List<ScoredCandidate>? {
+                // Container index first. A Matroska Cues index carries the embedded track's
+                // AUTHORED cue times for the whole file, readable in a few range requests before
+                // the player has buffered anything — so where it exists it dominates everything
+                // below it: nothing is taken off screen (the optimistic pick keeps rendering), the
+                // reference spans the film instead of the next few seconds, and a scan that used
+                // to spend minutes collecting cues in realtime decides at once.
+                // Timings only, though — the index carries no text — so AI verification further
+                // down stays gated on referenceCues and does not run for this path.
+                var notDialogueCues = -1
+                val indexedRefs = collectIndexedReferenceCues(
+                    reference,
+                    onTimelines = { p, alts -> primaryTimeline = p; alternateRefs = alts },
+                    onNotDialogue = { notDialogueCues = it },
+                )
+                // The index read the whole file and this track has almost nothing in it — a
+                // release group's tagline, not dialogue. Waiting for it to render lines is waiting
+                if (notDialogueCues >= 0) {
+                    Log.i(
+                        "SubMatch",
+                        "reference \"${reference.label}\" has $notDialogueCues cue(s) in the whole file — " +
+                            "not a dialogue track; no timing reference"
+                    )
+                    referenceNotDialogue = true
+                    return null
+                }
+                if (indexedRefs.size >= MATCH_MIN_REF_INTERVALS) {
+                    referenceRefs = indexedRefs
+                    // Score EVERY candidate here, unlike the buffer paths. The Office S01E04
+                    // (Sept 2026): the first candidate cleared the bar at 0.87, was taken on the
+                    // spot, and was the wrong sync — while the second in the list was perfect and
+                    // was never even loaded. Two reasons this path must compare:
+                    //  1. It has NO reference text (a Cues index stores timings only), so AI
+                    //     verification cannot run and nothing downstream can catch a bad pick.
+                    //     Candidates scored against each other are the only evidence left.
+                    //  2. Laziness bought memory and bandwidth back when the reference was a
+                    //     6-cue buffer read and candidates came over the network. Preload has
+                    //     usually already written these to disk, and a whole-file reference is
+                    //     what makes comparing them meaningful in the first place.
+                    loaded = loadAll()
+                    useContainerIndexLabel()
+                    matchStep(
+                        "2· reference from container index (${indexedRefs.size} cues) — " +
+                            "comparing ${loaded.size} subtitles…"
+                    )
+                    Log.i(
+                        "SubMatch",
+                        "container-index reference carries no text — scoring all ${loaded.size} " +
+                            "candidates (AI verification cannot run on this path)"
+                    )
+                    return withContext(Dispatchers.Default) {
+                        scoreCandidatesWithOffsets(loaded, referenceRefs, debug = true)
+                    }
+                }
+                // Alternates only stand in for an index-scale reference; this path has none.
+                alternateRefs = emptyList()
+                primaryTimeline = null
+                if (provisional != null) {
+                    provisionalDisplaced = true
+                    _uiState.value = _uiState.value.copy(provisionalMatch = null)
+                }
+                // This path collects its own references and returns only scores, so it cannot be
+                // re-run per candidate later — it needs the full set now.
+                loaded = loadAll()
+                return scoreAgainstBuiltIn(
+                    loaded, reference, sourceLabelRes, provisional ?: previousSubtitle
+                )
+            }
+
+            val primaryScored = when {
+                // Free reference: AI is already decoding the embedded English track on the main
+                // player (see aiOwnsReference). Read its buffer instead of opening a second one.
+                aiOwnsReference && builtInReference != null -> {
+                    matchStep("2· reading reference track…")
+                    prefetchSubtitleIndex(onlyForAutoScan = false)
+                    val candidateTexts = loaded.firstOrNull()?.second
+                        ?.map { normalizeCueTextForCompare(it.text) }?.filter { it.isNotEmpty() }
+                        ?.toHashSet().orEmpty()
+                    val collected = collectInPlayerReferenceCues(candidateTexts, builtInReference, ::subtitleIndexReady)
+                    referenceCues = collected.filter { it.text.isNotBlank() && !isSdhOnly(it.text) }
+                    referenceRefs = referenceCues.map { it.startMs to it.endMs }
+                    val span = if (referenceRefs.size >= 2) {
+                        referenceRefs.last().second - referenceRefs.first().first
+                    } else 0L
+                    Log.i(
+                        "SubMatch",
+                        "reference from player buffer (AI owns the reference track): " +
+                            "refs=${referenceRefs.size} span=${span / 1000}s — no probe needed"
+                    )
+                    // Both halves matter: two cues three seconds apart clear the count but describe
+                    // nothing. The probe path required a span as well and this branch shipped
+                    // without it, which would have let a 2-cue reference decide a verdict.
+                    if (referenceRefs.size < MATCH_MIN_REF_INTERVALS || span < MATCH_FAST_ACCEPT_SPAN_MS) {
+                        // Sparse track, or playback too young for the decoder to be far ahead. Hand
+                        // over to the in-player path, which collects realtime cues as they render
+                        // instead of only reading what is already buffered. It costs time, not a
+                        // second player — and it migrates the AI interim onto the reference rather
+                        // than switching it off, so nothing leaves the screen.
+                        Log.i(
+                            "SubMatch",
+                            "player buffer too thin (${referenceRefs.size} refs / ${span / 1000}s) " +
+                                "— in-player reference instead"
+                        )
+                        referenceRefs = emptyList()
+                        referenceCues = emptyList()
+                        runInPlayerReference(builtInReference)
+                    } else {
+                        // Self-match guard. This path trusts that the selected text track is the
+                        // reference — but if that assumption is ever wrong we are scoring a
+                        // subtitle against ITSELF, which produces exactly 1.00 timing and AI
+                        // pairing every line at 0ms: the two strongest "correct" signals we have,
+                        // both worthless. The in-player path has always checked this by TEXT
+                        // (timing can't: subs cut from the same master share cue timings across
+                        // languages), and this branch shipped without it.
+                        val refTexts = referenceCues
+                            .map { normalizeCueTextForCompare(it.text) }.filter { it.isNotEmpty() }
+                        val selfHits = refTexts.count { it in candidateTexts }
+                        loaded.firstOrNull()?.let { (sub, cues) ->
+                            Log.i(
+                                "SubMatch",
+                                "align src=player total=${referenceRefs.size} refs=${referenceRefs.take(3)} " +
+                                    "cand=\"${sub.label}\" candRange=${cues.firstOrNull()?.startMs}..${cues.lastOrNull()?.endMs} " +
+                                    "selfHits=$selfHits/${refTexts.size}"
+                            )
+                            // The TEXT on both sides — the only thing that can tell "right subtitle,
+                            // mistimed" from "wrong subtitle, coincidentally overlapping", and the
+                            // line whose absence made this branch undiagnosable.
+                            val firstRef = referenceRefs.firstOrNull()?.first ?: 0L
+                            val nearIdx = cues.indexOfFirst { it.endMs >= firstRef }.coerceAtLeast(0)
+                            val near = cues.subList(nearIdx, minOf(nearIdx + 3, cues.size))
+                            fun brief(t: String) = t.replace('\n', ' ').take(48)
+                            Log.d(
+                                "SubMatch",
+                                "text ref=" + referenceCues.take(3).joinToString(" | ") {
+                                    "${it.startMs}:\"${brief(it.text)}\""
+                                } + "  cand=" + near.joinToString(" | ") {
+                                    "${it.startMs}:\"${brief(it.text)}\""
+                                }
+                            )
+                        }
+                        if (refTexts.isNotEmpty() && selfHits * 2 >= refTexts.size) {
+                            // Belt and braces — the exclusion above should already have prevented
+                            // this. Fall back rather than withhold: withholding leaves the user on
+                            // AI with a perfectly good subtitle sitting unselected, which is the
+                            // exact complaint this guard first produced.
+                            Log.w(
+                                "SubMatch",
+                                "reference is the candidate itself ($selfHits/${refTexts.size} lines identical) " +
+                                    "— in-player reference instead"
+                            )
+                            referenceRefs = emptyList()
+                            referenceCues = emptyList()
+                            runInPlayerReference(builtInReference)
+                        } else {
+                            // Upgrade the reference to the container index when the file carries
+                            // one. The buffer describes only the seconds around the playhead —
+                            // From S02E04 (Sept 2026) decided a whole episode on 7 cues spanning
+                            // 16s, corroborating a +7.3s shift the AI pairing disagreed with —
+                            // while the index describes the entire file. The buffer's TEXT is kept
+                            // as referenceCues, so AI verification still runs: this buys timing
+                            // coverage without giving up the identity check.
+                            val indexedRefs = collectIndexedReferenceCues(
+                                builtInReference, referenceCues, onTimelines = { p, alts -> primaryTimeline = p; alternateRefs = alts }
+                            )
+                            if (indexedRefs.size > referenceRefs.size) {
+                                Log.i(
+                                    "SubMatch",
+                                    "reference upgraded: player buffer ${referenceRefs.size} cues / " +
+                                        "${span / 1000}s -> container index ${indexedRefs.size} cues"
+                                )
+                                referenceRefs = indexedRefs
+                                useContainerIndexLabel()
+                                // Compare every candidate once the reference spans the whole file.
+                                // Laziness is only defensible while the reference is a handful of
+                                // buffered cues, where scoring the rest proves little. House of the
+                                // Dragon S01E01 (Sept 2026): this path scored ONLY the first pick,
+                                // an HMAX WEB-DL subtitle, at 0.77 and stopped — while the same ten
+                                // candidates on another source showed a BluRay-cut subtitle at 0.96.
+                                // The source was a BluRay rip; the better subtitle was never loaded.
+                                loaded = loadAll()
+                            } else {
+                                alternateRefs = emptyList()
+                                primaryTimeline = null
+                            }
+                            matchStep("2· reference ok (${referenceRefs.size} cues) — scoring…")
+                            withContext(Dispatchers.Default) {
+                                scoreCandidatesWithOffsets(loaded, referenceRefs, debug = true)
+                            }
+                        }
+                    }
+                }
+                // No AI on screen: the reference track has to be taken from the visible player,
+                // which is what main has always done. Subtitles are hidden for the scan's duration.
+                builtInReference != null -> runInPlayerReference(builtInReference)
+                // Every embedded track is an image (PGS/VOBSUB) or forced — the ordinary shape of a
+                // BluRay remux. There is no text to read, so the in-player reference and AI both
+                // have nothing to work with, and the scan used to stop here and keep whatever the
+                // filename ranking guessed. The container index does not need text: it reads cue
+                // TIMESTAMPS, and an image track's cues are indexed like any other. So the file can
+                // still be verified. (The Office S01E01, Sept 2026: a failover landed on an AVC
+                // remux whose single embedded track was PGS — allEmbedded=1, embeddedRefs=0 —
+                // and a correct subtitle was kept as an unverified guess rather than confirmed.)
+                // A forced-flagged text track, judged by timing shape (see forcedTextReference).
+                // Text, so the retimer may run on it (textIndexReference); image tracks may not.
+                (forcedTextReference ?: indexProbeReference) != null && run {
+                    val shapeReference = forcedTextReference ?: indexProbeReference!!
+                    if (shapeReference === indexProbeReference) {
+                        Log.i("SubMatch", "player reported no embedded subtitle tracks — reading the container index anyway")
+                    }
+                    val indexedRefs = collectIndexedReferenceCues(
+                        shapeReference,
+                        onTimelines = { p, alts -> primaryTimeline = p; alternateRefs = alts },
+                        byTimingShape = true,
+                    )
+                    if (indexedRefs.size >= MATCH_MIN_REF_INTERVALS) {
+                        referenceRefs = indexedRefs
+                        textIndexReference = true
+                        true
+                    } else {
+                        Log.i(
+                            "SubMatch",
+                            "\"${shapeReference.label}\": no usable dialogue timeline in the container " +
+                                "index — trying the next fallback"
+                        )
+                        primaryTimeline = null
+                        alternateRefs = emptyList()
+                        false
+                    }
+                } -> {
+                    loaded = loadAll()
+                    useContainerIndexLabel()
+                    Log.i(
+                        "SubMatch",
+                        "no usable text track in the player — container index supplies the reference by timing shape " +
+                            "(${primaryTimeline?.label}, ${referenceRefs.size} cues, ${loaded.size} candidates; " +
+                            "no text, so AI verification cannot run)"
+                    )
+                    matchStep(
+                        "2· reference from container index (${referenceRefs.size} cues) — " +
+                            "comparing ${loaded.size} subtitles…"
+                    )
+                    withContext(Dispatchers.Default) {
+                        scoreCandidatesWithOffsets(loaded, referenceRefs, debug = true)
+                    }
+                }
+                bitmapReference != null -> {
+                    // An image track is not a timing reference. Its raw index lists every show AND
+                    // clear event with placeholder durations
+                    val indexedRefs = collectIndexedReferenceCues(bitmapReference)
+                    Log.i(
+                        "SubMatch",
+                        if (indexedRefs.size >= MATCH_MIN_REF_INTERVALS) {
+                            "image-only embedded tracks — no timing reference; keeping the first pick"
+                        } else {
+                            "image-only embedded tracks and no usable container index — nothing to verify against"
+                        }
+                    )
+                    null
+                }
                 // AI translation is already on screen as the fallback — the hearing path is too
                 // unreliable to risk replacing it, so just stay on AI.
                 _uiState.value.isAiTranslating -> null
+                // Never run hearing over a subtitle the user is already reading. It builds its
+                // reference from the audio, and startMatchListening has to free the text pipeline
+                // to do that — it sets selectedSubtitle = null, which wipes the pick off the
+                // screen. House of the Dragon (Sept 2026): a source with no embedded reference
+                // (embeddedRefs=0) fell through to hearing and erased a subtitle the user had
+                // confirmed was perfect. An unverified-but-good pick beats a verified blank screen.
+                provisional != null -> {
+                    Log.i("SubMatch", "no built-in reference — keeping \"${provisional.label}\" instead of hearing")
+                    matchStep("2· no reference track — keeping \"${provisional.label}\" unverified")
+                    null
+                }
                 // The hearing reference streams audio to the Gemini Live API — it needs the AI
                 // feature on, a key, and the Gemini model (a Groq key can't open that connection).
                 !aiSubtitleEnabled || aiApiKey.isBlank() ||
                     aiModel != SubtitleAiModel.GEMINI_FLASH_25 -> null
-                else -> scoreAgainstHearing(loaded, sourceLabel)
+                else -> {
+                    loaded = loadAll()
+                    scoreAgainstHearing(loaded, sourceLabelRes)
+                }
             }
+            // ── Alternate references ────────────────────────────────────────────────────────
+            // The preferred-language track is only a reference if it is timed to the video, and
+            // nothing checks that. When it gives no clean verdict — no candidate accepted as
+            // authored, only shifts or failures — ask the file's other dialogue tracks. Nothing is
+            // shifted here: an alternate only answers "does this subtitle fit AS AUTHORED against a
+            // track timed to this video?", which is one scoring pass per candidate. A shift the
+            // preferred track wanted is not confirmed by this, it is overruled: a correctly-timed
+            // track that accepts the subtitle unshifted means the preferred track was the bad one
+            // (The Shards S01E03 — see AlternateReference). A truly delayed subtitle fails against
+            // every correct track alike, so a real fix is never overruled this way.
+            val afterAlternates = primaryScored?.let { primary ->
+                if (alternateRefs.isEmpty() || primary.any {
+                        it.offsetMs == 0L && it.score >= MATCH_SUCCESS_THRESHOLD_TIMING
+                    }
+                ) return@let primary
+                // Same pipeline as the alternates (range and orphan drop included), unshifted.
+                val primaryAuthoredBest = withContext(Dispatchers.Default) {
+                    scoreCandidatesWithOffsets(loaded, referenceRefs, debug = false, allowOffsets = false)
+                }.maxOfOrNull { it.score } ?: 0.0
+                var bestAlt: Pair<IndexedReference, List<ScoredCandidate>>? = null
+                for (alt in alternateRefs) {
+                    val altScored = withContext(Dispatchers.Default) {
+                        scoreCandidatesWithOffsets(loaded, alt.refs, debug = false, allowOffsets = false)
+                    }
+                    val altBest = altScored.maxOfOrNull { it.score } ?: 0.0
+                    Log.i(
+                        "SubMatch",
+                        "[alt-ref] ${alt.label}: best as authored ${"%.2f".format(altBest)} " +
+                            "(preferred track: ${"%.2f".format(primaryAuthoredBest)} as authored)"
+                    )
+                    if (altBest >= MATCH_SUCCESS_THRESHOLD_TIMING && altBest > primaryAuthoredBest &&
+                        altBest > (bestAlt?.second?.maxOfOrNull { it.score } ?: 0.0)
+                    ) {
+                        bestAlt = alt to altScored
+                    }
+                }
+                val chosen = bestAlt ?: return@let primary
+                Log.i(
+                    "SubMatch",
+                    "[alt-ref] ${chosen.first.label} accepts a subtitle as authored — the preferred " +
+                        "track is mistimed; scoring against the alternate instead"
+                )
+                matchStep("2· built-in reference looks mistimed — timing against ${chosen.first.label} instead")
+                referenceRefs = chosen.first.refs
+                alternateReferenceInUse = true
+                chosen.second
+            }
+            // ── Retiming ───────────────────────────────────────────────────────────────────
+            // Still no subtitle that fits as authored. Everything above can only SHIFT a subtitle,
+            // so a speed mismatch (25 vs 23.976 fps), a different cut (a recap or a scene the
+            // subtitle lacks) or a shift beyond ±10s all end on AI. The retimer
+            // (AutoSyncTimelineRetimer) handles those: it correlates
+            // the WHOLE timelines — every indexed cue, not the 60-window sample — over ±180s and
+            // the standard frame-rate ratios, then pairs cues in order (1:1, 1:2, 2:1, …) and only
+            // calls a result confident when nearly every subtitle cue found its partner. That
+            // pairing is the structural check the overlap score never had.
+            // Every candidate is tried against every reference track and the best-quality pair
+            // wins, because a confident pair can still be the wrong reference: on The Shards
+            // S01E03 the drifting English track "confidently" stretched a correct subtitle by
+            // ×0.999 (quality 0.91) while the Russian track took it unshifted (0.94).
+            // Index path only (it needs whole timelines), and never on an image track: a PGS
+            // index lists "clear screen" events as cues, which the pairing would treat as lines.
+            val scored = afterAlternates?.let { current ->
+                val primary = primaryTimeline
+                // Gate on a STRONG as-authored fit, not merely a passing one. Dense dialogue makes a
+                // subtitle 47s out still overlap other lines by chance: Peaky Blinders S01E04
+                // scored 0.70–0.75 "as authored" while both files were ~47s late, the old gate
+                // (the 0.70 accept bar) counted that as a pass, and the retimer — which found
+                // −47.8s with 98% of cues paired — never ran.
+                if (primary == null || (builtInReference == null && !textIndexReference) || alternateReferenceInUse ||
+                    current.any { it.offsetMs == 0L && it.score >= MATCH_RETIME_SKIP_SCORE }
+                ) return@let current
+                val references = (listOf(primary) + alternateRefs).take(MATCH_RETIME_MAX_REFERENCES)
+                fun signature(cues: List<SubtitleSyncMatcher.TimedCue>) = cues.size to cues.map { it.startMs }.hashCode()
+                val distinct = loaded.distinctBy { (_, cues) -> signature(cues) }.take(MATCH_RETIME_MAX_CANDIDATES)
+                matchStep("3· re-timing ${distinct.size} subtitles against ${references.size} reference tracks…")
+                val startedAt = System.currentTimeMillis()
+                val bestBySignature = HashMap<Pair<Int, Int>, Pair<IndexedReference, com.arflix.tv.ui.screens.player.subtitles.AutoSyncTimelineRetimeResult>>()
+                withContext(Dispatchers.Default) {
+                    val job = coroutineContext
+                    for ((sub, cues) in distinct) for (ref in references) {
+                        val target = com.arflix.tv.ui.screens.player.subtitles.AutoSyncTimelineRetimer
+                            .normalizeExternalTimeline(cues)
+                        val result = runCatching {
+                            com.arflix.tv.ui.screens.player.subtitles.AutoSyncTimelineRetimer.retime(
+                                reference = ref.cues,
+                                target = target,
+                                coarseScale = 1.0,
+                                coarseInterceptMs = 0.0,
+                                discoverAlignment = true,
+                                // a reference cut much finer than the
+                                // subtitle (an English CC track vs a merged translation) makes
+                                // the delay margin ambiguous without anything being wrong.
+                                allowAmbiguousDelayOnlyMargin = ref.cues.size.toLong() * 2L >= target.size.toLong() * 3L,
+                                referenceEstimatedEndStartsMs = ref.estimatedEndStartsMs,
+                                cancellationCheck = { job.ensureActive() },
+                            )
+                        }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrNull()
+                        Log.i(
+                            "SubMatch",
+                            "[retime] \"${sub.label}\" vs ${ref.label}: " + (result?.let {
+                                "confident=${it.confident} via=${it.alignmentSource} " +
+                                    "scale=${"%.6f".format(it.alignmentScale)} intercept=${it.alignmentInterceptMs.toLong()}ms " +
+                                    "coverage=${"%.2f".format(it.targetCoverage)}/${"%.2f".format(it.referenceCoverage)} " +
+                                    "cost=${"%.2f".format(it.averageGroupCost)} simple=${"%.2f".format(it.simpleGroupRatio)} " +
+                                    "quality=${"%.3f".format(retimeQuality(it))}"
+                            } ?: "no alignment")
+                        )
+                        if (result == null || !result.confident) continue
+                        // Confident means "lines found partners", not "lines are close". Refuse a
+                        // map whose error walks across the episode — see RetimeConsistency. The
+                        // Shards S01E08 (Sept 2026) passed as confident, spread ~2.4s across the
+                        // episode, and put the subtitle ~5s late from the first minute. A refused
+                        // episode goes to the audio sync instead.
+                        val consistency = com.arflix.tv.ui.screens.player.subtitles.RetimeConsistency
+                            .check(com.arflix.tv.ui.screens.player.subtitles.RetimeConsistency.pairs(result, ref.cues, target))
+                        Log.i(
+                            "SubMatch",
+                            "[retime-check] \"${sub.label}\" vs ${ref.label}: served shift per part " +
+                                "${com.arflix.tv.ui.screens.player.subtitles.RetimeConsistency.placementProfile(result)}ms"
+                        )
+                        if (!consistency.fits) {
+                            Log.i(
+                                "SubMatch",
+                                "[retime-check] \"${sub.label}\" vs ${ref.label}: refused — per-part error " +
+                                    "${consistency.windowMedians}ms spreads ${consistency.spreadMs}ms " +
+                                    "(> ${com.arflix.tv.ui.screens.player.subtitles.RetimeConsistency.MAX_WINDOW_SPREAD_MS}ms): " +
+                                    "right in some parts of the episode, seconds out in others"
+                            )
+                            continue
+                        }
+                        val key = signature(cues)
+                        val held = bestBySignature[key]
+                        // Two references that place the same subtitle more than 300ms apart cannot
+                        // both be right; lets the one whose paired lines fit tighter win
+                        // before falling back to the quality ranking.
+                        val tighter = held?.let {
+                            com.arflix.tv.ui.screens.player.subtitles.preferTighterFitOnDisagreement(result, it.second)
+                        }
+                        if (tighter != null) {
+                            Log.i(
+                                "SubMatch",
+                                "[retime] \"${sub.label}\": references disagree — tighter fit wins " +
+                                    "${ref.label}:${result.medianGroupResidualMs.toLong()}ms vs " +
+                                    "${held.first.label}:${held.second.medianGroupResidualMs.toLong()}ms -> " +
+                                    if (tighter) ref.label else held.first.label
+                            )
+                        }
+                        if (held == null || tighter ?: (retimeQuality(result) > retimeQuality(held.second))) {
+                            bestBySignature[key] = ref to result
+                        }
+                    }
+                }
+                Log.i(
+                    "SubMatch",
+                    "[retime] ${distinct.size}×${references.size} pairs in ${System.currentTimeMillis() - startedAt}ms, " +
+                        "${bestBySignature.size} confident"
+                )
+                // The retimer is the arbiter for what it evaluated (applyRetimeVerdicts): a
+                // candidate it could not pair consistently with any reference fails here, even
+                // where the overlap sweep wanted to accept or shift it — and that holds when no
+                // candidate retimed at all. Candidates past the evaluation cap keep their own verdict.
+                val evaluated = distinct.mapTo(HashSet()) { (_, cues) -> signature(cues) }
+                com.arflix.tv.ui.screens.player.subtitles.applyRetimeVerdicts(
+                    candidates = current,
+                    keyOf = { candidate ->
+                        loaded.firstOrNull {
+                            it.first.provider == candidate.sub.provider && it.first.id == candidate.sub.id
+                        }?.second?.let(::signature)
+                    },
+                    evaluated = evaluated,
+                    confident = bestBySignature,
+                    reject = { candidate ->
+                        candidate.copy(score = minOf(candidate.score, MATCH_SUCCESS_THRESHOLD_TIMING - 0.01), offsetMs = 0L)
+                    }
+                ) { candidate, (ref, result) ->
+                    // A shift that pulls the first cues before 0:00 clamps them there, so their
+                    // deltas differ from the rest — Peaky Blinders S01E04's −47.8s moved the
+                    // opening cues (from 2.7s) to 0 and a plain offset was served as a rewritten
+                    // file ("re-timed", never remembered). Only unclamped cues say whether it is one.
+                    val deltas = result.cues.filter { it.startTimeMs > 0L }
+                        .map { it.startTimeMs - it.originalStartTimeMs }
+                    val uniform = result.alignmentScale == 1.0 &&
+                        (deltas.maxOrNull() ?: 0L) - (deltas.minOrNull() ?: 0L) <= 1L
+                    val offset = if (uniform) {
+                        (deltas.firstOrNull() ?: result.alignmentInterceptMs.toLong())
+                            .takeIf { kotlin.math.abs(it) >= MATCH_OFFSET_MIN_MS } ?: 0L
+                    } else 0L
+                    ScoredCandidate(
+                        candidate.sub,
+                        retimeQuality(result),
+                        offset,
+                        RetimePlan(result, ref.label, uniform),
+                    ).also {
+                        Log.i(
+                            "SubMatch",
+                            "[retime] \"${candidate.sub.label}\" -> ${ref.label} " +
+                                if (uniform) "offset=${offset}ms" else "re-timed cue by cue (scale=${"%.6f".format(result.alignmentScale)})"
+                        )
+                    }
+                }
+            }
+            // ── Other-track veto ────────────────────────────────────────────────────────────
+            // A shift is applied only if no embedded track says the subtitle already fits as
+            // published. The alternate stage above asks the other tracks only when the preferred
+            // one gave no clean as-authored verdict; this asks them for every candidate about to
+            // be shifted. The bar is identity-good (MATCH_RETIME_SKIP_SCORE), not the 0.70 accept
+            // bar: chance overlap in dense dialogue reaches 0.70–0.75 on a subtitle 47s out
+            // (Peaky Blinders S01E04), which must not veto its real fix.
+            val vetoed = scored?.let { current ->
+                val tracks = listOfNotNull(primaryTimeline) + alternateRefs
+                if (tracks.size < 2) return@let current
+                current.map { candidate ->
+                    val shifts = candidate.offsetMs != 0L || candidate.retime?.uniform == false
+                    if (!shifts) return@map candidate
+                    val cues = loaded.firstOrNull {
+                        it.first.provider == candidate.sub.provider && it.first.id == candidate.sub.id
+                    }?.second ?: return@map candidate
+                    val asAuthored = tracks.map { track ->
+                        track to withContext(Dispatchers.Default) {
+                            scoreCandidatesWithOffsets(listOf(candidate.sub to cues), track.refs, debug = false, allowOffsets = false)
+                        }.firstOrNull()?.score
+                    }.filter { (_, score) -> score != null && score >= MATCH_RETIME_SKIP_SCORE }
+                        .maxByOrNull { (_, score) -> score ?: 0.0 }
+                        ?: return@map candidate
+                    Log.i(
+                        "SubMatch",
+                        "[veto] \"${candidate.sub.label}\": ${asAuthored.first.label} takes it as published " +
+                            "(${"%.2f".format(asAuthored.second)}) — dropping the " +
+                            (if (candidate.retime?.uniform == false) "re-timing" else "${candidate.offsetMs}ms shift")
+                    )
+                    ScoredCandidate(candidate.sub, asAuthored.second ?: candidate.score, 0L)
+                }
+            }
+            logPhase("verdict", "best=${vetoed?.maxOfOrNull { it.score }?.let { "%.2f".format(it) } ?: "-"}")
             endMatch()
 
-            val successThreshold = if (builtInReference != null) {
+            // The hearing bar (0.30) is for the audio reference only. Every timing reference —
+            // the in-player track AND the container index (image tracks, forced-flagged text) —
+            // is judged at the timing bar; keying this on builtInReference alone let index-only
+            // scans accept at 0.30.
+            val successThreshold = if (builtInReference != null || referenceRefs.isNotEmpty()) {
                 MATCH_SUCCESS_THRESHOLD_TIMING
             } else {
                 MATCH_SUCCESS_THRESHOLD_HEARING
             }
-            val best = scored?.maxByOrNull { it.score }
             // A corroborated constant-offset rescue (offsetMs != 0, set only when ≥2 candidates
             // agreed) accepts at its own lower bar — segmentation caps its timing score below the
             // normal 0.70. The lone-strong offset path already required ≥0.80, so it clears this too.
-            if (best != null && (
-                    best.score >= successThreshold ||
-                        (best.offsetMs != 0L && best.score >= MATCH_OFFSET_CORROBORATED_ACCEPT)
-                    )
+            fun accepted(candidate: ScoredCandidate): Boolean =
+                candidate.score >= successThreshold ||
+                    (candidate.offsetMs != 0L && candidate.score >= MATCH_OFFSET_CORROBORATED_ACCEPT)
+
+            // AI semantic sync — key-holders only. Consulted in the two situations where the
+            // overlap sweep is untrustworthy: when a subtitle FAILED as authored (it may need a
+            // rescue the sweep couldn't find), and — crucially — whenever the sweep is ABOUT TO
+            // SHIFT a subtitle. Every bad result seen in testing came from an offset the sweep was
+            // confident about, so a confidently-wrong offset must not be able to shut AI out.
+            // Pairing lines by meaning is segmentation-independent, which is exactly the property
+            // the sweep lacks. One small request, and only in those two cases.
+            var results = vetoed
+            // Subtitles the model confirmed are not this dialogue. Kept across a re-score, which
+            // would otherwise hand back the same coincidental timing score that fooled us.
+            val aiRejected = HashSet<String>()
+            // The model's own measurement at the playhead for a subtitle AS AUTHORED: handed to the
+            // audio sync if the scan ends unverified, as the timing to show until the audio has
+            // measured that part of the episode itself (see ArvioAudioSync.LocalAnchor).
+            // Per subtitle: each candidate the model checked has its own measurement, and the one
+            // checked last must not stand in for the one the audio takes over (The Shards S01E04,
+            // Sept 2026: Ktuvit's anchor replaced Wizdom's, and Wizdom went to the audio with none).
+            val aiAnchors = HashMap<String, com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync.LocalAnchor>()
+            // Per subtitle the model answered for: true when it paired none of the lines (not this
+            // episode's dialogue). A failed request leaves no entry.
+            val aiNotThisDialogue = HashMap<String, Boolean>()
+
+            // Escalation. Only the first choice was parsed and scored; the rest of the pack is
+            // loaded HERE, once that one has actually failed. In the common case (it passes) the
+            // other candidates are never downloaded, parsed or held in memory at all.
+            suspend fun escalate(): Boolean {
+                if (loaded.size > 1 || referenceRefs.isEmpty()) return false
+                val failed = results?.firstOrNull()
+                loaded = loadAll()
+                if (loaded.size <= 1) return false
+                matchStep(
+                    "3· \"${failed?.sub?.label ?: firstChoice?.label}\" rejected" +
+                        " — checking ${loaded.size - 1} other subtitles…"
+                )
+                Log.i("SubMatch", "escalating to all ${loaded.size} candidates")
+                results = withContext(Dispatchers.Default) {
+                    scoreCandidatesWithOffsets(loaded, referenceRefs, debug = true)
+                }?.map {
+                    if ("${it.sub.provider}|${it.sub.id}" in aiRejected) {
+                        ScoredCandidate(it.sub, 0.0, 0L)
+                    } else {
+                        it
+                    }
+                }
+                return true
+            }
+
+            if (results?.none { accepted(it) } == true) escalate()
+
+            // ── AI text verification ────────────────────────────────────────────────────────
+            // Timing overlap answers "is there dialogue in the same places", never "is it the SAME
+            // dialogue". In dense speech any subtitle for a similarly-paced show scores 0.7-0.9, so
+            // a high score is NOT evidence that the file belongs to this episode — From S02E04
+            // (Sept 2026) accepted a completely unrelated subtitle at 0.76 across 13 reference
+            // windows. Gating this check on "thin" evidence was wrong for exactly that reason: more
+            // windows do not make a coincidence less likely, they make it look more convincing.
+            // So whenever a key exists, the candidate we are about to commit to gets its TEXT
+            // checked — and if it is rejected, so does the next one, up to a small call budget.
+            var aiChecks = 0
+            /**
+             * What the model established for each candidate it looked at and did not reject. Only
+             * [AiVerdict.CONFIRMED] is a verification: an UNCONFIRMED check (the request failed, too
+             * few pairs to measure, pairs that disagree) still lets the candidate win on timing, but
+             * it is not remembered as a verified match (PR #688 review).
+             */
+            val aiVerdicts = HashMap<String, AiVerdict>()
+            while (aiChecks < MATCH_AI_MAX_VERIFICATIONS && referenceCues.isNotEmpty() &&
+                aiSubtitleEnabled && translationService.canMatchSubtitleLines()
             ) {
-                selectServedLocally(best.sub, best.offsetMs)
+                aiChecks++
+                val aiTarget = results?.let { list ->
+                    provisional
+                        ?.let { p -> list.firstOrNull { it.sub.provider == p.provider && it.sub.id == p.id } }
+                        ?.takeIf { accepted(it) }
+                        // Verify the candidate we would actually commit to, tie-break included —
+                        // otherwise the model vets one subtitle and a different one gets selected.
+                        ?: list.filter { accepted(it) }.bestWithTieBreak(streamSrc)
+                        ?: list.bestWithTieBreak(streamSrc)
+                } ?: break
+                if ("${aiTarget.sub.provider}|${aiTarget.sub.id}" in aiRejected) break
+                val authoredCues = loaded.firstOrNull {
+                    it.first.provider == aiTarget.sub.provider && it.first.id == aiTarget.sub.id
+                }?.second
+                if (authoredCues == null) break
+                // Where the retimer decided the timing, the model must see the subtitle AS IT WILL
+                // BE SHOWN. Its pairing only looks for partners near each reference line, so the
+                // authored cues of a subtitle the retimer moved by 47s pair with nothing and a
+                // correct fix is "rejected" as the wrong dialogue.
+                val targetCues = aiTarget.retime?.let { plan ->
+                    if (plan.uniform) {
+                        SubtitleSyncMatcher.shiftCues(authoredCues, aiTarget.offsetMs)
+                    } else {
+                        val moved = plan.result.cues.associate {
+                            (it.originalStartTimeMs to it.originalEndTimeMs) to (it.startTimeMs to it.endTimeMs)
+                        }
+                        authoredCues.map { cue ->
+                            moved[cue.startMs to cue.endMs]?.let { (start, end) -> cue.copy(startMs = start, endMs = end) } ?: cue
+                        }
+                    }
+                } ?: authoredCues
+                var outcome = AiVerdict.UNCONFIRMED
+                run {
+                    matchStep(
+                        when {
+                            aiTarget.offsetMs != 0L -> "3· checking the ${formatMatchOffset(aiTarget.offsetMs)} fix with AI…"
+                            accepted(aiTarget) -> "3· confirming \"${aiTarget.sub.label}\" is the right subtitle…"
+                            else -> "3· \"${aiTarget.sub.label}\" failed — asking AI to align it…"
+                        }
+                    )
+                    val aiSync = measureOffsetWithAi(referenceCues, targetCues, aiTarget.sub.label)
+                    if (aiSync != null) aiNotThisDialogue["${aiTarget.sub.provider}|${aiTarget.sub.id}"] = aiSync.notThisDialogue
+                    outcome = aiSync.verdict()
+                    val aiOffset = aiSync?.offsetMs
+                    // Also a shift too large for a constant fix (a different cut): it is still
+                    // exactly right AT the playhead, which is all an anchor claims.
+                    val localShift = aiOffset ?: aiSync?.unfixableShiftMs
+                    if (localShift != null && aiTarget.retime == null && aiTarget.offsetMs == 0L &&
+                        (aiSync?.pairs ?: 0) >= MATCH_AI_ANCHOR_MIN_PAIRS && referenceCues.isNotEmpty()
+                    ) {
+                        val at = referenceCues.map { it.startMs }.sorted().let { it[it.size / 2] }
+                        aiAnchors["${aiTarget.sub.provider}|${aiTarget.sub.id}"] =
+                            com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync.LocalAnchor(at, localShift)
+                        Log.i("SubMatch", "[ai-sync] anchor for the audio sync: ${localShift}ms at ${at / 1_000}s (${aiSync?.pairs} lines)")
+                    }
+                    suspend fun scoreAt(
+                        offsetMs: Long,
+                        toleranceMs: Long = MATCH_OVERLAP_TOLERANCE_MS,
+                    ) = withContext(Dispatchers.Default) {
+                        SubtitleSyncMatcher.scoreByTiming(
+                            SubtitleSyncMatcher.shiftCues(targetCues, offsetMs),
+                            referenceRefs,
+                            toleranceMs
+                        )
+                    }
+                    /**
+                     * Authored vs shifted, judged STRICTLY (no overlap tolerance).
+                     *
+                     * The ±[MATCH_OVERLAP_TOLERANCE_MS] used elsewhere exists so a correctly-timed
+                     * but differently-segmented subtitle is not docked — it is not a yardstick for
+                     * choosing between two timings of the SAME subtitle, because it absorbs the
+                     * very error being measured. House of the Dragon S01E01 (Sept 2026): a uniform
+                     * ~714ms lateness, confirmed by the model on 4/4 paired lines and visible in
+                     * the per-segment fits (0.30→0.47, 0.57→0.76), scored 0.77 "as authored"
+                     * against 0.69 shifted under the tolerant metric — so the real fix was thrown
+                     * away and the user watched a subtitle a second out for the whole episode.
+                     */
+                    suspend fun improvesStrictly(offsetMs: Long): Boolean =
+                        scoreAt(offsetMs, toleranceMs = 0L) > scoreAt(0L, toleranceMs = 0L) + MATCH_AI_MIN_GAIN
+                    fun replaceTarget(score: Double, offsetMs: Long) {
+                        results = results?.map {
+                            if (it === aiTarget) ScoredCandidate(it.sub, score, offsetMs) else it
+                        }
+                    }
+                    when {
+                        // The model could pair none, or almost none, of the lines between the
+                        // reference and this subtitle: it is not this dialogue. Timing cannot see
+                        // that, so this is the only check that catches a coincidental high score.
+                        // Zero the candidate so the escalation below looks at the rest of the pack,
+                        // and if none of them are right either, the ladder ends on AI translation.
+                        aiSync != null && aiSync.notThisDialogue -> {
+                            Log.w(
+                                "SubMatch",
+                                "[ai-sync] \"${aiTarget.sub.label}\" scored ${"%.2f".format(aiTarget.score)} " +
+                                    "but ${if (aiSync.pairs == 0) "NO lines pair" else "only ${aiSync.pairs}/${aiSync.sent} lines pair"}" +
+                                    " — wrong subtitle, rejecting"
+                            )
+                            matchStep("3· \"${aiTarget.sub.label}\" is the wrong subtitle — rejecting")
+                            aiRejected.add("${aiTarget.sub.provider}|${aiTarget.sub.id}")
+                            replaceTarget(0.0, 0L)
+                        }
+
+                        // The lines pair, but only after a shift larger than any real sync error:
+                        // this is the same episode cut to a different length, and no constant
+                        // offset makes it usable. Reject it — the timing score that called it a
+                        // match is the coincidence, not the measurement.
+                        aiSync?.unfixableShiftMs != null -> {
+                            Log.w(
+                                "SubMatch",
+                                "[ai-sync] \"${aiTarget.sub.label}\" needs ${aiSync.unfixableShiftMs}ms " +
+                                    "— different cut, rejecting (timing said ${"%.2f".format(aiTarget.score)})"
+                            )
+                            matchStep(
+                                "3· \"${aiTarget.sub.label}\" is a different cut " +
+                                    "(${formatMatchOffset(aiSync.unfixableShiftMs)} out) — rejecting"
+                            )
+                            aiRejected.add("${aiTarget.sub.provider}|${aiTarget.sub.id}")
+                            replaceTarget(0.0, 0L)
+                        }
+
+                        // The model paired the lines AS THE RETIME PLACES THEM and they are still out:
+                        // the retime is wrong here, whatever its whole-file pairing says. Only when
+                        // both measured against the same track (the model reads the built-in
+                        // reference), so a mistimed track cannot veto a retime against another one.
+                        // The Shards S01E08 (Sept 2026): 7/8 lines paired at 1:27, the retimed
+                        // subtitle 4.6s late, and the retime was served anyway — "really off".
+                        // Rejected, the scan ends unverified and the audio sync takes over.
+                        aiTarget.retime != null && !alternateReferenceInUse && aiOffset != null &&
+                            aiTarget.retime.referenceLabel == primaryTimeline?.label &&
+                            kotlin.math.abs(aiOffset) > MATCH_AI_RETIME_VETO_MS -> {
+                            Log.w(
+                                "SubMatch",
+                                "[ai-sync] \"${aiTarget.sub.label}\": ${aiSync?.pairs} lines paired as re-timed are " +
+                                    "${aiOffset}ms out at the playhead (> ${MATCH_AI_RETIME_VETO_MS}ms) — rejecting the retime"
+                            )
+                            matchStep(
+                                "3· re-timed \"${aiTarget.sub.label}\" is ${formatMatchOffset(aiOffset)} out here — rejecting"
+                            )
+                            aiRejected.add("${aiTarget.sub.provider}|${aiTarget.sub.id}")
+                            replaceTarget(0.0, 0L)
+                        }
+
+                        // The model paired the lines, so the dialogue is right — but it measured
+                        // their timing against the preferred text track, which the alternate
+                        // reference just showed to be mistimed. Its offset is that track's error,
+                        // not this subtitle's: keep the identity check, ignore the measurement.
+                        // Same for a retimer verdict: that pairing covered the whole file, and
+                        // a few buffered lines' median shift cannot overrule it — least of all a
+                        // speed correction, where no single offset is right.
+                        alternateReferenceInUse || aiTarget.retime != null ->
+                            Log.i(
+                                "SubMatch",
+                                "[ai-sync] dialogue paired (${aiSync?.pairs} lines); timing offset " +
+                                    "${aiOffset}ms ignored — " +
+                                    if (aiTarget.retime != null) "the retimer's whole-file pairing decides timing"
+                                    else "measured against the mistimed text track"
+                            )
+
+                        // A failed request, or an answer too thin or inconsistent to measure. The
+                        // timing verdict stands and the candidate may still be selected on it, but
+                        // this is NOT a confirmation — see aiVerdicts.
+                        aiOffset == null ->
+                            Log.i(
+                                "SubMatch",
+                                "[ai-sync] could not confirm the dialogue — timing verdict stands (unverified)"
+                            )
+
+                        // The two instruments agree: the shift is real, keep it.
+                        kotlin.math.abs(aiOffset - aiTarget.offsetMs) <= MATCH_AI_OUTLIER_MS ->
+                            Log.i(
+                                "SubMatch",
+                                "[ai-sync] confirms ${aiTarget.offsetMs}ms (AI measured ${aiOffset}ms)"
+                            )
+
+                        else -> {
+                            val aiScore = if (kotlin.math.abs(aiOffset) >= MATCH_OFFSET_MIN_MS) {
+                                scoreAt(aiOffset)
+                            } else {
+                                // AI says "already aligned" — score it as authored.
+                                scoreAt(0L)
+                            }
+                            val aiApplied = if (kotlin.math.abs(aiOffset) >= MATCH_OFFSET_MIN_MS) aiOffset else 0L
+                            // A shift the MODEL measured only has to avoid making things worse.
+                            // MATCH_OFFSET_MIN_GAIN guards the blind sweep, which finds offsets by
+                            // maximising overlap and can invent a centring artifact worth a few
+                            // hundredths — there, a large gain is the evidence. Here the paired
+                            // lines are the evidence, and demanding the same gain throws away
+                            // correct fixes: From S02E05 (Sept 2026) discarded a verified -8.5s
+                            // correction because it scored 0.9096 against a 0.91 bar.
+                            // Two ways a model-measured shift earns its place. The tolerant
+                            // comparison is the original one. The STRICT one exists because the
+                            // ±MATCH_OVERLAP_TOLERANCE_MS window absorbs sub-second errors: a
+                            // uniformly ~714ms-late subtitle scored 0.77 authored vs 0.69 shifted
+                            // and the fix was discarded, while strict scoring of the same pair
+                            // showed the shift clearly ahead (House of the Dragon S01E01, Sept
+                            // 2026 — model agreed on 4/4 paired lines, and the user watched the
+                            // whole episode a second out). Tolerance is for not docking a good
+                            // subtitle, never for choosing between two timings of one subtitle.
+                            val strictlyBetter = aiApplied != 0L && improvesStrictly(aiApplied)
+                            // The model measured the lines around the PLAYHEAD; a shift from one spot
+                            // is applied to the whole file, so it has to fit every third of it. The
+                            // Shards S01E04 (Sept 2026): +5.8s from 6/6 lines at the start, while
+                            // the file needs 5.8/7.1/8.7s — right for the opening, seconds out by the
+                            // end. Too few reference windows to split into thirds → not checked.
+                            val thirds = withContext(Dispatchers.Default) {
+                                SubtitleSyncMatcher.segmentOffsets(authoredCues, referenceRefs, MATCH_OFFSET_MAX_MS)
+                            }
+                            // A third whose fit ran to the edge of the search found nothing there —
+                            // no answer, not a measurement (The Shards S01E03 vs its Russian track:
+                            // 200/10250/400ms for a subtitle correct as published). Judge only on
+                            // real fits, and only with at least two of them.
+                            val measured = thirds?.filter { kotlin.math.abs(it) < MATCH_OFFSET_MAX_MS - 500L }
+                            val fitsWholeFile = measured == null || measured.size < 2 ||
+                                measured.all { kotlin.math.abs(it - aiApplied) <= MATCH_OFFSET_MISALIGNED_MS }
+                            if (!fitsWholeFile) {
+                                Log.w(
+                                    "SubMatch",
+                                    "[ai-sync] ${aiApplied}ms measured at the playhead does not fit the whole file " +
+                                        "(thirds=${thirds.joinToString("/")}ms) — not applying"
+                                )
+                            } else if (aiScore >= aiTarget.score + MATCH_AI_MIN_GAIN || strictlyBetter) {
+                                Log.i(
+                                    "SubMatch",
+                                    "[ai-sync] overrides ${aiTarget.offsetMs}ms with ${aiApplied}ms: " +
+                                        "${"%.2f".format(aiTarget.score)} -> ${"%.2f".format(aiScore)}" +
+                                        if (strictlyBetter && aiScore < aiTarget.score + MATCH_AI_MIN_GAIN) {
+                                            " (accepted on strict scoring — tolerance was masking the error)"
+                                        } else {
+                                            ""
+                                        }
+                                )
+                                // Keep the TOLERANT score for the candidate: the 0.70 accept bar
+                                // and every comparison against other candidates are calibrated on
+                                // it. Only the decision above is strict.
+                                replaceTarget(maxOf(aiScore, aiTarget.score), aiApplied)
+                            } else if (aiTarget.offsetMs != 0L) {
+                                // AI contradicts a shift the sweep wanted to apply and cannot beat
+                                // it on our own metric either. Neither instrument is trustworthy
+                                // here, so apply NO shift: leaving a subtitle as authored is always
+                                // recoverable, silently sliding it by seconds is not.
+                                val asAuthored = scoreAt(0L)
+                                Log.w(
+                                    "SubMatch",
+                                    "[ai-sync] contradicts ${aiTarget.offsetMs}ms (AI: ${aiOffset}ms) — " +
+                                        "dropping the shift, as-authored=${"%.2f".format(asAuthored)}"
+                                )
+                                matchStep("3· AI disagrees with the ${formatMatchOffset(aiTarget.offsetMs)} fix — not applying it")
+                                replaceTarget(asAuthored, 0L)
+                            } else {
+                                Log.i(
+                                    "SubMatch",
+                                    "[ai-sync] discarded: would score ${"%.2f".format(aiScore)} " +
+                                        "(was ${"%.2f".format(aiTarget.score)})"
+                                )
+                            }
+                        }
+                    }
+                }
+                // Not rejected: stop asking, and record what the model actually established — a
+                // confirmed dialogue, or only a failed/inconclusive check that leaves timing standing.
+                if ("${aiTarget.sub.provider}|${aiTarget.sub.id}" !in aiRejected) {
+                    aiVerdicts["${aiTarget.sub.provider}|${aiTarget.sub.id}"] = outcome
+                    break
+                }
+                // Rejected. Bring in the rest of the pack (first time only) and go round again for
+                // the next best candidate, so a wrong subtitle can't just be replaced by another
+                // wrong one. The rejected candidate now scores 0, so it can't be picked again.
+                escalate()
+            }
+
+            val best = results?.bestWithTieBreak(streamSrc)
+            val provisionalScored = provisional?.let { p ->
+                results?.firstOrNull { it.sub.provider == p.provider && it.sub.id == p.id }
+            }
+            // Swap policy: the top release-name pick is already on screen, and once it is *verified*
+            // (as authored, or with a timing fix that measurably improved it) the scan is done —
+            // looking for a marginally better-synced alternative is not worth changing the
+            // subtitle's typography and line breaks halfway through a scene. Another candidate only
+            // takes over when the top one failed outright.
+            // When the model is available it has the final say: a candidate it never looked at must
+            // not be accepted just because the loop ran out of budget. Timing alone put three
+            // rejected subtitles at 0.81-0.82 in one scan, so "highest remaining score" is not a
+            // safe default — silence from the verifier means unverified, not approved.
+            val aiIsArbiter = referenceCues.isNotEmpty() && aiSubtitleEnabled && translationService.canMatchSubtitleLines()
+            // "Cleared" = the model looked at it and did not reject it. That is enough to SELECT it:
+            // a failed or inconclusive check leaves a timing-only fallback, which is fine. Whether it
+            // counts as VERIFIED, and may be remembered, is a separate question — see the cache write.
+            fun cleared(candidate: ScoredCandidate): Boolean =
+                !aiIsArbiter || "${candidate.sub.provider}|${candidate.sub.id}" in aiVerdicts
+
+            // Keeping the on-screen pick stops short of keeping a worse one: when another
+            // candidate is clearly better (≥ MATCH_SWAP_MIN_GAIN) and has itself been accepted and
+            // cleared, it takes over.
+            // One bar, whatever the verdict is worth. A lower bar (0.03) for timing-only verdicts
+            // was tried on 2026-09-19 and reverted within the hour: South Park S06E02 swapped a
+            // 0.87 subtitle for a 0.90 one on that margin and landed on a subtitle that did not
+            // match the episode. Three hundredths across 60 reference windows is inside this
+            // metric's noise, not evidence — do not lower this again without a calibration over
+            // many files, and never on the strength of one report.
+            val provisionalOutclassed = provisionalScored != null && best != null &&
+                best !== provisionalScored && accepted(best) && cleared(best) &&
+                best.score >= provisionalScored.score + MATCH_SWAP_MIN_GAIN
+            if (provisionalOutclassed && provisionalScored != null && best != null) {
+                Log.i(
+                    "SubMatch",
+                    "swapping the on-screen pick: \"${provisionalScored.sub.label}\" " +
+                        "${"%.2f".format(provisionalScored.score)} -> \"${best.sub.label}\" " +
+                        "${"%.2f".format(best.score)} (gain ≥ $MATCH_SWAP_MIN_GAIN)"
+                )
+            }
+            val decided = when {
+                provisionalScored != null && accepted(provisionalScored) &&
+                    cleared(provisionalScored) && !provisionalOutclassed -> provisionalScored
+                best == null || !accepted(best) || !cleared(best) -> null
+                else -> best
+            }
+            val winner = decided?.let { familyMemberFor(it) }
+            if (winner == null && best != null && accepted(best) && !cleared(best)) {
+                Log.w(
+                    "SubMatch",
+                    "no verified candidate: best was \"${best.sub.label}\" at " +
+                        "${"%.2f".format(best.score)} but AI never cleared it"
+                )
+                matchStep("4· none of the subtitles could be confirmed — falling back")
+            }
+            // Step trace: say what happened to the first pick specifically.
+            if (provisional != null) {
+                val pct = provisionalScored?.let { (it.score * 100).toInt() }
+                when {
+                    provisionalScored == null ->
+                        matchStep("3· \"${provisional.label}\" not scored — trying other subtitles")
+                    winner === provisionalScored && provisionalScored.offsetMs != 0L ->
+                        matchStep(
+                            "3· fixed \"${provisional.label}\" by " +
+                                "${formatMatchOffset(provisionalScored.offsetMs)} ($pct%) — keeping it"
+                        )
+                    winner === provisionalScored ->
+                        matchStep("3· \"${provisional.label}\" verified $pct% — keeping it")
+                    else ->
+                        matchStep("3· \"${provisional.label}\" failed at $pct% — trying other subtitles")
+                }
+            }
+            // Thin evidence may ACCEPT but must never REJECT. A handful of reference windows in a
+            // quiet stretch says nothing about a subtitle: if the candidate happens not to cover
+            // two of four windows — English CC sound-effect cues that a dialogue translation
+            // correctly lacks — each scores a hard 0, orphan-drop can't fire (its keep-floor needs
+            // most windows covered), and a perfect subtitle lands at 0.19. That is exactly what
+            // happened on From S01E08 (Sept 2026): 4 refs, ref #1 matching the subtitle to 206ms,
+            // verdict "nothing verified", cascade to AI. The in-player path has always withheld a
+            // reject on weak references; the buffer path needs the same rule.
+            if (winner == null && provisional != null && aiOwnsReference &&
+                referenceRefs.size < MATCH_MIN_REFS_FOR_REJECT
+            ) {
+                Log.w(
+                    "SubMatch",
+                    "verdict withheld: only ${referenceRefs.size} reference windows " +
+                        "(best=${"%.2f".format(best?.score ?: 0.0)}) — keeping \"${provisional.label}\""
+                )
+                matchStep("3· too little dialogue to judge — keeping \"${provisional.label}\"")
+                endMatch()
+                return@launch
+            }
+
+            if (winner != null) {
+                stopAudioSync()
+                val sync = SubtitleAutoSync.ofMs(winner.offsetMs)
+                // A cue-by-cue retime is a different FILE, not a live offset, so it can never be
+                // "kept" on screen — the rewritten copy has to be loaded.
+                val retimedCopy = winner.retime?.takeIf { !it.uniform }
+                val keepsProvisional = provisional != null && !provisionalDisplaced && retimedCopy == null &&
+                    winner.sub.provider == provisional.provider && winner.sub.id == provisional.id
+                if (retimedCopy != null && selectRetimedLocally(winner.sub, retimedCopy)) {
+                    matchStep(
+                        "4· switched to \"${winner.sub.label}\" ${(winner.score * 100).toInt()}% " +
+                            "(re-timed against ${retimedCopy.referenceLabel})"
+                    )
+                } else if (keepsProvisional) {
+                    // Already rendering — only the correction changes, which is a renderer-side
+                    // transform, so nothing reloads.
+                    applyAutoSync(winner.sub, sync)
+                } else {
+                    if (provisional != null) {
+                        Log.i("SubMatch", "swap provisional \"${provisional.label}\" -> \"${winner.sub.label}\"")
+                    }
+                    selectServedLocally(winner.sub, sync)
+                    matchStep(
+                        "4· switched to \"${winner.sub.label}\" ${(winner.score * 100).toInt()}%" +
+                            (if (winner.offsetMs != 0L) " (${formatMatchOffset(winner.offsetMs)})" else "")
+                    )
+                }
                 // Cache the original (addon) identity + any rescue offset — the local file is
                 // per-session transient, but the offset must be re-applied on the next playback.
-                writeCachedMatch(best.sub, best.offsetMs)
-                val offsetNote = if (best.offsetMs != 0L) " (auto-offset ${formatMatchOffset(best.offsetMs)})" else ""
+                // Deferred until the match has survived real viewing (see rememberMatchAfterDwell),
+                // and only for a VERIFIED match: with AI available, one whose dialogue the model
+                // confirmed. A timing-only fallback is selected but not remembered, so the next
+                // playback scans again instead of skipping straight to an unconfirmed subtitle.
+                // Verdicts are recorded against the family representative that was checked, which
+                // is `decided` — `winner` may be a family member served in its place.
+                val winnerVerdict = aiVerdicts["${decided.sub.provider}|${decided.sub.id}"]
+                if (retimedCopy != null) {
+                    // The cache stores a subtitle and one offset; a cue-by-cue retime is neither,
+                    // and replaying it would need the whole scan anyway. Scan again next time.
+                    Log.i("SubMatch", "not remembering \"${winner.sub.label}\": re-timed cue by cue")
+                } else if (mayRememberMatch(aiIsArbiter, winnerVerdict)) {
+                    rememberMatchAfterDwell(winner.sub, winner.offsetMs)
+                } else {
+                    Log.i(
+                        "SubMatch",
+                        "not remembering \"${winner.sub.label}\": AI could not confirm the dialogue (timing-only)"
+                    )
+                }
                 showMatchToast(
-                    "Matched: ${best.sub.label} · ${(best.score * 100).toInt()}% ($sourceLabel)$offsetNote"
+                    if (retimedCopy != null) {
+                        PlayerMessage.Res(
+                            R.string.player_match_scored_retimed,
+                            listOf(
+                                winner.sub.label,
+                                (winner.score * 100).toInt(),
+                                PlayerMessage.Res(sourceLabelRes)
+                            )
+                        )
+                    } else if (winner.offsetMs != 0L) {
+                        PlayerMessage.Res(
+                            R.string.player_match_scored_offset,
+                            listOf(
+                                winner.sub.label,
+                                (winner.score * 100).toInt(),
+                                PlayerMessage.Res(sourceLabelRes),
+                                formatMatchOffset(winner.offsetMs)
+                            )
+                        )
+                    } else {
+                        PlayerMessage.Res(
+                            R.string.player_match_scored,
+                            listOf(
+                                winner.sub.label,
+                                (winner.score * 100).toInt(),
+                                PlayerMessage.Res(sourceLabelRes)
+                            )
+                        )
+                    }
                 )
+                // The scan is done: free the shadow player and its connection immediately. Nothing
+                // else in the session needs it, and holding a second ExoPlayer (with its sample
+                // queues) alongside the one that is actually decoding is pure overhead.
             } else {
-                // Nothing synced found (or too little dialogue) → let the caller fall back (AI translate).
-                restoreSubtitle(previousSubtitle)
-                noMatch(best?.score)
-                selectLastResort()
+                // Nothing synced found (or too little dialogue) → let the caller fall back (AI
+                // translate). An optimistic pick already on screen stays: it is the same
+                // unverified-but-plausible choice selectLastResort would make anyway.
+                // AI is holding the screen and stays there (selectLastResort returns early while
+                // translating) — restoring the pre-scan selection would tear it away for nothing.
+                if (!aiInterim && (provisional == null || provisionalDisplaced)) {
+                    restoreSubtitle(previousSubtitle)
+                }
+                // AI is on screen translating a track that holds no dialogue: it will never show a
+                // line. Replace it with the best-named subtitle (selectLastResort keeps AI as-is).
+                // Finishes here: the caller's no-match handler re-activates AI whenever the scan
+                // began with AI on screen, and it ran 7ms after this switch — before the selection
+                // had landed — putting the empty-track AI straight back (Selling Sunset S01E01).
+                if (referenceNotDialogue && _uiState.value.isAiTranslating) {
+                    val first = candidates.firstOrNull()
+                    if (first != null) {
+                        Log.i("SubMatch", "AI source has no dialogue — replacing AI with \"${first.label}\" (unverified)")
+                        aiSourceSubtitle = null
+                        selectServedLocally(first)
+                        showMatchToast(
+                            PlayerMessage.Res(R.string.player_match_sync_unverified, listOf(first.label))
+                        )
+                        matchStep("4· reference track has no dialogue — showing \"${first.label}\" unverified")
+                        // AI has nothing to translate here, so the audio is the only fallback left.
+                        startHearingFallback(first) {}
+                        return@launch
+                    }
+                }
+                // Nothing verified. The order is: this scan, then the audio, then the usual fallback
+                // (AI translation, or the unverified pick as is when AI can't run). The audio syncs
+                // the pick the user is already watching, else the best-named candidate.
+                val bestPct = best?.let { "${(it.score * 100).toInt()}%" } ?: "n/a"
+                val hearingPick = provisional?.takeIf { !provisionalDisplaced } ?: candidates.firstOrNull()
+                val anchor = hearingPick?.let { aiAnchors["${it.provider}|${it.id.removeSuffix(RETIMED_SUBTITLE_ID_SUFFIX)}"] }
+                // The model read every subtitle on offer and none of them holds this episode's
+                // dialogue: syncing one to the audio cannot help — it would only download ~130MB of
+                // audio samples and run speech recognition for a minute before ending on AI anyway.
+                // The Office S05E02 (Sept 2026): Amazon's "Weight Loss Pt. 2" is numbered E02, the
+                // subtitle sites' E02 is the next episode, and all 5 came back "not this dialogue".
+                // Only when EVERY candidate got that answer — itself, or through an identical copy
+                // (the model checks one file per timing family: The Office's OpenSubtitles 3437610
+                // and Wizdom's XviD-LOL are the same file). Any answer other than "not this
+                // dialogue", or a candidate nobody checked, keeps the audio in play.
+                // Identical copies live only in familyMembers (keyed by the file the scan kept), not in
+                // `loaded`, so a verdict reaches its copies through there.
+                val rejectedKeys = HashSet<String>()
+                aiNotThisDialogue.filterValues { it }.keys.forEach { key ->
+                    rejectedKeys += key
+                    familyMembers[key].orEmpty().forEach { (member, _) -> rejectedKeys += "${member.provider}|${member.id}" }
+                }
+                val wrongEpisode = candidates.isNotEmpty() && aiNotThisDialogue.values.all { it } &&
+                    candidates.all { "${it.provider}|${it.id}" in rejectedKeys }
+                if (wrongEpisode) {
+                    Log.i(
+                        "SubMatch",
+                        "audio sync: skipped — the model found none of the ${candidates.size} subtitles to be this episode's dialogue"
+                    )
+                }
+                val hearing = !wrongEpisode && hearingPick != null && startHearingFallback(hearingPick, anchor) {
+                    noMatch(best?.score)
+                    selectLastResort()
+                }
+                if (hearing) {
+                    matchStep("4· nothing verified (best $bestPct) — syncing \"${hearingPick?.label}\" by the audio")
+                } else {
+                    noMatch(best?.score)
+                    selectLastResort()
+                    matchStep("4· nothing verified (best $bestPct) — unverified pick")
+                }
             }
         }
     }
+
+    /**
+     * Measures a subtitle's constant offset by asking the model which *lines* of the reference and
+     * the candidate say the same thing, then taking the median of `referenceTime − candidateTime`
+     * over the confident pairs.
+     *
+     * Why this exists alongside the overlap sweep: the sweep maximises cue overlap, which is only a
+     * proxy for alignment and degrades badly when the two files are segmented differently — an
+     * English CC track splits lines that a translation merges, so the score peaks where a short cue
+     * sits *centred* inside a long one rather than where the subtitle is actually in sync (the
+     * centring artifact documented on [scoreCandidatesWithOffsets]). Matching by meaning is
+     * segmentation-independent, so it measures the thing we actually want.
+     *
+     * It is a measuring instrument only: the caller re-scores the result with the ordinary timing
+     * metric and applies it only if it genuinely improves, so a hallucinated pairing can never
+     * select or shift a subtitle on its own. Costs one small request.
+     *
+     * Returns null when AI isn't configured, the inputs are too thin, or the request fails.
+     */
+    private suspend fun measureOffsetWithAi(
+        referenceCues: List<SubtitleSyncMatcher.TimedCue>,
+        candidateCues: List<SubtitleSyncMatcher.TimedCue>,
+        label: String
+    ): AiLineSync? {
+        if (!aiSubtitleEnabled || !translationService.canMatchSubtitleLines()) return null
+        // Dialogue only: music/SFX cues ("♪", "[DOOR SLAMS]") are SDH-only and have no counterpart
+        // in a translated file, so they can only produce false pairs.
+        val refs = referenceCues
+            .filter { it.text.isNotBlank() && !isSdhOnly(it.text) }
+            .take(MATCH_AI_REFERENCE_LINES)
+        if (refs.size < MATCH_AI_MIN_PAIRS) return null
+        // Candidate window: everything near the reference span, widened by the largest offset a
+        // constant-offset rescue would ever apply, so the true counterpart is inside the window
+        // even when the file is badly shifted.
+        val from = refs.first().startMs - MATCH_OFFSET_MAX_MS
+        val to = refs.last().endMs + MATCH_OFFSET_MAX_MS
+        val window = candidateCues.filter { it.endMs >= from && it.startMs <= to }
+            .take(MATCH_AI_CANDIDATE_LINES)
+        if (window.size < MATCH_AI_MIN_PAIRS) return null
+
+        val matches = translationService.matchSubtitleLines(
+            refs.map { it.text.replace("\n", " ") },
+            window.map { it.text.replace("\n", " ") }
+        )
+        // null is a FAILED request (HTTP error, rate limit, unreadable reply), not an answer. It used
+        // to share the zero-pairs branch below, so an API hiccup rejected subtitles as "not this
+        // dialogue". No answer is no evidence: the timing verdict stands.
+        if (matches == null) {
+            Log.i("SubMatch", "[ai-sync] \"$label\" no answer (request failed or unreadable) — timing verdict stands")
+            return null
+        }
+        if (matches.isEmpty()) {
+            Log.i("SubMatch", "[ai-sync] \"$label\" no pairings returned — not this dialogue")
+            return AiLineSync(pairs = 0, offsetMs = null, sent = refs.size)
+        }
+        val deltas = matches.map { refs[it.referenceIndex].startMs - window[it.candidateIndex].startMs }.sorted()
+        if (deltas.size < MATCH_AI_MIN_PAIRS) {
+            Log.i("SubMatch", "[ai-sync] \"$label\" only ${deltas.size}/${refs.size} lines pair — too few to measure")
+            return AiLineSync(pairs = deltas.size, offsetMs = null, sent = refs.size)
+        }
+        // Robust mean: drop pairs far from the median (a single mis-pairing is worth seconds), then
+        // average what is left. Agreement among the survivors is the evidence the offset is real.
+        val median = deltas[deltas.size / 2]
+        val kept = deltas.filter { kotlin.math.abs(it - median) <= MATCH_AI_OUTLIER_MS }
+        if (kept.size < MATCH_AI_MIN_PAIRS) {
+            Log.i("SubMatch", "[ai-sync] \"$label\" pairs disagree: $deltas — ignored")
+            return AiLineSync(pairs = deltas.size, offsetMs = null)
+        }
+        val offset = kept.average().toLong()
+        // The model's answer is bound by the same plausibility window as our own offset search.
+        // Beyond MATCH_OFFSET_MAX_MS a "constant offset" is not a sync error, it is a different cut
+        // — and crucially, a large shift is EASY to confirm by accident: scoreByTiming measures
+        // timing overlap and never text, so sliding a 700-cue subtitle by 15s drops an entirely
+        // different set of lines into the reference windows and scores high on coincidence. That
+        // makes the usual "AI proposes, our metric verifies" guard useless at this magnitude.
+        // From S02E04 (Sept 2026): AI returned +15198ms with 5/6 pairs agreeing, re-scoring said
+        // 0.95, and the user confirmed no addon subtitle matched the episode at all.
+        if (kotlin.math.abs(offset) > MATCH_OFFSET_MAX_MS) {
+            Log.w(
+                "SubMatch",
+                "[ai-sync] \"$label\" offset=${offset}ms exceeds the ${MATCH_OFFSET_MAX_MS}ms " +
+                    "plausibility bound — treating as no shift (different cut, not a sync error)"
+            )
+            return AiLineSync(pairs = kept.size, offsetMs = null, unfixableShiftMs = offset)
+        }
+        Log.i(
+            "SubMatch",
+            "[ai-sync] \"$label\" offset=${offset}ms from ${kept.size}/${deltas.size} pairs (median=${median}ms)"
+        )
+        return AiLineSync(pairs = kept.size, offsetMs = offset)
+    }
+
+
+    /**
+     * Binds an auto-match timing correction to one subtitle. The key is what keeps it scoped: the
+     * player screen only hands the correction to the renderer while that exact track is selected,
+     * so it can never leak onto another subtitle, another source, or the next file.
+     */
+    private fun applyAutoSync(sub: Subtitle?, sync: SubtitleAutoSync?) {
+        val effective = sync?.takeIf { !it.isIdentity }
+        _uiState.value = _uiState.value.copy(
+            autoSync = effective,
+            autoSyncSubtitleKey = if (effective == null || sub == null) null else "${sub.provider}|${sub.id}"
+        )
+    }
+
+    /**
+     * Whether the player has actually selected [reference], compared by (group, track) index — the
+     * indexing embedded subtitles carry. Indices can shift after a MediaItem rebuild, so the reference
+     * is re-resolved from current state by id first. No provider (screen not attached) or no indices:
+     * true — there is nothing to gate on, and the script backstop in the caller still applies.
+     */
+    private fun selectedTextTrackIsReference(reference: Subtitle): Boolean {
+        val provider = selectedTextTrackProvider ?: return true
+        val fresh = _uiState.value.subtitles.firstOrNull { it.isEmbedded && it.id == reference.id } ?: reference
+        val groupIndex = fresh.groupIndex ?: return true
+        val trackIndex = fresh.trackIndex ?: return true
+        val selected = runCatching { provider() }.getOrNull() ?: return false
+        return selected.first == groupIndex && selected.second == trackIndex
+    }
+
+    /** True for text written mostly in a non-Latin script (Hebrew, Arabic, Cyrillic, CJK…). */
+    private fun isMostlyNonLatin(text: String): Boolean {
+        var latin = 0
+        var other = 0
+        for (c in text) {
+            if (!c.isLetter()) continue
+            // Basic Latin through Latin Extended-B, plus Latin Extended Additional.
+            // (Character.UnicodeScript would be cleaner, but needs API 24 and minSdk is 23.)
+            if (c.code < 0x0250 || c.code in 0x1E00..0x1EFF) latin++ else other++
+        }
+        return other > latin
+    }
+
+    /** True for a cue that is only music notation or a bracketed sound effect — SDH decoration. */
+    private fun isSdhOnly(text: String): Boolean =
+        PlayerViewModelRegexes.SDH_ONLY.matches(
+            text.replace(PlayerViewModelRegexes.HTML_TAG_REGEX, " ").trim()
+        )
 
     /** Whitespace/tag-insensitive form for comparing renderer cue text against parsed file text. */
     private fun normalizeCueTextForCompare(text: String): String =
@@ -3217,7 +6173,25 @@ class PlayerViewModel @Inject constructor(
      * that had to be baked in for a constant-offset rescue — in which case [score] is the
      * *corrected* (post-shift) timing score.
      */
-    private data class ScoredCandidate(val sub: Subtitle, val score: Double, val offsetMs: Long)
+    private data class ScoredCandidate(
+        val sub: Subtitle,
+        val score: Double,
+        val offsetMs: Long,
+        // Set when the retimer decided this candidate's timing (see RetimePlan).
+        val retime: RetimePlan? = null,
+    )
+
+    /**
+     * A candidate's timing as established by [AutoSyncTimelineRetimer] against a whole indexed
+     * reference track. [uniform] means the result is one constant shift (already carried in the
+     * candidate's offsetMs and applied live like any other offset); otherwise the timings are
+     * rewritten cue by cue into a served copy — a speed correction, a re-cut, or both.
+     */
+    private data class RetimePlan(
+        val result: com.arflix.tv.ui.screens.player.subtitles.AutoSyncTimelineRetimeResult,
+        val referenceLabel: String,
+        val uniform: Boolean,
+    )
 
     /** "+2.0s" / "-1.5s" for toasts and menu rows. */
     private fun formatMatchOffset(ms: Long): String =
@@ -3232,46 +6206,762 @@ class PlayerViewModel @Inject constructor(
      * bar. The candidates are the same episode from different addons, so agreement is strong evidence
      * the offset is real (and it discards search-noise outliers that no one else voted for).
      */
+    /**
+     * [allowOffsets] must be false when the reference is realtime-dominated (no buffered quorum).
+     * Realtime intervals carry render-lag skew and merge adjacent cues into long windows, where
+     * [SubtitleSyncMatcher.scoreByTiming] switches to union coverage — which *any* dense subtitle
+     * saturates at ~1.00. The offset search then has no sharp peak to find and returns noise, and
+     * because the noise is drawn from the same degenerate surface for every candidate, cross-
+     * candidate corroboration confirms it. Observed on From S01E03 (Sept 2026): 10 candidates,
+     * offsets scattered −9975/−8325/−3600/+8700, every one scoring 0.93–1.00, and a perfectly
+     * synced subtitle was "rescued" by −3.6s.
+     *
+     * **The centring artifact.** [SubtitleSyncMatcher.scoreByTiming] divides overlap by the
+     * *reference* window, so a candidate cue that is correctly timed but SHORTER than the reference
+     * cue cannot score well — and the offset that maximises the number is the one that slides the
+     * short cue into the middle of the long window. That is a segmentation artifact, not a sync
+     * error, and every candidate cut from a similar master agrees on it, so corroboration confirms
+     * it. From S01E03 (Sept 2026): ref 625183–627435 (2252ms) vs a user-confirmed perfect cue
+     * 625285–626244 (959ms) → a spurious +450ms. Guarded three ways: only subtitles that FAIL as
+     * authored are rescued at all, a shift must clear [MATCH_OFFSET_MIN_MS] (above the overlap
+     * tolerance we already treat as noise), and it must buy at least [MATCH_OFFSET_MIN_GAIN].
+     */
+    /**
+     * Reference cues read straight from the running player's text renderer, for the case where the
+     * selected track already IS the reference (AI translating from the embedded English track).
+     *
+     * This is an OPPORTUNISTIC fast path, not something to wait on. Resuming mid-file the decoder is
+     * already far ahead and the whole reference is there within a second. Starting a file from 0:00
+     * it is nearly empty and stays that way, because the buffer only ever holds what is decoded
+     * ahead of the playhead — and every second spent hoping otherwise is added to a scan that then
+     * has to fall back and start over anyway. The Office S01E01 (Sept 2026) spent the full 20s
+     * budget to collect ONE cue, then handed to the in-player path for another 122s: a 154-second
+     * scan, most of it wasted here.
+     *
+     * So it gives up early and cheaply on a buffer that is not filling, and accepts as soon as it
+     * has enough to decide rather than holding out for the ideal span.
+     */
+    private suspend fun collectInPlayerReferenceCues(
+        /**
+         * The candidate's own normalized lines. Activating AI sets the reference track as the AI
+         * source, but the player takes a moment to actually select it and decode from it — until
+         * then the buffer still holds the PREVIOUS track, which is usually the subtitle the user was
+         * reading. Reading it then produces a perfect self-match: From S02E05 (Sept 2026) read 12
+         * cues that were 12/12 identical to the candidate, and the scan withheld its verdict and sat
+         * on AI while a subtitle the user had confirmed as perfect went unselected. Excluding these
+         * lines is now a second line of defence; the track gate below is what waits out the switch.
+         */
+        candidateTexts: Set<String>,
+        /** The embedded track that must actually be selected before the buffer is believed. */
+        reference: Subtitle,
+        /** The container index is ready — the fallback no longer costs a read, so wait less. */
+        indexReady: () -> Boolean = { false },
+    ): List<SubtitleSyncMatcher.TimedCue> {
+        val provider = bufferedReferenceCuesProvider ?: return emptyList()
+        val collected = LinkedHashMap<Long, SubtitleSyncMatcher.TimedCue>()
+        val startedAt = System.currentTimeMillis()
+        val deadline = startedAt + MATCH_PLAYER_REF_BUDGET_MS
+        // Backstop for the gate below: the reference is English, so a cue written mostly in another
+        // script cannot belong to it and can only be the previous track's leftovers.
+        val latinReference = normalizeLanguage(reference.lang) == "en"
+        // Set once the player has really switched to the reference track; nothing is read before.
+        // From S01E10 (Sept 2026) read the buffer 73ms after AI was switched on, got the HEBREW
+        // subtitle that had been showing, and shifted a perfect subtitle by the 4s gap between two
+        // subtitles — the timing sweep and AI pairing both "confirmed" it, because both measure
+        // against whatever the reference is. The candidate-line exclusion only catches the case
+        // where that previous subtitle happens to BE the candidate; this catches every case.
+        var readingSince = if (selectedTextTrackIsReference(reference)) startedAt else -1L
+        while (System.currentTimeMillis() < deadline) {
+            if (readingSince < 0L) {
+                val waited = System.currentTimeMillis() - startedAt
+                if (selectedTextTrackIsReference(reference)) {
+                    readingSince = System.currentTimeMillis()
+                    Log.i("SubMatch", "reference track selected after ${waited}ms — reading buffer")
+                } else if (waited >= MATCH_PLAYER_REF_SWITCH_WAIT_MS) {
+                    Log.i(
+                        "SubMatch",
+                        "player never switched to the reference track (${waited / 1000}s) — handing over"
+                    )
+                    break
+                } else {
+                    delay(MATCH_PLAYER_REF_POLL_MS)
+                    continue
+                }
+            }
+            runCatching { provider(MATCH_BUFFERED_REF_INTERVALS) }.getOrNull()
+                ?.filterNot { normalizeCueTextForCompare(it.text) in candidateTexts }
+                ?.filterNot { latinReference && isMostlyNonLatin(it.text) }
+                ?.forEach { collected.putIfAbsent(it.startMs, it) }
+            val dialogue = collected.values.filter { it.text.isNotBlank() && !isSdhOnly(it.text) }
+            val span = if (dialogue.size >= 2) {
+                val sorted = dialogue.sortedBy { it.startMs }
+                sorted.last().endMs - sorted.first().startMs
+            } else 0L
+            // Enough to decide. The old bar (8 cues AND a 30s span) is what the ideal case gives
+            // you, not what a verdict needs — holding out for it burned the whole budget on
+            // references that were already usable.
+            if (dialogue.size >= MATCH_TARGET_REF_INTERVALS && span >= MATCH_MIN_REF_SPAN_MS) break
+            if (dialogue.size >= MATCH_EARLY_ACCEPT_REFS && span >= MATCH_FAST_ACCEPT_SPAN_MS) break
+            // Not filling. The caller's fallback collects realtime cues as they render, so it can
+            // make progress where this cannot — reaching it sooner is strictly better than reaching
+            // it later with the same nothing.
+            val giveUpMs = if (indexReady()) MATCH_PLAYER_REF_GIVE_UP_WITH_INDEX_MS else MATCH_PLAYER_REF_GIVE_UP_MS
+            if (System.currentTimeMillis() - readingSince >= giveUpMs &&
+                dialogue.size < MATCH_MIN_REF_INTERVALS
+            ) {
+                Log.i(
+                    "SubMatch",
+                    "player buffer not filling (${dialogue.size} cues in " +
+                        "${giveUpMs / 1000}s${if (giveUpMs < MATCH_PLAYER_REF_GIVE_UP_MS) ", index ready" else ""}) — handing over now"
+                )
+                break
+            }
+            delay(MATCH_PLAYER_REF_POLL_MS)
+        }
+        return collected.values.sortedBy { it.startMs }
+    }
+
+    /**
+     * The sync reference read out of the container itself: Matroska stores a Cues index, and
+     * muxers are recommended to index every subtitle frame, so the embedded track's whole timing
+     * timeline is usually readable from a few megabytes of metadata over HTTP range requests —
+     * no playback, no seeking, no demuxing (see [com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex]).
+     *
+     * Returns empty for everything this cannot serve — MP4/HLS/DASH, servers without range
+     * support, and the common muxer that indexed only the video track — and the caller falls back
+     * to the in-player reference exactly as before.
+     *
+     * The result is DOWNSAMPLED. A feature-length index holds hundreds to thousands of cues, and
+     * every one of them is a reference window the offset sweep re-scores at each of its ~80 steps
+     * per candidate; a few dozen windows spread across the film carry the same alignment evidence
+     * for a fraction of the work, which matters on the TV boxes this runs on.
+     */
+    // ── Sync by hearing (audio subtitle sync, see audiosync.ArvioAudioSync) ─────────────────────
+
+    /** Created on first use (a scan), so a session that never scans never loads any of it. */
+    @Volatile private var audioSyncInstance: com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync? = null
+    private val audioSync: com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync? get() = audioSyncInstance
+
+    /** The original addon subtitle the audio sync took over, and its text. */
+    private var audioSyncTarget: Subtitle? = null
+    private var audioSyncRaw: String? = null
+    private var audioSyncSwitching = false
+    private var audioSyncWorkJob: Job? = null
+    private var audioSyncGeneration = 0L
+
+    private fun stopAudioSync() {
+        audioSyncGeneration++
+        audioSyncWorkJob?.cancel()
+        audioSyncWorkJob = null
+        // Clear the target before stop(), which can report that its old mapping was removed.
+        audioSyncTarget = null
+        audioSyncRaw = null
+        audioSync?.stop()
+        if (_uiState.value.isHearingSync) _uiState.value = _uiState.value.copy(isHearingSync = false)
+    }
+
+    /** The playhead, the duration and the selected audio format, from the player screen. */
+    private var audioSyncPositionMs: () -> Long = { 0L }
+    private var audioSyncDurationMs: () -> Long = { 0L }
+    private var audioSyncAudioFormat: androidx.media3.common.Format? = null
+
+    /**
+     * Off by default below 2.5 GB of RAM. A Mi Box 4 (2 GB, 32-bit, Sept 2026) needed 87s just to
+     * load the speech model and 118 MB of audio samples over its Wi-Fi, never analysed the audio at
+     * the playhead, and gave up after 90s every time — while AI covered the file anyway.
+     */
+    private fun hearingSyncDefault(context: Context): Boolean = !com.arflix.tv.ui.screens.player.audiosync.SpotConnections.isLowMemoryTv(context)
+
+    /** Sync by hearing is enabled for this build and playback session. */
+    private val hearingAvailable: Boolean get() = BuildConfig.AUDIO_SYNC_AVAILABLE && hearingSyncEnabled
+
+    internal fun bindAudioSyncPlayer(positionMs: () -> Long, durationMs: () -> Long) {
+        audioSyncPositionMs = positionMs
+        audioSyncDurationMs = durationMs
+    }
+
+    internal fun onAudioSyncTrackSelected(format: androidx.media3.common.Format?) {
+        audioSyncAudioFormat = format
+        audioSyncInstance?.onAudioTrackSelected(format)
+    }
+
+    /** Created on first use (a scan), and never where sync by hearing can't run. */
+    private fun audioSyncOrNull(): com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync? {
+        audioSyncInstance?.let { return it }
+        if (!hearingAvailable) return null
+        return com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync(
+            context = context,
+            scope = viewModelScope,
+            onModel = ::applyAudioSyncModel,
+            onSwitch = ::switchToAudioSyncedSubtitle,
+            onListening = { listening -> _uiState.value = _uiState.value.copy(isHearingSync = listening) },
+        ).also { created ->
+            audioSyncInstance = created
+            // Read through, so a later rebind (a new player) reaches it too.
+            created.positionMs = { audioSyncPositionMs() }
+            created.durationMs = { audioSyncDurationMs() }
+            created.onAudioTrackSelected(audioSyncAudioFormat)
+            _uiState.value.selectedStreamUrl?.takeIf { it.isNotBlank() }?.let { url ->
+                created.onStream(
+                    url,
+                    _uiState.value.selectedStream?.behaviorHints?.proxyHeaders?.request.orEmpty(),
+                    allowSpotSampling = !currentIsLiveStreamPlayback &&
+                        !IptvVodSourceIds.isIptvVodAddonId(_uiState.value.selectedStream?.addonId)
+                )
+            }
+        }
+    }
+
+    private fun audioSyncOnStream() {
+        stopAudioSync()
+        val url = _uiState.value.selectedStreamUrl?.takeIf { it.isNotBlank() } ?: return
+        audioSync?.onStream(
+            url,
+            _uiState.value.selectedStream?.behaviorHints?.proxyHeaders?.request.orEmpty(),
+            allowSpotSampling = !currentIsLiveStreamPlayback &&
+                !IptvVodSourceIds.isIptvVodAddonId(_uiState.value.selectedStream?.addonId)
+        )
+    }
+
+    private fun armAudioSync() {
+        val sync = audioSyncOrNull() ?: return
+        val references = _uiState.value.subtitles
+            .filter { !it.isEmbedded && (it.url.startsWith("http://") || it.url.startsWith("https://")) }
+            .distinctBy { it.url }
+            .map { sub ->
+                com.arflix.tv.ui.screens.player.audiosync.AudioSubtitleSyncController.ReferenceCandidate(
+                    url = sub.url,
+                    language = sub.lang,
+                    headers = emptyMap(),
+                    label = sub.provider,
+                )
+            }
+        val imdb = currentImdbId?.takeIf { it.startsWith("tt") }
+        val (type, videoId) = when {
+            imdb == null -> null to null
+            currentMediaType == MediaType.MOVIE -> "movie" to imdb
+            else -> "series" to "$imdb:${currentSeason ?: 1}:${currentEpisode ?: 1}"
+        }
+        sync.arm(references, type, videoId)
+    }
+
+    /**
+     * The scan verified nothing: show [pick] (replacing AI translation if it held the screen during
+     * the scan) and sync it to the audio. [onFailed] — the scan's own no-match fallback — runs when
+     * the audio can't confirm it. False when the audio sync can't take over at all (the caller
+     * falls back at once).
+     */
+    private fun startHearingFallback(
+        pick: Subtitle,
+        anchor: com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync.LocalAnchor? = null,
+        onFailed: () -> Unit,
+    ): Boolean {
+        val sync = audioSync ?: return false
+        if (!hearingAvailable || !sync.canTakeOver || pick.isEmbedded) return false
+        // Where AI can run, its timing (from the file's own track) is right, and the audio may
+        // only replace it once the model's own measurement confirms the audio's timing. Without
+        // that measurement there is nothing to confirm it against: AI stays, and the audio does
+        // not run at all.
+        val aiPossible = aiSubtitleEnabled && translationService.isConfigured() &&
+            findAiSourceSubtitle(_uiState.value.subtitles) != null
+        if (aiPossible && anchor == null) {
+            Log.i("SubMatch", "audio sync: skipped — AI translation can run and the model measured nothing to check the audio against")
+            return false
+        }
+        // The addon entry (its http url is what the controller's candidates are keyed by), not a
+        // localized file:// copy.
+        val original = _uiState.value.subtitles.firstOrNull {
+            !it.isEmbedded && it.provider == pick.provider && it.id == pick.id.removeSuffix(RETIMED_SUBTITLE_ID_SUFFIX)
+        } ?: pick
+        val streamUrl = _uiState.value.selectedStreamUrl
+        val generation = audioSyncGeneration
+        audioSyncWorkJob?.cancel()
+        audioSyncWorkJob = viewModelScope.launch {
+            val raw = (preloadedCopyFor(original)?.url?.let { SubtitleSyncMatcher.loadRaw(it, original.lang) })
+                ?: SubtitleSyncMatcher.loadRaw(original.url, original.lang)
+            // The user moved on meanwhile (another stream, their own pick): nothing to fall back from.
+            if (generation != audioSyncGeneration || _uiState.value.selectedStreamUrl != streamUrl || userPickedSubtitle) return@launch
+            if (raw == null) {
+                Log.i("SubMatch", "audio sync: \"${original.label}\" unreadable — next fallback")
+                onFailed()
+                return@launch
+            }
+            val cues = withContext(Dispatchers.Default) { SubtitleSyncMatcher.parseCues(raw) }
+            if (generation != audioSyncGeneration || !hearingAvailable || userPickedSubtitle) return@launch
+            audioSyncTarget = original
+            audioSyncRaw = raw
+            val aiCanTakeOver = {
+                aiSubtitleEnabled && translationService.isConfigured() &&
+                    findAiSourceSubtitle(_uiState.value.subtitles) != null
+            }
+            // Where AI can run it holds the screen while the audio works (its timing comes from the
+            // built-in track, so it is right from the first line), and the subtitle replaces it
+            // only once the audio has confirmed its timing. Otherwise the subtitle is shown now and
+            // corrected as the audio finds its timing. The Office S05E02 (Sept 2026): a minute of
+            // a badly timed subtitle while the audio listened, then AI anyway.
+            val behindAi = aiCanTakeOver()
+            if (behindAi) {
+                if (!_uiState.value.isAiTranslating) activateAiTranslation(isUserAction = false)
+            } else {
+                val shown = _uiState.value.selectedSubtitle
+                val showing = !_uiState.value.isAiTranslating && shown != null && !shown.isEmbedded &&
+                    shown.provider == original.provider && shown.id.removeSuffix(RETIMED_SUBTITLE_ID_SUFFIX) == original.id
+                if (!showing) {
+                    applyAutoSync(original, null)
+                    selectSubtitle(localizeSubtitle(original, raw), isUserAction = false)
+                }
+            }
+            Log.i(
+                "SubMatch",
+                "audio sync: taking over \"${original.label}\" (${cues.size} cues) — no verified timing" +
+                    (if (behindAi) ", AI translation on screen until the audio confirms it" else "")
+            )
+            if (!sync.takeOver(original.url, cues, onFailed, anchor, aiCanTakeOver, holdUntilConfirmed = behindAi)) onFailed()
+        }
+        return true
+    }
+
+    /**
+     * A mapping from the audio: a constant shift is applied live (like a scan's offset); a
+     * frame-rate stretch or cut scenes rewrite the file (like a retimed scan result). Null puts
+     * the subtitle back on its own timing.
+     */
+    private fun applyAudioSyncModel(key: String, model: com.arflix.tv.ui.screens.player.audiosync.SubtitleSyncModel?) {
+        val sub = audioSyncTarget?.takeIf { it.url == key } ?: return
+        val raw = audioSyncRaw ?: return
+        val single = model?.segments?.singleOrNull()
+        when {
+            model == null -> {
+                Log.i("SubMatch", "audio sync: back to \"${sub.label}\"'s own timing")
+                applyAutoSync(sub, null)
+                selectSubtitle(localizeSubtitle(sub, raw), isUserAction = false)
+            }
+            single != null && kotlin.math.abs(single.scale - 1.0) < 1e-4 -> {
+                val offsetMs = kotlin.math.round(single.shiftMs).toLong()
+                Log.i("SubMatch", "audio sync: \"${sub.label}\" shifted ${offsetMs}ms")
+                val local = localizeSubtitle(sub, raw)
+                applyAutoSync(sub, SubtitleAutoSync.ofMs(offsetMs))
+                if (_uiState.value.selectedSubtitle?.id != local.id || _uiState.value.selectedSubtitle?.url != local.url) {
+                    selectSubtitle(local, isUserAction = false)
+                }
+            }
+            else -> {
+                Log.i(
+                    "SubMatch",
+                    "audio sync: \"${sub.label}\" re-timed — ${model.segments.size} part(s), " +
+                        model.segments.joinToString { "x${"%.4f".format(it.scale)} ${kotlin.math.round(it.shiftMs).toLong()}ms from ${it.fromMediaMs}ms" }
+                )
+                val rewritten = com.arflix.tv.ui.screens.player.audiosync.ArvioAudioSync.retime(raw, model)
+                applyAutoSync(sub, null)
+                selectSubtitle(localizeSubtitle(sub.copy(id = sub.id + RETIMED_SUBTITLE_ID_SUFFIX), rewritten), isUserAction = false)
+            }
+        }
+    }
+
+    /** The audio fits another addon subtitle of the same language: show it and sync that one. */
+    private fun switchToAudioSyncedSubtitle(url: String) {
+        val next = _uiState.value.subtitles.firstOrNull { !it.isEmbedded && it.url == url } ?: return
+        val sync = audioSync ?: return
+        val target = audioSyncTarget ?: return
+        val generation = audioSyncGeneration
+        val streamUrl = _uiState.value.selectedStreamUrl
+        audioSyncWorkJob?.cancel()
+        audioSyncWorkJob = viewModelScope.launch {
+            val raw = SubtitleSyncMatcher.loadRaw(next.url, next.lang) ?: return@launch
+            val cues = withContext(Dispatchers.Default) { SubtitleSyncMatcher.parseCues(raw) }
+            if (generation != audioSyncGeneration || audioSyncTarget != target ||
+                _uiState.value.selectedStreamUrl != streamUrl || !hearingAvailable || userPickedSubtitle
+            ) return@launch
+            Log.i("SubMatch", "audio sync: switching to \"${next.label}\" — it fits the audio better")
+            audioSyncTarget = next
+            audioSyncRaw = raw
+            if (!sync.holdingForConfirmation) {
+                audioSyncSwitching = true
+                try {
+                    applyAutoSync(next, null)
+                    selectSubtitle(localizeSubtitle(next, raw), isUserAction = false)
+                } finally {
+                    audioSyncSwitching = false
+                }
+            }
+            sync.takeOver(next.url, cues)
+        }
+    }
+
+    private fun prefetchSubtitleIndex(onlyForAutoScan: Boolean) {
+        if (onlyForAutoScan && !aiFindBestMatchFirst) return
+        val url = _uiState.value.selectedStreamUrl?.takeIf { it.isNotBlank() } ?: return
+        val headers = _uiState.value.selectedStream?.behaviorHints?.proxyHeaders?.request.orEmpty()
+        // A policy is read off the main thread, so only IPTV VOD takes this detour.
+        if (IptvVodSourceIds.isIptvVodAddonId(_uiState.value.selectedStream?.addonId)) {
+            viewModelScope.launch {
+                if (subtitleIndexAllowed() && _uiState.value.selectedStreamUrl == url) {
+                    startSubtitleIndexPrefetch(url, headers, onlyForAutoScan)
+                }
+            }
+            return
+        }
+        startSubtitleIndexPrefetch(url, headers, onlyForAutoScan)
+    }
+
+    private fun startSubtitleIndexPrefetch(url: String, headers: Map<String, String>, onlyForAutoScan: Boolean) {
+        Log.i("SubMatch", "container index: prefetch " + if (onlyForAutoScan) "at stream open" else "alongside the player buffer")
+        com.arflix.tv.ui.screens.player.subtitles.MatroskaIndexSource.prefetch(url, headers)
+    }
+
+    /** At a limit of 1 the index's range reads would compete with the one stream the account may hold. */
+    private suspend fun subtitleIndexAllowed(): Boolean {
+        val stream = _uiState.value.selectedStream?.takeIf { IptvVodSourceIds.isIptvVodAddonId(it.addonId) } ?: return true
+        // A null policy is No limit or an unresolvable owner, and both stay as they are today.
+        return runCatching {
+            streamRepository.iptvStreamPolicyFor(stream)?.matroskaIndexAllowed ?: true
+        }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }
+            .getOrDefault(false)
+    }
+
+    /** The index for the playing stream has been read and is waiting to be used. */
+    private fun subtitleIndexReady(): Boolean =
+        _uiState.value.selectedStreamUrl?.takeIf { it.isNotBlank() }
+            ?.let { com.arflix.tv.ui.screens.player.subtitles.MatroskaIndexSource.isReady(it) } == true
+
+    private suspend fun collectIndexedReferenceCues(
+        reference: Subtitle,
+        // Cues already observed in the player for this same track, when the caller has any. The
+        // index must then agree with them before it is trusted — see the gate below.
+        verifyAgainst: List<SubtitleSyncMatcher.TimedCue> = emptyList(),
+        // Receives the chosen track's FULL timeline and the file's other dialogue tracks — for the
+        // retimer, and for when the preferred track turns out to be the badly-timed side (see
+        // IndexedReference). Only called when this returns a reference.
+        onTimelines: (primary: IndexedReference, alternates: List<IndexedReference>) -> Unit = { _, _ -> },
+        // Choose the reference instead of by [reference]'s language — for when the player offered
+        // no usable text track (all flagged forced), so its metadata cannot be trusted either.
+        byTimingShape: Boolean = false,
+        // Called when the index covers [reference]'s own track and it holds almost no cues over
+        // the whole file: not a dialogue track (a release group's tagline, a single sign).
+        onNotDialogue: (cues: Int) -> Unit = {},
+    ): List<Pair<Long, Long>> {
+        val url = _uiState.value.selectedStreamUrl?.takeIf { it.isNotBlank() } ?: run {
+            Log.i("SubMatch", "container index skipped: no stream URL")
+            return emptyList()
+        }
+        if (!subtitleIndexAllowed()) {
+            Log.i("SubMatch", "container index skipped: connection limit")
+            return emptyList()
+        }
+        val headers = _uiState.value.selectedStream?.behaviorHints?.proxyHeaders?.request.orEmpty()
+        Log.i("SubMatch", "container index: probing ${runCatching { java.net.URI(url).host }.getOrNull().orEmpty()} " +
+            "headers=${headers.size}")
+        val indexed = runCatching {
+            com.arflix.tv.ui.screens.player.subtitles.MatroskaIndexSource.load(url, headers) {
+                Log.i("SubMatch", it)
+            }
+        }.onFailure { error ->
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            Log.w("SubMatch", "matroska index failed: ${error.message}")
+        }.getOrNull() ?: return emptyList()
+        val timeline = indexed
+        if (timeline.tracks.isEmpty()) {
+            com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex
+                .pickTrackForLanguage(timeline.sparseTracks, reference.lang)
+                ?.let { sparse -> onNotDialogue(sparse.cues.size) }
+            return emptyList()
+        }
+
+        // Every indexed track, with everything that decides whether it can be a reference — the
+        // line that was missing when a forced-flagged "ESub" track silently left a scan without one.
+        timeline.tracks.forEach {
+            Log.i(
+                "SubMatch",
+                "matroska index track: " + com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex.describe(it)
+            )
+        }
+        val shapeRanked = if (byTimingShape) {
+            com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex
+                .pickReferenceTracks(timeline.tracks, MATCH_ALT_REFERENCE_MIN_CUES_PER_MIN)
+        } else emptyList()
+        // Must be the reference's own language, never "whatever was indexed first" — see
+        // MatroskaSubtitleIndex.pickTrackForLanguage. A forced track is subtitles for a handful of
+        // foreign lines, not a timeline of the dialogue, so those are excluded there too.
+        val track = (if (byTimingShape) shapeRanked.firstOrNull() else null)
+            ?: com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex
+                .pickTrackForLanguage(timeline.tracks, reference.lang)
+            ?: run {
+                Log.i(
+                    "SubMatch",
+                    "container index: nothing indexed in the reference language (${reference.lang}) — " +
+                        "indexed=${timeline.tracks.joinToString { "${it.trackNumber}:${it.language ?: "-"}" }}"
+                )
+                return emptyList()
+            }
+
+        // Where the caller saw real cues, the index has to agree with them before it is trusted.
+        // Track number and language do not prove sameness — a file can carry two tracks in one
+        // language (SDH vs dialogue, two dubs) — and scoring against the wrong one mis-times every
+        // verdict while looking perfectly confident. Checked against the FULL list: downsampling
+        // below would drop the very cues being compared.
+        if (verifyAgainst.isNotEmpty() &&
+            !com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex
+                .agreesWithObserved(track.cues, verifyAgainst)
+        ) {
+            Log.i(
+                "SubMatch",
+                "container index rejected: indexed track ${track.trackNumber} does not line up " +
+                    "with the ${verifyAgainst.size} cues observed in the player"
+            )
+            return emptyList()
+        }
+
+        val sampled = com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex
+            .sampleCues(track.cues, MATCH_INDEX_MAX_REFS)
+        Log.i(
+            "SubMatch",
+            "reference from container index: track=${track.trackNumber} lang=${track.language ?: "-"} " +
+                "cues=${track.cues.size} sampled=${sampled.size} span=${track.spanMs / 1000}s"
+        )
+        val alternates = com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex
+            .alternateReferenceTracks(
+                tracks = if (byTimingShape) shapeRanked else timeline.tracks,
+                primaryTrackNumber = track.trackNumber,
+                allowForced = byTimingShape,
+                minCues = MATCH_TARGET_REF_INTERVALS,
+                minCuesPerMinute = MATCH_ALT_REFERENCE_MIN_CUES_PER_MIN,
+                max = MATCH_ALT_REFERENCE_MAX
+            )
+            .map { alt ->
+                IndexedReference(
+                    label = "track=${alt.trackNumber} lang=${alt.language ?: "-"}",
+                    refs = com.arflix.tv.ui.screens.player.subtitles.MatroskaSubtitleIndex
+                        .sampleCues(alt.cues, MATCH_INDEX_MAX_REFS)
+                        .map { it.startMs to it.endMs },
+                    cues = alt.cues,
+                    estimatedEndStartsMs = alt.estimatedEndStartsMs,
+                )
+            }
+        if (alternates.isNotEmpty()) {
+            Log.i("SubMatch", "container index: alternate references ${alternates.joinToString { it.label }}")
+        }
+        onTimelines(
+            IndexedReference(
+                label = "track=${track.trackNumber} lang=${track.language ?: "-"}",
+                refs = sampled.map { it.startMs to it.endMs },
+                cues = track.cues,
+                estimatedEndStartsMs = track.estimatedEndStartsMs,
+            ),
+            alternates,
+        )
+        return sampled.map { it.startMs to it.endMs }
+    }
+
+    /**
+     * An embedded dialogue track's timeline from the container index — any language, since only
+     * timings are compared. [refs] is the downsampled set the overlap scorer uses; [cues] is the
+     * whole track, for the retimer ([AutoSyncTimelineRetimer]), which works on complete timelines.
+     *
+     * Used for the preferred-language track and, as alternates, for the file's other tracks.
+     *
+     * The preferred-language track is the reference by default, but nothing guarantees it is timed
+     * to the video. The Shards S01E03 (Sept 2026): the built-in English track of a Russian release
+     * ran ~0.1% fast (−0.4s at the start, −2.5s by minute 35), a correct Hebrew subtitle failed
+     * against it, and the sweep "fixed" it by −1150ms; the same file's Russian track accepted that
+     * subtitle as authored (0.73), with its thirds fitting at 150–375ms.
+     */
+    private data class IndexedReference(
+        val label: String,
+        val refs: List<Pair<Long, Long>>,
+        val cues: List<SubtitleSyncMatcher.TimedCue>,
+        val estimatedEndStartsMs: Set<Long>,
+    )
+
+    /**
+     * The winner among scored candidates: highest timing score, ties broken by release name.
+     *
+     * Timing scores cluster hard. The Office S01E05 (Sept 2026) produced a **four-way tie at
+     * 0.82**, and `maxByOrNull` then returns whichever happens to sit first in the list — a coin
+     * flip decided which subtitle the user reads. Within [MATCH_TIE_EPSILON] the timing evidence
+     * genuinely cannot separate them, so the release-name heuristic that already ranked them does:
+     * for a BluRay remux it prefers the subtitle cut for a BluRay over one cut for a DVDRip, which
+     * is exactly the distinction overlap scoring is blind to.
+     *
+     * Deliberately NOT a score comparison in disguise: a candidate outside the epsilon always
+     * wins on score alone, however good its filename looks.
+     */
+    /**
+     * The constant shift turning [representative]'s timeline into [candidate]'s, or null when they
+     * are not the same cues shifted uniformly
+     */
+    private fun constantTimelineShiftMs(
+        representative: List<SubtitleSyncMatcher.TimedCue>,
+        candidate: List<SubtitleSyncMatcher.TimedCue>,
+    ): Long? {
+        if (representative.size < 4 || representative.size != candidate.size) return null
+        val shift = candidate.first().startMs - representative.first().startMs
+        for (index in representative.indices) {
+            val left = representative[index]
+            val right = candidate[index]
+            if (right.startMs - left.startMs != shift || right.endMs - left.endMs != shift) return null
+        }
+        return shift
+    }
+
+    /**
+     * One number for a confident retimer result —  mostly how much of
+     * the subtitle found a partner, then how cheap and how 1:1 the pairing was.
+     */
+    private fun retimeQuality(result: com.arflix.tv.ui.screens.player.subtitles.AutoSyncTimelineRetimeResult): Double =
+        result.targetCoverage * 0.42 +
+            result.referenceCoverage * 0.15 +
+            (1.0 / (1.0 + result.averageGroupCost.coerceAtLeast(0.0))) * 0.23 +
+            result.simpleGroupRatio * 0.20 -
+            result.longestTargetSkipRun.coerceAtMost(20) * 0.004
+
+    private fun List<ScoredCandidate>.bestWithTieBreak(streamSrc: String): ScoredCandidate? {
+        val top = maxByOrNull { it.score } ?: return null
+        val contenders = filter { it.score >= top.score - MATCH_TIE_EPSILON }
+        if (contenders.size <= 1) return top
+        val winner = contenders.maxByOrNull { weightedSubtitleScore(streamSrc, it.sub.id) } ?: top
+        if (winner !== top) {
+            Log.i(
+                "SubMatch",
+                "tie-break: ${contenders.size} candidates within $MATCH_TIE_EPSILON of " +
+                    "${"%.2f".format(top.score)} — release name prefers \"${winner.sub.label}\" " +
+                    "(name=${weightedSubtitleScore(streamSrc, winner.sub.id)}) over " +
+                    "\"${top.sub.label}\" (name=${weightedSubtitleScore(streamSrc, top.sub.id)})"
+            )
+        }
+        return winner
+    }
+
     private fun scoreCandidatesWithOffsets(
         loaded: List<Pair<Subtitle, List<SubtitleSyncMatcher.TimedCue>>>,
         rawRefs: List<Pair<Long, Long>>,
-        debug: Boolean
+        debug: Boolean,
+        allowOffsets: Boolean = true
     ): List<ScoredCandidate> {
         val tol = MATCH_OVERLAP_TOLERANCE_MS
+        // Out-of-range drop, BEFORE orphan-drop and not subject to its keep-floor. A reference
+        // window outside the candidates' own time span carries no information about sync: a
+        // reference cue at 1.4s cannot say anything about a subtitle file whose first cue is at
+        // 32s (studio logos, an untranslated cold open). Left in, each scores a hard 0 for every
+        // candidate and craters the base score — which re-opens the offset search and lets a shift
+        // "fix" it by sliding later dialogue onto those earlier reference cues. Deadpool &
+        // Wolverine (Sept 2026): a user-confirmed perfect subtitle scored base=0.35 and was
+        // "rescued" by −8000ms this way. This is a structural exclusion, not a coverage judgement,
+        // so the orphan-drop keep-floor (which exists to stop a 2-of-8 match inflating itself)
+        // must not veto it.
+        val candStart = loaded.minOf { (_, cues) -> cues.minOf { it.startMs } }
+        val candEnd = loaded.maxOf { (_, cues) -> cues.maxOf { it.endMs } }
+        val inRange = rawRefs.filter { (rs, re) -> re > candStart && rs < candEnd }
+        val rangedRefs = if (inRange.size >= MATCH_MIN_REF_INTERVALS) inRange else rawRefs
+        if (debug && rangedRefs.size != rawRefs.size) {
+            android.util.Log.i(
+                "SubMatch",
+                "refs outside candidate range dropped: ${rawRefs.size - rangedRefs.size}/${rawRefs.size} " +
+                    "(candRange=$candStart..$candEnd)"
+            )
+        }
         // Orphan-drop: discard reference windows that NO candidate covers at all — almost always
         // SDH/non-dialogue reference cues (sound effects, on-screen text) the dialogue subs lack.
         // Left in, each scores a hard 0 for everyone and craters an otherwise-perfect sub. But only
         // drop when the uncovered windows are a small MINORITY: if a large fraction is uncovered
         // that's bad sync across the board (not SDH), and dropping it would shrink the denominator
         // enough to inflate a sub that matches only a couple of windows into a false ~100%.
-        val covered = rawRefs.filter { (rs, re) ->
+        val covered = rangedRefs.filter { (rs, re) ->
             loaded.any { (_, cues) -> cues.any { it.startMs < re && rs < it.endMs } }
         }
-        val keepFloor = Math.ceil(rawRefs.size * MATCH_ORPHAN_KEEP_MIN_FRACTION).toInt()
+        val keepFloor = Math.ceil(rangedRefs.size * MATCH_ORPHAN_KEEP_MIN_FRACTION).toInt()
         val refs = if (covered.size >= MATCH_MIN_REF_INTERVALS && covered.size >= keepFloor) {
             covered
         } else {
-            rawRefs
+            rangedRefs
         }
         data class Est(
             val sub: Subtitle,
             val cues: List<SubtitleSyncMatcher.TimedCue>,
             val normal: Double,
-            val offset: SubtitleSyncMatcher.OffsetMatch?
-        )
+            val offset: SubtitleSyncMatcher.OffsetMatch?,
+            // Best-fit offset per third of the reference, in file order (index-scale refs only).
+            val segments: List<Long>? = null,
+        ) {
+            /**
+             * The per-third fits walk steadily in one direction by more than any constant delay's
+             * noise: the subtitle and the reference run at different SPEEDS (a frame-rate mismatch,
+             * on either side). No single shift fixes that — the sweep's best offset is just the
+             * average error, right at one point of the film and wrong everywhere else. The Shards
+             * S01E03 (Sept 2026): a correct subtitle against a built-in English track running ~0.1%
+             * fast fitted −625/−975/−1925ms, and the whole-file sweep "fixed" it by −1150ms.
+             * Monotonic is required as well as spread, so one noisy third on a real constant delay
+             * (1000/1000/400) is not mistaken for drift.
+             */
+            val drifting: Boolean
+                get() {
+                    val s = segments ?: return false
+                    if (s.size < 3 || s.max() - s.min() <= MATCH_SEGMENT_AGREEMENT_MS) return false
+                    return s.zipWithNext().all { (a, b) -> b >= a } || s.zipWithNext().all { (a, b) -> b <= a }
+                }
+            val offsetMedian: Long? get() = segments?.sorted()?.let { it[it.size / 2] }
+
+            /**
+             * Every third of the file wants the subtitle moved by more than a second, the same way.
+             * Then an "as authored" timing score is chance overlap in dense dialogue, not alignment:
+             * The Shards S01E04 (Sept 2026) scored 0.77 as authored with thirds 5.8/7.1/8.7s and was
+             * applied by a manual rescan; Peaky Blinders S01E04 scored 0.70–0.75 while 47s out.
+             * Aligned subtitles measure near zero in at least one third (MoviezAddiction: ~0.1s;
+             * The Shards S01E03's drifting-reference case: −0.6s), so this never fires on them.
+             */
+            val misalignedAsAuthored: Boolean
+                get() {
+                    val s = segments ?: return false
+                    if (s.size < 3) return false
+                    return s.all { it > MATCH_OFFSET_MISALIGNED_MS } || s.all { it < -MATCH_OFFSET_MISALIGNED_MS }
+                }
+        }
         val ests = loaded.map { (sub, cues) ->
+            val normal = SubtitleSyncMatcher.scoreByTiming(cues, refs, tol)
+            // A subtitle that already clears the accept bar as authored is, by this metric's own
+            // calibration, in sync — so it is not a rescue candidate. Searching one anyway finds a
+            // sub-second shift that nudges overlap against a differently-segmented reference (an
+            // English CC track splits lines the Hebrew sub merges), and "fixes" a subtitle the user
+            // was perfectly happy with. It must also not VOTE: an aligned subtitle has no opinion
+            // about a shift, and letting it vote manufactures corroboration for one.
+            val rescueNeeded = allowOffsets && normal < MATCH_SUCCESS_THRESHOLD_TIMING
             Est(
-                sub, cues,
-                SubtitleSyncMatcher.scoreByTiming(cues, refs, tol),
+                sub, cues, normal,
                 // Offset search stays strict (no tolerance) so its peaks stay sharp for corroboration.
-                SubtitleSyncMatcher.estimateOffsetMatch(cues, refs, MATCH_OFFSET_MIN_MS, MATCH_OFFSET_MAX_MS)
+                if (!rescueNeeded) null else
+                    SubtitleSyncMatcher.estimateOffsetMatch(cues, refs, MATCH_OFFSET_MIN_MS, MATCH_OFFSET_MAX_MS),
+                // Measured even when no shift may be applied: the fits also decide whether an
+                // as-authored score is real alignment (misalignedAsAuthored), on every path.
+                if (refs.size >= MATCH_SEGMENT_OFFSET_MIN_REFS) {
+                    SubtitleSyncMatcher.segmentOffsets(cues, refs, MATCH_OFFSET_MAX_MS)
+                } else null
             )
+        }
+        // The per-third fits are the one piece of evidence that separates a constant delay from a
+        // speed mismatch or a different cut, so they are always logged.
+        if (debug) {
+            ests.filter { it.segments != null }.forEach { e ->
+                android.util.Log.i(
+                    "SubMatch",
+                    "[offset-profile] \"${e.sub.label}\" thirds=${e.segments?.joinToString("/")}ms" +
+                        (if (e.drifting) " — drifting, no constant shift applies" else "") +
+                        (if (e.misalignedAsAuthored) " — not aligned as authored" else "")
+                )
+            }
         }
         // Each candidate votes its best offset if it meaningfully improves that candidate. Compare
         // against the strict base (both from the offset search) — not the tolerant accept score.
-        val votes = ests.mapNotNull { e ->
-            e.offset?.takeIf { it.correctedScore >= MATCH_OFFSET_CORROBORATE_FLOOR && it.correctedScore > it.baseScore }
-                ?.offsetMs
+        // One vote per distinct TIMING, not per addon: the same file mirrored by several addons is
+        // one piece of evidence. The Shards S01E03 (Sept 2026): Wizdom, Ktuvit and OpenSubtitles
+        // served the identical CAKES subtitle (367 cues each), and its three copies "corroborated"
+        // a −1150ms shift that no second subtitle supported. A drifting candidate does not vote:
+        // its best offset is an average over a speed error, not a delay.
+        val votes = ests.filter { !it.drifting }.distinctBy { e ->
+            e.cues.size to e.cues.map { it.startMs }.hashCode()
+        }.mapNotNull { e ->
+            e.offset?.takeIf {
+                it.correctedScore >= MATCH_OFFSET_CORROBORATE_FLOOR &&
+                    it.correctedScore >= it.baseScore + MATCH_OFFSET_MIN_GAIN
+            }?.offsetMs
         }.sorted()
         // Largest cluster of votes within the agreement window; median of it is the trusted offset.
         var corroboratedOffset: Long? = null
@@ -3287,27 +6977,66 @@ class PlayerViewModel @Inject constructor(
         return ests.map { e ->
             var score = e.normal // tolerant, offset 0
             var off = 0L
-            // (b) lone strong offset — qualify via the strict search (≥ 0.80), then take the
-            // tolerant score at that shift so the accept bar is measured consistently.
-            e.offset?.let {
-                if (it.correctedScore >= MATCH_OFFSET_ACCEPT) {
-                    val sc = SubtitleSyncMatcher.scoreByTiming(SubtitleSyncMatcher.shiftCues(e.cues, it.offsetMs), refs, tol)
-                    if (sc > score) { score = sc; off = it.offsetMs }
+            // (a) Whole-file agreement. With an index-scale reference the file can corroborate a
+            // shift by itself: fit the offset independently over thirds and require them to agree
+            // (SubtitleSyncMatcher.segmentConsistentOffset). That evidence is stronger than the
+            // gain bars below, so it applies even to a subtitle that already clears the accept
+            // threshold — which is the case those bars miss. South Park S06E02 (Sept 2026): a
+            // candidate sat at 0.87 as authored while a ~2s shift made it right, and nothing
+            // looked, because rescueNeeded only searches below 0.70. A wrong cut cannot fake this:
+            // its thirds disagree (that episode's kept subtitle read 2025/6900/6700ms).
+            // Same test as SubtitleSyncMatcher.segmentConsistentOffset, on the thirds already fitted.
+            val segments = e.segments
+            val consistentOffset = e.offsetMedian?.takeIf { allowOffsets }?.takeIf {
+                segments != null && segments.max() - segments.min() <= MATCH_SEGMENT_AGREEMENT_MS &&
+                    kotlin.math.abs(it) >= MATCH_OFFSET_MIN_MS
+            }
+            if (consistentOffset != null) {
+                val shifted = SubtitleSyncMatcher.scoreByTiming(
+                    SubtitleSyncMatcher.shiftCues(e.cues, consistentOffset), refs, tol
+                )
+                if (shifted > score) {
+                    if (debug) {
+                        android.util.Log.i(
+                            "SubMatch",
+                            "[offset] \"${e.sub.label}\" ${consistentOffset}ms agrees across the file: " +
+                                "${"%.2f".format(score)} -> ${"%.2f".format(shifted)}"
+                        )
+                    }
+                    score = shifted
+                    off = consistentOffset
                 }
             }
-            // (c) corroborated offset — tolerant re-score at the shared shift (a candidate's own
-            // argmax may have landed elsewhere on search noise; the corroborated value is trusted).
-            if (corrob != null) {
-                val sc = SubtitleSyncMatcher.scoreByTiming(SubtitleSyncMatcher.shiftCues(e.cues, corrob), refs, tol)
-                if (sc >= MATCH_OFFSET_CORROBORATED_ACCEPT && sc > score) {
-                    score = sc; off = corrob
+            // Only subtitles that failed as authored are shifted (see rescueNeeded above), and never
+            // one whose thirds show a speed mismatch — see Est.drifting.
+            if (off == 0L && e.normal < MATCH_SUCCESS_THRESHOLD_TIMING && !e.drifting) {
+                // (b) lone strong offset — qualify via the strict search (≥ 0.80), then take the
+                // tolerant score at that shift so the accept bar is measured consistently.
+                e.offset?.let {
+                    if (it.correctedScore >= MATCH_OFFSET_ACCEPT) {
+                        val sc = SubtitleSyncMatcher.scoreByTiming(SubtitleSyncMatcher.shiftCues(e.cues, it.offsetMs), refs, tol)
+                        if (sc >= score + MATCH_OFFSET_MIN_GAIN) { score = sc; off = it.offsetMs }
+                    }
                 }
+                // (c) corroborated offset — tolerant re-score at the shared shift (a candidate's own
+                // argmax may have landed elsewhere on search noise; the corroborated value is trusted).
+                if (corrob != null) {
+                    val sc = SubtitleSyncMatcher.scoreByTiming(SubtitleSyncMatcher.shiftCues(e.cues, corrob), refs, tol)
+                    if (sc >= MATCH_OFFSET_CORROBORATED_ACCEPT && sc >= score + MATCH_OFFSET_MIN_GAIN) {
+                        score = sc; off = corrob
+                    }
+                }
+            }
+            // An unshifted verdict the per-third fits contradict cannot pass the accept bar.
+            if (off == 0L && e.misalignedAsAuthored && score >= MATCH_SUCCESS_THRESHOLD_TIMING) {
+                score = MATCH_SUCCESS_THRESHOLD_TIMING - 0.01
             }
             if (debug) {
                 android.util.Log.i(
                     "SubMatch",
                     "[builtin] candidate label=\"${e.sub.label}\" provider=${e.sub.provider} cues=${e.cues.size} " +
-                        "refIntervals=${refs.size} score=${"%.2f".format(score)}" +
+                        "refIntervals=${refs.size} base=${"%.2f".format(e.normal)} " +
+                        "score=${"%.2f".format(score)}" +
                         (if (off != 0L) " offset=${off}ms" else "")
                 )
             }
@@ -3319,9 +7048,10 @@ class PlayerViewModel @Inject constructor(
     private suspend fun scoreAgainstBuiltIn(
         loaded: List<Pair<Subtitle, List<SubtitleSyncMatcher.TimedCue>>>,
         referenceSub: Subtitle,
-        sourceLabel: String,
+        @StringRes sourceLabelRes: Int,
         previousSubtitle: Subtitle?
     ): List<ScoredCandidate>? {
+        if (userLockedSubtitleKey != null) return null
         synchronized(referenceIntervals) { referenceIntervals.clear() }
         refIntervalStart = -1L
         // If AI translation is already showing (it has the source/English track selected under the
@@ -3485,10 +7215,6 @@ class PlayerViewModel @Inject constructor(
                 minOf(lastProgressElapsed + MATCH_HARD_CAP_MS, MATCH_TOTAL_CAP_MS)
             }
             if (elapsed >= deadline) break
-            updateMatchStatus(
-                if (refs.isEmpty()) "Searching for a match ($sourceLabel) — waiting for speech…"
-                else "Searching for a match ($sourceLabel) — (${refs.size})"
-            )
             delay(300)
         }
         collectingReference = false
@@ -3519,7 +7245,16 @@ class PlayerViewModel @Inject constructor(
             )
         }
 
-        val results = withContext(Dispatchers.Default) { scoreCandidatesWithOffsets(loaded, refs, debug = true) }
+        // Offsets are only trustworthy from authored (buffered) cue times — see the doc on
+        // scoreCandidatesWithOffsets. A realtime-dominated reference may still ACCEPT or REJECT a
+        // subtitle as authored; it may not invent a shift for one.
+        val offsetsTrusted = bufferedCount >= MATCH_MIN_BUFFERED_FOR_REJECT
+        if (!offsetsTrusted) {
+            Log.i("SubMatch", "offset rescue disabled: buffered=$bufferedCount/${refs.size} (realtime reference)")
+        }
+        val results = withContext(Dispatchers.Default) {
+            scoreCandidatesWithOffsets(loaded, refs, debug = true, allowOffsets = offsetsTrusted)
+        }
         // A LOW score from a realtime-dominated reference (give-up exit without buffered quorum)
         // is not evidence of a bad sub — report inconclusive instead of a confident
         // "no well-synced subtitle (best N%)" reject. Accepts pass through unchanged.
@@ -3537,7 +7272,7 @@ class PlayerViewModel @Inject constructor(
     /** Reference = AI hearing transcription (fallback when there's no built-in English track). */
     private suspend fun scoreAgainstHearing(
         loaded: List<Pair<Subtitle, List<SubtitleSyncMatcher.TimedCue>>>,
-        sourceLabel: String
+        @StringRes sourceLabelRes: Int
     ): List<ScoredCandidate>? {
         startMatchListening()
         val samples = mutableListOf<SubtitleSyncMatcher.SpokenSample>()
@@ -3575,10 +7310,6 @@ class PlayerViewModel @Inject constructor(
                 android.util.Log.w("SubMatch", "hearing aborted: Gemini Live error=${geminiLiveService.errorMessage.value}")
                 break
             }
-            updateMatchStatus(
-                if (samples.isEmpty()) "Searching for a match ($sourceLabel) — waiting for speech…"
-                else "Searching for a match ($sourceLabel) — scanning subtitles… (${samples.size})"
-            )
             delay(300)
         }
         collector.cancel()
@@ -3597,19 +7328,30 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    private fun beginMatch(status: String) {
-        _uiState.value = _uiState.value.copy(isFindingBestMatch = true, matchStatusText = status)
+    /**
+     * Raises the single "Adjusting subtitles…" indicator. It carries no per-stage text: the stage
+     * narration this used to drive produced five or six popups per scan, and now goes to the log
+     * only (see [matchStep]).
+     */
+    private fun beginMatch() {
+        _uiState.value = _uiState.value.copy(isFindingBestMatch = true)
     }
 
-    private fun updateMatchStatus(status: String) {
-        if (_uiState.value.matchStatusText != status) {
-            _uiState.value = _uiState.value.copy(matchStatusText = status)
-        }
+    /**
+     * Auto-match step trace — **logged only**. The scan has many internal stages (reference read,
+     * scoring, AI confirmation, escalation, swaps) and surfacing each one turned the player into a
+     * stream of popups. On screen the whole run is a single "Adjusting subtitles…" indicator; these
+     * lines stay in logcat, where they are what makes the pipeline diagnosable.
+     */
+    private fun matchStep(text: String) {
+        Log.i("SubMatch", "step: $text")
     }
 
     private fun startMatchListening() {
+        if (userLockedSubtitleKey != null) return
         hasManualSubtitleSelection = true
         subtitleSelectionJob?.cancel()
+        cancelSubtitleLocalization()
         translationManager.isEnabled = false
         targetSubtitleLangCode.takeIf { it.isNotBlank() }?.let { geminiLiveService.targetLanguageCode = it }
         geminiLiveService.connect()
@@ -3626,11 +7368,12 @@ class PlayerViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(
             isFindingBestMatch = false,
             isLiveAudioTranslating = false,
-            matchStatusText = ""
+            provisionalMatch = null
         )
     }
 
     private fun restoreSubtitle(subtitle: Subtitle?) {
+        if (userLockedSubtitleKey != null) return
         _uiState.value = _uiState.value.copy(
             selectedSubtitle = subtitle,
             subtitleSelectionNonce = _uiState.value.subtitleSelectionNonce + 1
@@ -3677,12 +7420,48 @@ class PlayerViewModel @Inject constructor(
     }
 
     private suspend fun readCachedMatch(): CachedSubMatch? {
+        if (!MATCH_CACHE_ENABLED) return null
         val key = currentStreamCacheKey() ?: return null
         return loadMatchCache().lastOrNull { it.key == key }
     }
 
+    /**
+     * Remember [subtitle] — but only once the user has actually watched [MATCH_CACHE_DWELL_MS] of
+     * playback with it still selected. Abandoning it (switching tracks, leaving) cancels the write,
+     * so a bad match stays a one-off instead of being burned in for every future playback of the
+     * file.
+     */
+    private fun rememberMatchAfterDwell(subtitle: Subtitle, offsetMs: Long) {
+        if (!MATCH_CACHE_ENABLED) return
+        val key = "${subtitle.provider}|${subtitle.id}"
+        matchCacheConfirmed = false
+        matchCacheConfirmJob?.cancel()
+        matchCacheConfirmJob = viewModelScope.launch {
+            var watchedMs = 0L
+            while (watchedMs < MATCH_CACHE_DWELL_MS) {
+                delay(MATCH_CACHE_DWELL_TICK_MS)
+                val selected = _uiState.value.selectedSubtitle
+                if (selected == null || "${selected.provider}|${selected.id}" != key) {
+                    Log.i("SubMatch", "not remembered: moved off \"${subtitle.label}\" after ${watchedMs / 1000}s")
+                    return@launch
+                }
+                if (lastIsPlaying) watchedMs += MATCH_CACHE_DWELL_TICK_MS
+            }
+            // Prefer the correction currently bound to this track, in case it was refined while
+            // the dwell was running.
+            val sync = _uiState.value.autoSync?.takeIf { _uiState.value.autoSyncSubtitleKey == key }
+            writeCachedMatch(subtitle, sync?.offsetMs ?: offsetMs)
+            matchCacheConfirmed = true
+            Log.i(
+                "SubMatch",
+                "remembered \"${subtitle.label}\" after ${MATCH_CACHE_DWELL_MS / 1000}s of playback"
+            )
+        }
+    }
+
     /** Remember [subtitle] as the match for the current stream (null = forget the entry). */
     private fun writeCachedMatch(subtitle: Subtitle?, offsetMs: Long = 0L) {
+        if (!MATCH_CACHE_ENABLED) return
         val key = currentStreamCacheKey() ?: return
         viewModelScope.launch {
             runCatching {
@@ -3705,7 +7484,14 @@ class PlayerViewModel @Inject constructor(
         val target = targetSubtitleLangCode
         val cacheable = target.isNotBlank() && !subtitle.isEmbedded && !subtitle.isBitmap &&
             subtitle.url.isNotBlank() && normalizeLanguage(subtitle.lang) == target
-        writeCachedMatch(if (cacheable) subtitle else null)
+        if (cacheable) {
+            // Same dwell rule as an auto-match: a track the user tries and abandons in ten seconds
+            // is not the answer to remember for this file.
+            rememberMatchAfterDwell(subtitle, 0L)
+        } else {
+            // Dropping a now-stale entry is always safe, so it happens immediately.
+            writeCachedMatch(null)
+        }
     }
 
     /**
@@ -3715,24 +7501,15 @@ class PlayerViewModel @Inject constructor(
      * server — which is what used to leave the player stuck buffering after a match. Also
      * normalizes the content (UTF-8, gunzipped) as a side effect.
      */
-    private fun localizeSubtitle(sub: Subtitle, raw: String, offsetMs: Long = 0L): Subtitle {
+    private fun localizeSubtitle(sub: Subtitle, raw: String): Subtitle {
         return runCatching {
-            // Constant-offset rescue: bake the delay into the served text so the correction lives
-            // in the file, independent of the player's delay knob (no state leaks across track/
-            // source switches). The id gets an "…#ofs<ms>" marker so this shifted copy is a
-            // DISTINCT track — otherwise preload mode would override to the un-shifted preloaded
-            // copy that shares the base id.
-            val text = if (offsetMs != 0L) SubtitleSyncMatcher.shiftTimestamps(raw, offsetMs) else raw
             val dir = java.io.File(context.cacheDir, "matched_subs").apply { mkdirs() }
             // Keep the directory bounded; files are ~100KB and keyed stably per subtitle.
             dir.listFiles()?.sortedBy { it.lastModified() }?.dropLast(39)?.forEach { it.delete() }
-            val ext = if (text.trimStart().startsWith("WEBVTT")) "vtt" else "srt"
-            val idBase = "${sub.provider}|${sub.id}"
-            val fileKey = if (offsetMs != 0L) "$idBase$MATCH_OFFSET_ID_MARKER$offsetMs" else idBase
-            val file = java.io.File(dir, "${fileKey.hashCode().toUInt()}.$ext")
-            file.writeText(text)
-            val newId = if (offsetMs != 0L) "${sub.id}$MATCH_OFFSET_ID_MARKER$offsetMs" else sub.id
-            sub.copy(id = newId, url = file.toURI().toString())
+            val ext = if (raw.trimStart().startsWith("WEBVTT")) "vtt" else "srt"
+            val file = java.io.File(dir, "${"${sub.provider}|${sub.id}".hashCode().toUInt()}.$ext")
+            file.writeText(raw)
+            sub.copy(url = file.toURI().toString())
         }.getOrDefault(sub)
     }
 
@@ -3785,7 +7562,7 @@ class PlayerViewModel @Inject constructor(
         subtitlePreloadJob = viewModelScope.launch {
             val localized = candidates.map { sub ->
                 async(Dispatchers.IO) {
-                    SubtitleSyncMatcher.loadRaw(sub.url)
+                    SubtitleSyncMatcher.loadRaw(sub.url, sub.lang)
                         ?.takeIf { it.isNotBlank() }
                         ?.let { raw -> localizeSubtitle(sub, raw) }
                         ?.takeIf { it.url.startsWith("file:") }
@@ -3803,7 +7580,7 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    private fun showMatchToast(message: String) {
+    private fun showMatchToast(message: PlayerMessage) {
         _uiState.value = _uiState.value.copy(matchToast = message)
     }
 
@@ -3817,8 +7594,10 @@ class PlayerViewModel @Inject constructor(
         // hearing scan (it also disconnects the Gemini Live audio stream). Without this, the scan
         // kept running with no way to cancel it. Mirrors selectSubtitle()'s user-action path.
         userPickedSubtitle = true
-        cancelFindBestMatch()
+        userLockedSubtitleKey = null
+        cancelFindBestMatch("subtitles disabled")
         subtitleSelectionJob?.cancel()
+        cancelSubtitleLocalization()
         translationManager.isEnabled = false
         aiSourceSubtitle = null
         _uiState.value = _uiState.value.copy(
@@ -3860,6 +7639,24 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun retry() {
+        retryPlayback()
+    }
+
+    fun reloadStreams() {
+        val resumeTarget = lastKnownPositionMs.takeIf { it > 0L } ?: currentStartPositionMs
+        mediaLoadJob?.cancel()
+        _uiState.value = _uiState.value.copy(
+            error = null,
+            isLoading = false,
+            isLoadingStreams = true,
+            sourceSearchActive = true,
+            streams = emptyList(),
+            addonNotices = emptyList(),
+            selectedStream = null,
+            selectedStreamUrl = null,
+            streamProgress = 0f,
+            streamLoadPhase = null
+        )
         loadMedia(
             mediaType = currentMediaType,
             mediaId = currentMediaId,
@@ -3873,9 +7670,104 @@ class PlayerViewModel @Inject constructor(
             preferredAddonId = currentPreferredAddonId,
             preferredSourceName = currentPreferredSourceName,
             preferredBingeGroup = currentPreferredBingeGroup,
-            startPositionMs = currentStartPositionMs,
-            isLiveStreamPlayback = currentIsLiveStreamPlayback
+            startPositionMs = resumeTarget,
+            isLiveStreamPlayback = currentIsLiveStreamPlayback,
+            forceRefresh = true,
+            airDate = currentAirDate
         )
+    }
+
+    /** The busy message's third button: the next admission does not ask the panel. */
+    fun playIptvAnyway() {
+        iptvSkipCheckOnce = true
+        retryPlayback()
+    }
+
+    /** The account filled up under a playing stream; Retry or Play anyway reopen it through the normal gate. */
+    internal fun reportIptvAccountBusy() {
+        iptvRecheckAfterBusy = true
+        _uiState.value = _uiState.value.copy(error = IPTV_ACCOUNT_BUSY_MESSAGE)
+    }
+
+    internal fun reportIptvReopenBusy(positionMs: Long) {
+        iptvRecheckAfterBusy = true
+        lastKnownPositionMs = positionMs
+        _uiState.update {
+            it.copy(selectedStreamUrl = null, savedPosition = positionMs, error = IPTV_ACCOUNT_BUSY_MESSAGE)
+        }
+    }
+
+    /** Runs only for IPTV VOD: every other source reads no setting and returns without suspending. */
+    internal suspend fun iptvVodPolicy(stream: StreamSource?): com.arflix.tv.data.repository.IptvStreamPolicy? {
+        if (stream == null || !IptvVodSourceIds.isIptvVodAddonId(stream.addonId)) return null
+        return try {
+            streamRepository.iptvStreamPolicyFor(stream)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            null
+        }
+    }
+
+    internal suspend fun iptvAccountUsage(account: com.arflix.tv.network.IptvProviderAccount) =
+        streamRepository.iptvAccountUsage(account)
+
+    /**
+     * The panel is asked only on a cold start with a reliable allowance. Sits outside
+     * [StreamRepository.resolveStreamForPlayback] and before the startup watchdog, so a
+     * full account is neither a failed source nor a reason to fail over.
+     */
+    private suspend fun admitIptvVodStream(stream: StreamSource?): IptvAdmission {
+        val skipCheck = iptvSkipCheckOnce
+        iptvSkipCheckOnce = false
+        val policy = iptvVodPolicy(stream) ?: return IptvAdmission.Proceed
+        if (!policy.panelCheckAllowed) stream?.let(streamRepository::bootstrapIptvAllowance)
+        if (skipCheck || !policy.panelCheckAllowed) {
+            iptvRecheckAfterBusy = false
+            return IptvAdmission.Proceed
+        }
+        // The close before a Busy keeps the account inside the cold-start window, and opening then would evict someone.
+        if (!iptvRecheckAfterBusy && !IptvPlaybackConnections.sessions.isColdStart(policy.account)) return IptvAdmission.Proceed
+        val answer = IptvAccountAvailability.admit { streamRepository.iptvAccountUsage(policy.account) }
+        iptvRecheckAfterBusy = answer is IptvAdmission.Full
+        return answer
+    }
+
+    /** A provided source that met a full account has run none of its path yet, so it starts over. */
+    private fun restartProvidedStream() {
+        _uiState.value = _uiState.value.copy(error = null)
+        loadMedia(
+            mediaType = currentMediaType,
+            mediaId = currentMediaId,
+            seasonNumber = currentSeason,
+            episodeNumber = currentEpisode,
+            displaySeasonNumber = currentDisplaySeason,
+            displayEpisodeNumber = currentDisplayEpisode,
+            animeQueryOverride = currentAnimeQueryOverride,
+            providedImdbId = currentImdbId,
+            providedStreamUrl = currentProvidedStreamUrl,
+            preferredAddonId = currentPreferredAddonId,
+            preferredSourceName = currentPreferredSourceName,
+            preferredBingeGroup = currentPreferredBingeGroup,
+            startPositionMs = currentStartPositionMs,
+            isLiveStreamPlayback = currentIsLiveStreamPlayback,
+            airDate = currentAirDate,
+            providedIptvSourceId = currentProvidedIptvSourceId
+        )
+    }
+
+    fun retryPlayback() {
+        if (iptvBusyOnProvidedPath) {
+            restartProvidedStream()
+            return
+        }
+        val stream = _uiState.value.selectedStream
+        if (stream != null) {
+            _uiState.value = _uiState.value.copy(error = null)
+            val resumeTarget = lastKnownPositionMs.takeIf { it > 0L } ?: currentStartPositionMs
+            selectStream(stream, resumeTarget)
+        } else {
+            reloadStreams()
+        }
     }
 
     private data class ResumeData(
@@ -4031,26 +7923,201 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
+    private suspend fun persistNextEpisodeAfterCompletion() {
+        val canonicalSeason = currentSeason ?: return
+        val canonicalEpisode = currentEpisode ?: return
+        val standardOrdering = getAnimeStructuringStyle() == AnimeStructuringStyle.STANDARD
+        val displaySeason = if (standardOrdering) canonicalSeason else currentDisplaySeason ?: canonicalSeason
+        val displayEpisode = if (standardOrdering) canonicalEpisode else currentDisplayEpisode ?: canonicalEpisode
+
+        // Completion already removed this episode. Keep other saved progress until a
+        // successor is available; saveLocalContinueWatching replaces the show entry.
+        val currentDisplayEpisodes = loadPlayerSeasonEpisodes(currentMediaId, displaySeason)
+            .sortedBy { it.episodeNumber }
+        if (currentDisplayEpisodes.isEmpty()) return
+        val next = currentDisplayEpisodes.firstOrNull { it.episodeNumber > displayEpisode }
+            ?: loadPlayerSeasonEpisodes(currentMediaId, displaySeason + 1)
+                .sortedBy { it.episodeNumber }
+                .firstOrNull()
+            ?: return
+        val aired = EpisodeAvailability.hasAired(next.airDate)
+
+        traktRepository.saveLocalContinueWatching(
+            mediaType = MediaType.TV,
+            tmdbId = currentMediaId,
+            title = currentItemTitle.ifEmpty { currentTitle },
+            posterPath = currentPoster,
+            backdropPath = currentBackdrop,
+            season = next.tmdbSeasonNumber,
+            episode = next.tmdbEpisodeNumber,
+            displaySeason = next.seasonNumber,
+            displayEpisode = next.episodeNumber,
+            episodeTitle = next.name,
+            progress = 0,
+            positionSeconds = 0L,
+            durationSeconds = 0L,
+            isUpNext = true,
+            episodeAirDate = next.airDate.orEmpty(),
+            emitUpdate = aired,
+            addonNativeId = mediaRepository.getCachedItem(MediaType.TV, currentMediaId)?.addonNativeId,
+            addonNativeAddonId = mediaRepository.getCachedItem(MediaType.TV, currentMediaId)?.addonNativeAddonId,
+            addonNativeType = mediaRepository.addonNativeType(currentMediaId),
+        )
+    }
+
+    /** Set by [refetchSameSourceFresh]: the source to pick again from a freshly fetched list. */
+    private var refetchRecent: RecentPlayedSource? = null
+    private var refetchedSourceKey: String? = null
+
+    /**
+     * The selected source failed before its first frame with a network / HTTP error — typically an
+     * expired link from a source list saved before the app was closed. Re-fetches the source list
+     * (bypassing the resolved-link cache) and autoplays the same source, matched by torrent hash /
+     * file name / title and never by the stale URL, resuming at the same position. Once per source.
+     */
+    fun refetchSameSourceFresh(): Boolean {
+        val stream = _uiState.value.selectedStream ?: return false
+        val key = "$currentMediaType:$currentMediaId:$currentSeason:$currentEpisode:${stream.addonId}:${stream.infoHash ?: stream.source}"
+        if (key == refetchedSourceKey) return false // already re-fetched once: let failover proceed
+        refetchedSourceKey = key
+        streamRepository.forgetResolvedStream(stream)
+        refetchRecent = RecentPlayedSource.of(
+            currentMediaType, currentMediaId, currentSeason, currentEpisode, stream, System.currentTimeMillis()
+        ).copy(url = null)
+        Log.i("PlayerViewModel", "re-fetching sources to replay \"${stream.source.take(60)}\" with a fresh link")
+        reloadStreams()
+        return true
+    }
+
+    private fun loadRecentSource(mediaType: MediaType, mediaId: Int, season: Int?, episode: Int?) {
+        recentSourcePlayTracker.reset()
+        recentSourceGate.disarm()
+        preparedStream = null
+        listedSelectedStream = null
+        val forced = refetchRecent?.takeIf { it.appliesTo(mediaType, mediaId, season, episode) }
+        refetchRecent = null
+        if (forced != null) {
+            recentSourceLoad = kotlinx.coroutines.CompletableDeferred(forced)
+            return
+        }
+        recentSourceLoad = viewModelScope.async {
+            val recent = recentPlayedSourceRepository.get(mediaType, mediaId, season, episode)
+            val stillCurrent = currentMediaType == mediaType && currentMediaId == mediaId &&
+                currentSeason == season && currentEpisode == episode
+            if (recent == null || !stillCurrent) return@async null
+            // A source that crossed the threshold in this session is newer than the stored one.
+            if (_uiState.value.recentSource == null) {
+                _uiState.value = _uiState.value.copy(recentSource = recent)
+            }
+            recent
+        }
+    }
+
+    /** Arms [recentSourceGate] for this load. If it runs out with nothing started, autoplay picks from what was found. */
+    private fun CoroutineScope.armRecentSourceGate(recent: RecentPlayedSource?) {
+        recentSourceGate.arm(recent, recentSourceClock())
+        if (recent == null) return
+        launch {
+            delay(recentSourceGate.remainingMs(recentSourceClock()))
+            recentSourceGate.release()
+            if (canStartAutoplay()) {
+                val streams = _uiState.value.streams
+                playbackDiag("autoplayRecentWaitExpired streams=${streams.size}")
+                autoplaySelectBest(streams, _uiState.value.preferredAudioLanguage.ifBlank { "en" })
+            }
+        }
+    }
+
+    /** Records the playing source as this title's recently played one once it has really played. */
+    private fun noteRecentSourcePlayback(positionMs: Long, isPlaying: Boolean) {
+        if (currentIsLiveStreamPlayback || currentMediaId <= 0) return
+        val state = _uiState.value
+        // Credit the source the player has loaded, not selectedStream: during a switch that already
+        // names the replacement while the old video keeps playing. Nothing counts until the
+        // replacement is applied (its new nonce restarts the count) or the switch fails.
+        val stream = preparedStream ?: return
+        val replacementResolving = streamSelectionJob?.isActive == true
+        val reached = recentSourcePlayTracker.onProgress(
+            selectionId = state.streamSelectionNonce.toLong(),
+            positionMs = positionMs,
+            isPlaying = isPlaying && !replacementResolving,
+            nowMs = recentSourceClock()
+        )
+        if (!reached) return
+        fun recordOf(source: StreamSource) = RecentPlayedSource.of(
+            mediaType = currentMediaType,
+            mediaId = currentMediaId,
+            season = currentSeason,
+            episode = currentEpisode,
+            stream = source,
+            playedAtMs = System.currentTimeMillis()
+        )
+        // Record the addon's own entry, not the copy resolved for playback (Stalker and HubCloud
+        // links are exchanged for one-off URLs): later source lists are matched against it.
+        val listed = findRecentSourceMatch(state.streams, recordOf(stream)) ?: stream
+        val record = recordOf(listed)
+        _uiState.value = _uiState.value.copy(recentSource = record)
+        recentPlayedSourceRepository.save(profileManager.getProfileIdSync(), record)
+    }
+
+    private var progressDiscardedForIdle = false
+
+    fun discardProgressForIdle() {
+        progressDiscardedForIdle = true
+        progressSaveJob?.cancel()
+    }
+
     fun saveProgress(
         position: Long,
         duration: Long,
         progressPercent: Int,
         isPlaying: Boolean,
-        playbackState: Int
+        playbackState: Int,
+        closing: Boolean = false
     ): Job? {
-        if (duration <= 0) return null
+        val matchedIptvVod = isMatchedIptvVodPlayback(
+            currentMediaType, currentMediaId, currentSeason, currentEpisode,
+            _uiState.value.selectedStream?.addonId, currentIsLiveStreamPlayback
+        )
+        if (progressDiscardedForIdle || (duration <= 0 && !matchedIptvVod)) return null
+        val unknownDurationProgress = if (duration <= 0) unknownDurationVodProgress(
+            position, _uiState.value.expectedDurationMs, playbackState == Player.STATE_ENDED
+        ) else null
+        val trackingDuration = unknownDurationProgress?.durationMs ?: duration
+        val trackingPercent = unknownDurationProgress?.percent?.toInt() ?: progressPercent
+        noteRecentSourcePlayback(position, isPlaying)
+
+        // A completion transaction must not be cancelled/restarted by the ended polling tick
+        // or the player's disposal save. It can finish after the UI's short navigation wait.
+        if (progressSaveCompleting && progressSaveJob?.isActive == true) return progressSaveJob
+        val completing = playbackState == Player.STATE_ENDED || trackingPercent >= Constants.WATCHED_THRESHOLD
 
         // On pause/stop, replace an in-flight periodic save. During normal playback,
         // debounce by returning the save that is already running.
-        if (!isPlaying || playbackState == Player.STATE_ENDED) {
+        if (closing || !isPlaying || playbackState == Player.STATE_ENDED) {
             progressSaveJob?.cancel()
         } else if (progressSaveJob?.isActive == true) {
             return progressSaveJob
         }
 
-        val job = viewModelScope.launch(Dispatchers.IO) {
+        progressSaveCompleting = completing || closing
+        val completionProfileId = profileManager.getProfileIdSync()
+        val job = viewModelScope.launchPlaybackProgressSave(completing, closing = closing, stopWhen = {
+            // A surviving final save still belongs to the profile that watched this video.
+            profileManager.activeProfileId.first { it != completionProfileId }
+        }) {
+            val duration = trackingDuration
+            val progressPercent = trackingPercent
             val currentTime = System.currentTimeMillis()
             val progressFraction = (progressPercent / 100f).coerceIn(0f, 1f)
+            // Trackers store a percentage, never a position, so a resume time on
+            // another device is only ever as precise as this number. Sending the
+            // truncated integer percent costs up to a minute on a feature film.
+            val scrobbleProgressPercent = unknownDurationProgress?.percent ?: if (duration > 0L) {
+                (position.toDouble() / duration.toDouble() * 100.0).toFloat().coerceIn(0f, 100f)
+            } else {
+                progressPercent.toFloat()
+            }
             val selectedStream = _uiState.value.selectedStream
             val streamAddonIdForCheck = selectedStream?.addonId?.takeIf { it.isNotBlank() }
             val isLiveStreamOrSports = SportsAddonCapabilities.isLiveStreamOrSportsItem(
@@ -4059,16 +8126,25 @@ class PlayerViewModel @Inject constructor(
                 streamAddonId = streamAddonIdForCheck,
                 title = currentTitle,
                 isLiveStream = currentIsLiveStreamPlayback,
-                addons = currentInstalledAddons
+                addons = currentInstalledAddons,
+                isAddonNative = mediaRepository.isAddonNative(currentMediaId)
             )
 
             // Scrobble start/pause/updates with debounce
-            if (!isLiveStreamOrSports && isPlaying && !lastIsPlaying) {
+            if (!isLiveStreamOrSports && closing) {
+                try {
+                    remoteSyncManager.scrobbleStop(currentMediaType, currentMediaId,
+                        scrobbleProgressPercent, currentSeason, currentEpisode, isCurrentAnime())
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                }
+            } else if (!isLiveStreamOrSports && isPlaying && !lastIsPlaying) {
+                hasScrobbledIntermediateStop = false
                 try {
                     remoteSyncManager.scrobbleStart(
                         mediaType = currentMediaType,
                         tmdbId = currentMediaId,
-                        progress = progressPercent.toFloat(),
+                        progress = scrobbleProgressPercent,
                         season = currentSeason,
                         episode = currentEpisode,
                         isAnime = isCurrentAnime()
@@ -4078,21 +8154,37 @@ class PlayerViewModel @Inject constructor(
 
                     // Scrobble start failed
                 }
-                lastScrobbleTime = currentTime
+                // Opening the session clears the tracker's stored resume point
+                // until the next heartbeat commits a new one, so bring the first
+                // one forward instead of leaving a full interval during which
+                // losing power would drop the title out of Continue Watching.
+                lastScrobbleTime = currentTime - SCROBBLE_UPDATE_INTERVAL_MS + FIRST_SCROBBLE_HEARTBEAT_DELAY_MS
             } else if (!isLiveStreamOrSports && !isPlaying && lastIsPlaying) {
                 try {
-                    remoteSyncManager.scrobblePause(
-                        mediaType = currentMediaType,
-                        tmdbId = currentMediaId,
-                        progress = progressPercent.toFloat(),
-                        season = currentSeason,
-                        episode = currentEpisode,
-                        isAnime = isCurrentAnime()
-                    )
+                    if (progressPercent in 80 until Constants.WATCHED_THRESHOLD && !hasScrobbledIntermediateStop && !hasMarkedWatched) {
+                        hasScrobbledIntermediateStop = true
+                        remoteSyncManager.scrobbleStop(
+                            mediaType = currentMediaType,
+                            tmdbId = currentMediaId,
+                            progress = scrobbleProgressPercent,
+                            season = currentSeason,
+                            episode = currentEpisode,
+                            isAnime = isCurrentAnime()
+                        )
+                    } else {
+                        remoteSyncManager.scrobblePause(
+                            mediaType = currentMediaType,
+                            tmdbId = currentMediaId,
+                            progress = scrobbleProgressPercent,
+                            season = currentSeason,
+                            episode = currentEpisode,
+                            isAnime = isCurrentAnime()
+                        )
+                    }
                 } catch (e: Exception) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
 
-                    // Scrobble pause immediate failed
+                    // Scrobble pause/stop immediate failed
                 }
                 lastScrobbleTime = currentTime
             } else if (!isLiveStreamOrSports && isPlaying && currentTime - lastScrobbleTime >= SCROBBLE_UPDATE_INTERVAL_MS) {
@@ -4101,7 +8193,7 @@ class PlayerViewModel @Inject constructor(
                     remoteSyncManager.scrobbleProgress(
                         mediaType = currentMediaType,
                         tmdbId = currentMediaId,
-                        progress = progressPercent.toFloat(),
+                        progress = scrobbleProgressPercent,
                         season = currentSeason,
                         episode = currentEpisode,
                         isAnime = isCurrentAnime()
@@ -4119,7 +8211,7 @@ class PlayerViewModel @Inject constructor(
             // the next-episode CW entry, and saving the finished episode's full position here
             // would contaminate the next episode's resume time via show-level history fallback.
             val isAtWatchedThreshold = progressPercent >= Constants.WATCHED_THRESHOLD
-            val durationSeconds = (duration / 1000L).coerceAtLeast(1L)
+            val durationSeconds = if (duration > 0L) (duration / 1000L).coerceAtLeast(1L) else 0L
             val positionSeconds = (position / 1000L).coerceAtLeast(0L)
             val hasSeekJump = lastWatchHistorySavedPositionSeconds >= 0L &&
                 kotlin.math.abs(positionSeconds - lastWatchHistorySavedPositionSeconds) >= 20L
@@ -4172,7 +8264,10 @@ class PlayerViewModel @Inject constructor(
                         durationSeconds = durationSeconds,
                         streamKey = streamKey,
                         streamAddonId = streamAddonId,
-                        streamTitle = streamTitle
+                        streamTitle = streamTitle,
+                        addonNativeId = mediaRepository.getCachedItem(currentMediaType, currentMediaId)?.addonNativeId,
+                        addonNativeAddonId = mediaRepository.getCachedItem(currentMediaType, currentMediaId)?.addonNativeAddonId,
+                        addonNativeType = mediaRepository.addonNativeType(currentMediaId)
                     )
 
                     // Push local CW to cloud so other devices see mid-playback progress.
@@ -4196,10 +8291,10 @@ class PlayerViewModel @Inject constructor(
             ) {
                 hasMarkedWatched = true
                 try {
-                    remoteSyncManager.scrobbleStop(
+                    if (!closing) remoteSyncManager.scrobbleStop(
                         mediaType = currentMediaType,
                         tmdbId = currentMediaId,
-                        progress = progressPercent.toFloat(),
+                        progress = scrobbleProgressPercent,
                         season = currentSeason,
                         episode = currentEpisode,
                         isAnime = isCurrentAnime()
@@ -4254,36 +8349,11 @@ class PlayerViewModel @Inject constructor(
                     )
                 }
 
-                // When a TV episode completes, immediately save the next episode to
-                // local Continue Watching so CW isn't empty between episodes.
-                val cwSeason = currentSeason
-                val cwEpisode = currentEpisode
-                if (currentMediaType == MediaType.TV && cwSeason != null && cwEpisode != null) {
+                // Keep an aired next episode visible immediately. A future episode is retained
+                // only as a dated, hidden pointer so it can reappear on its release day.
+                if (currentMediaType == MediaType.TV) {
                     try {
-                        val nextIdentity = runCatching {
-                            animeMapper.resolveAnimeSeasonStructure(currentMediaId)
-                                ?.nextAfterDisplay(
-                                    currentDisplaySeason ?: cwSeason,
-                                    currentDisplayEpisode ?: cwEpisode
-                                )
-                        }.getOrNull()
-                        val nextSeason = nextIdentity?.tmdbSeason ?: cwSeason
-                        val nextEpisode = nextIdentity?.tmdbEpisode ?: (cwEpisode + 1)
-                        traktRepository.saveLocalContinueWatching(
-                            mediaType = currentMediaType,
-                            tmdbId = currentMediaId,
-                            title = currentItemTitle.ifEmpty { currentTitle },
-                            posterPath = currentPoster,
-                            backdropPath = currentBackdrop,
-                            season = nextSeason,
-                            episode = nextEpisode,
-                            displaySeason = nextIdentity?.displaySeason ?: nextSeason,
-                            displayEpisode = nextIdentity?.displayEpisode ?: nextEpisode,
-                            episodeTitle = null,
-                            progress = 3, // meets MIN_PROGRESS_THRESHOLD to avoid filter
-                            positionSeconds = 0L, // next episode: no resume position yet
-                            durationSeconds = 0L  // next episode: unknown duration
-                        )
+                        persistNextEpisodeAfterCompletion()
                     } catch (_: Exception) {
                         // Best-effort: don't let CW save failure affect playback
                     }
@@ -4300,9 +8370,30 @@ class PlayerViewModel @Inject constructor(
         job.invokeOnCompletion {
             if (progressSaveJob === job) {
                 progressSaveJob = null
+                progressSaveCompleting = false
             }
         }
         return job
+    }
+
+    /**
+     * The player found the stream is live. Addons don't always label their channels as live
+     * (some list them as movies), so the stream decides: from here on it gets no progress,
+     * scrobbles or Continue Watching entry, and one saved before this fix is removed.
+     */
+    fun onLivePlaybackDetected() {
+        if (currentIsLiveStreamPlayback) return
+        if (isMatchedIptvVodPlayback(currentMediaType, currentMediaId, currentSeason, currentEpisode,
+                _uiState.value.selectedStream?.addonId)) return
+        currentIsLiveStreamPlayback = true
+        val mediaType = currentMediaType
+        val mediaId = currentMediaId
+        viewModelScope.launch {
+            runCatching { watchHistoryRepository.removeFromHistory(mediaId, null, null) }
+            runCatching { traktRepository.removeFromContinueWatchingCache(mediaId, null, null, mediaType) }
+            runCatching { cloudSyncRepository.pushToCloud() }
+            runCatching { launcherContinueWatchingRepository.refreshForCurrentProfile() }
+        }
     }
 
     suspend fun saveProgressAndWait(
@@ -4328,34 +8419,52 @@ class PlayerViewModel @Inject constructor(
     }
 
     private var progressSaveJob: Job? = null
+    private var progressSaveCompleting = false
+    private var mediaLoadJob: Job? = null
     private var subtitleRefreshJob: Job? = null
     private var vodAppendJob: Job? = null
     private var homeServerAppendJob: Job? = null
     private var subtitleSelectionJob: Job? = null
+    /** Downloads+decodes a manually picked subtitle before it is served (see selectSubtitle). */
+    private var subtitleLocalizeJob: Job? = null
+    /** Bumped whenever an in-flight localization must not be applied any more. */
+    private var subtitleLocalizeGeneration = 0L
     private var streamPrewarmJob: Job? = null
     private var focusedStreamPrewarmJob: Job? = null
     private var streamSelectionJob: Job? = null
+    private var currentProvidedStreamUrl: String? = null
+    private var currentProvidedIptvSourceId: String? = null
+    private var iptvBusyOnProvidedPath = false
+    private var iptvSkipCheckOnce = false
+    private var iptvRecheckAfterBusy = false
     private var playbackErrorReportJob: Job? = null
     private var primaryStreamResolutionFinal: Boolean = false
     private var lastTopPrewarmKey: String = ""
 
+    private fun canStartAutoplay(): Boolean = _uiState.value.selectedStream == null &&
+        _uiState.value.selectedStreamUrl.isNullOrBlank() && streamSelectionJob?.isActive != true
+
     private fun sourceLookupStillActive(currentJob: Job? = null): Boolean {
-        val supplementalStillLoading =
-            (homeServerAppendJob != null && homeServerAppendJob !== currentJob && homeServerAppendJob?.isActive == true) ||
-                (vodAppendJob != null && vodAppendJob !== currentJob && vodAppendJob?.isActive == true)
-        return !primaryStreamResolutionFinal || supplementalStillLoading
+        return playerSourceLookupActive(
+            primaryFinished = primaryStreamResolutionFinal,
+            homeServerActive = homeServerAppendJob !== currentJob && homeServerAppendJob?.isActive == true,
+            iptvActive = vodAppendJob !== currentJob && vodAppendJob?.isActive == true
+        )
     }
 
-    private fun finishSupplementalSourceLookupIfReady(currentJob: Job?, errorMessage: String) {
+    private fun finishSupplementalSourceLookupIfReady(currentJob: Job?, errorMessage: PlayerMessage) {
         val state = _uiState.value
         val stillActive = sourceLookupStillActive(currentJob)
         if (state.streams.isNotEmpty() || !state.selectedStreamUrl.isNullOrBlank()) {
             _uiState.value = state.copy(
-                isLoading = false,
+                isLoading = state.isLoading && streamSelectionJob?.isActive == true,
                 isLoadingStreams = false,
                 sourceSearchActive = stillActive,
                 streamProgress = null,
-                streamLoadPhase = null
+                streamLoadPhase = null,
+                error = if (!stillActive && canStartAutoplay() &&
+                    eligiblePlayerAutoplayStreams(state.streams, autoPlayMinimumQuality, autoPlayLimits).isEmpty()
+                ) PlayerMessage.Res(R.string.stream_no_sources_match) else state.error
             )
             return
         }
@@ -4404,18 +8513,19 @@ class PlayerViewModel @Inject constructor(
             )
         }
 
+        currentCoroutineContext().ensureActive()
         val validSources = sources.filter { !it.url.isNullOrBlank() }
         if (validSources.isEmpty()) {
             finishSupplementalSourceLookupIfReady(
                 currentJob = currentCoroutineContext()[Job],
-                errorMessage = "No streams found for this content. The configured media servers may not have this title."
+                errorMessage = PlayerMessage.Res(R.string.player_error_no_streams_media_servers)
             )
             return
         }
         val latest = _uiState.value.streams
 
         val updated = (latest + validSources)
-            .distinctBy(::providerScopedStreamIdentity)
+            .distinctBy { providerScopedStreamIdentity(it) to playbackRequestIdentity(it) }
         val preferredLanguage = _uiState.value.preferredAudioLanguage.ifBlank { "en" }
         val sortedStreams = sortStreamsByQualityAndSize(updated, preferredLanguage)
         val shouldAutoplayHomeServer = _uiState.value.selectedStreamUrl.isNullOrBlank()
@@ -4424,14 +8534,15 @@ class PlayerViewModel @Inject constructor(
             streams = sortedStreams,
             isLoadingStreams = false,
             sourceSearchActive = sourceLookupStillActive(currentJob),
-            error = null,
+            error = _uiState.value.error.takeUnless { canStartAutoplay() },
             isSetupError = false,
             streamProgress = null,
             streamLoadPhase = null
         )
         prewarmTopStreams(sortedStreams, preferredLanguage)
         if (shouldAutoplayHomeServer) {
-            pickPreferredStream(sortedStreams, preferredLanguage)?.let { selectStream(it) }
+            autoplaySelectBest(sortedStreams, preferredLanguage)
+            finishSupplementalSourceLookupIfReady(currentJob, PlayerMessage.Res(R.string.player_error_no_streams_media_servers))
         }
     }
 
@@ -4445,6 +8556,9 @@ class PlayerViewModel @Inject constructor(
         val lookupTitle = currentItemTitle
             .ifBlank { currentTitle }
             .ifBlank { mediaRepository.getCachedItem(mediaType, currentMediaId)?.title.orEmpty() }
+        // Passed alongside the displayed title: a provider catalogue may list
+        // the title only under its original name.
+        val lookupOriginalTitle = mediaRepository.getCachedItem(mediaType, currentMediaId)?.originalTitle
 
         val vodSources = if (mediaType == MediaType.MOVIE) {
             streamRepository.resolveMovieVodSources(
@@ -4452,7 +8566,8 @@ class PlayerViewModel @Inject constructor(
                 title = lookupTitle,
                 year = null,
                 tmdbId = currentMediaId,
-                timeoutMs = timeoutMs
+                timeoutMs = timeoutMs,
+                originalTitle = lookupOriginalTitle
             )
         } else {
             streamRepository.resolveEpisodeVodSources(
@@ -4462,22 +8577,24 @@ class PlayerViewModel @Inject constructor(
                 title = lookupTitle,
                 tmdbId = currentMediaId,
                 tvdbId = currentTvdbId,
-                timeoutMs = timeoutMs
+                timeoutMs = timeoutMs,
+                originalTitle = lookupOriginalTitle
             )
         }
 
+        currentCoroutineContext().ensureActive()
         val validVodSources = vodSources.filter { !it.url.isNullOrBlank() }
         if (validVodSources.isEmpty()) {
             finishSupplementalSourceLookupIfReady(
                 currentJob = currentCoroutineContext()[Job],
-                errorMessage = "No streams found for this content. Try another source or check your configured sources."
+                errorMessage = PlayerMessage.Res(R.string.player_error_no_streams_other_source)
             )
             return
         }
         val latest = _uiState.value.streams
 
         val updated = (latest + validVodSources)
-            .distinctBy(::providerScopedStreamIdentity)
+            .distinctBy { providerScopedStreamIdentity(it) to playbackRequestIdentity(it) }
         val preferredLanguage = _uiState.value.preferredAudioLanguage.ifBlank { "en" }
         val sortedStreams = sortStreamsByQualityAndSize(updated, preferredLanguage)
         val shouldAutoplayVod = _uiState.value.selectedStreamUrl.isNullOrBlank()
@@ -4486,14 +8603,15 @@ class PlayerViewModel @Inject constructor(
             streams = sortedStreams,
             isLoadingStreams = false,
             sourceSearchActive = sourceLookupStillActive(currentJob),
-            error = null,
+            error = _uiState.value.error.takeUnless { canStartAutoplay() },
             isSetupError = false,
             streamProgress = null,
             streamLoadPhase = null
         )
         prewarmTopStreams(sortedStreams, preferredLanguage)
         if (shouldAutoplayVod) {
-            pickPreferredStream(sortedStreams, preferredLanguage)?.let { selectStream(it) }
+            autoplaySelectBest(sortedStreams, preferredLanguage)
+            finishSupplementalSourceLookupIfReady(currentJob, PlayerMessage.Res(R.string.player_error_no_streams_other_source))
         }
     }
 
@@ -4515,8 +8633,7 @@ class PlayerViewModel @Inject constructor(
 
             if (imdbId.isNullOrBlank()) {
                 _uiState.value = _uiState.value.copy(
-                    isLoadingStreams = false,
-                    sourceSearchActive = false
+                    isLoadingStreams = false
                 )
                 return
             }
@@ -4534,7 +8651,8 @@ class PlayerViewModel @Inject constructor(
                 streamRepository.resolveMovieStreams(
                     imdbId = imdbId,
                     title = currentItemTitle,
-                    year = null
+                    year = null,
+                    nativeType = mediaRepository.addonNativeType(mediaId)
                 )
             } else {
                 streamRepository.resolveEpisodeStreams(
@@ -4546,10 +8664,12 @@ class PlayerViewModel @Inject constructor(
                     genreIds = currentGenreIds,
                     originalLanguage = currentOriginalLanguage,
                     title = currentItemTitle,
-                    animeQueryOverride = currentAnimeQueryOverride
+                    animeQueryOverride = currentAnimeQueryOverride,
+                    nativeType = mediaRepository.addonNativeType(mediaId)
                 )
             }
 
+            currentCoroutineContext().ensureActive()
             val allStreams = result.streams
                 .filter { stream ->
                     val u = stream.url?.trim().orEmpty()
@@ -4557,16 +8677,23 @@ class PlayerViewModel @Inject constructor(
                 }
 
             val existingVod = _uiState.value.streams.filter(::isSupplementalStream)
-            val mergedStreams = (allStreams + existingVod)
-                .distinctBy(::providerScopedStreamIdentity)
+            val activeStreamList = listOfNotNull(
+                _uiState.value.selectedStream,
+                if (playbackUrl.isNotBlank()) StreamSource(source = "Direct", addonName = "Direct", quality = "Direct", size = "", url = playbackUrl) else null
+            )
+            val mergedStreams = (allStreams + existingVod + activeStreamList)
+                .distinctBy { providerScopedStreamIdentity(it) to playbackRequestIdentity(it) }
 
             val preferredLanguage = _uiState.value.preferredAudioLanguage.ifBlank { "en" }
             val sortedStreams = sortStreamsByQualityAndSize(mergedStreams, preferredLanguage)
-            val selectedMatch = findProvidedSelectedStreamMatch(sortedStreams, playbackUrl)
+            val playingUrl = _uiState.value.selectedStreamUrl ?: playbackUrl
+            val playingIndex = playingRequestIndex(sortedStreams, _uiState.value.selectedStream, playingUrl)
+            val selectedMatch = sortedStreams.getOrNull(playingIndex)
+                ?: findProvidedSelectedStreamMatch(sortedStreams, playingUrl)
 
             val shouldAutoplay = _uiState.value.selectedStreamUrl.isNullOrBlank()
             val prevSource = _uiState.value.selectedStream?.source.orEmpty()
-            val selectedForState = if (shouldAutoplay) {
+            val selectedForState = if (shouldAutoplay || streamSelectionJob?.isActive == true) {
                 _uiState.value.selectedStream
             } else {
                 selectedMatch ?: _uiState.value.selectedStream
@@ -4576,23 +8703,33 @@ class PlayerViewModel @Inject constructor(
                 streams = sortedStreams,
                 selectedStream = selectedForState,
                 isLoadingStreams = false,
-                sourceSearchActive = false,
+                sourceSearchActive = sourceLookupStillActive(),
                 streamProgress = null,
                 streamLoadPhase = null
             )
             prewarmTopStreams(sortedStreams, preferredLanguage)
             if (shouldAutoplay) {
-                pickPreferredStream(sortedStreams, preferredLanguage)?.let { selectStream(it) }
+                autoplaySelectBest(sortedStreams, preferredLanguage)
+                if (eligiblePlayerAutoplayStreams(sortedStreams, autoPlayMinimumQuality, autoPlayLimits).isEmpty()) {
+                    _uiState.value = _uiState.value.copy(error = PlayerMessage.Res(R.string.stream_no_sources_match))
+                }
             }
             // Re-run subtitle selection if stream source just became known
             if (prevSource.isBlank() && newSource.isNotBlank()) {
                 scheduleSubtitleSelection(currentOriginalLanguage)
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _uiState.value = _uiState.value.copy(
-                isLoadingStreams = false,
-                sourceSearchActive = false
+                isLoadingStreams = false
             )
+        } finally {
+            if (currentCoroutineContext().isActive) {
+                primaryStreamResolutionFinal = true
+                finishSupplementalSourceLookupIfReady(
+                    currentCoroutineContext()[Job], PlayerMessage.Res(R.string.player_error_no_streams_other_source)
+                )
+            }
         }
     }
 
@@ -4695,10 +8832,106 @@ class PlayerViewModel @Inject constructor(
         // a confirmed-synced sub scored 0.71, a confirmed-offset one 0.65 (union-coverage
         // scoring, 12 refs). Below the bar, staying on AI translation beats a visibly-off sub.
         // Hearing hit-ratios run much lower, so they keep the permissive bar.
+        // ── Reference collection ────────────────────────────────────────────────
+        /**
+         * Backstop only. The AI-interim wait normally ends when the player reports its tracks or
+         * playback starts (see the interim block); this cap exists solely so a player that does
+         * neither cannot stall the first subtitle indefinitely.
+         */
+        private const val MATCH_AI_INTERIM_WAIT_MS = 25_000L
+        /** Budget for reading the reference out of the running player's buffer. */
+        private const val MATCH_PLAYER_REF_BUDGET_MS = 20_000L
+        private const val MATCH_PLAYER_REF_POLL_MS = 500L
+        /**
+         * How long a buffer that is producing nothing gets before the scan stops waiting on it.
+         * Short on purpose: this budget is pure overhead added to the fallback that follows.
+         */
+        private const val MATCH_PLAYER_REF_GIVE_UP_MS = 4_000L
+        /** The same, once the container index is already read and the fallback costs nothing. */
+        private const val MATCH_PLAYER_REF_GIVE_UP_WITH_INDEX_MS = 1_000L
+        /**
+         * How long to wait for the player to actually switch to the reference track before giving up
+         * on the buffer and handing over to the in-player reference, which selects the track itself.
+         */
+        private const val MATCH_PLAYER_REF_SWITCH_WAIT_MS = 6_000L
+        // Minimum reference windows before a REJECT is allowed. Accepts stay lenient — a high score
+        // is trustworthy on any reference — but a low one is not evidence of a bad subtitle when
+        // there is barely anything to compare against. Mirrors the in-player path's buffered quorum.
+        private const val MATCH_MIN_REFS_FOR_REJECT = 6
+
+        // Scores this close are a tie: the timing evidence cannot separate the candidates, so
+        // something other than a coin flip has to choose. See bestWithTieBreak.
+        private const val MATCH_TIE_EPSILON = 0.02
+
+        // How much better another candidate must score before it displaces the subtitle already on
+        // screen. The swap policy exists so a marginally better sync does not change typography and
+        // line breaks mid-scene — but it was absolute, and so protected a demonstrably worse pick:
+        // The Office S01E05 (Sept 2026, AI off) kept the provisional at 0.74 while four candidates
+        // scored 0.84, and the kept one turned out to be a different cut (offset profile
+        // -375/-2600/-1475ms). A tenth of a point is not "marginal"; this bar is.
+        private const val MATCH_SWAP_MIN_GAIN = 0.08
+
+        // Reference windows needed before cross-segment agreement is meaningful as corroboration.
+        // Well below a downsampled container index (60) and far above what a buffer read yields.
+        private const val MATCH_SEGMENT_OFFSET_MIN_REFS = 24
+
+        // How far the per-third offset fits may spread and still be one constant delay. Beyond it,
+        // a steady walk is a speed mismatch (Est.drifting). Matches segmentConsistentOffset's default.
+        private const val MATCH_SEGMENT_AGREEMENT_MS = 500L
+        // Every third measuring more than this, the same way, means "not aligned as authored".
+        private const val MATCH_OFFSET_MISALIGNED_MS = 1_000L
+
+        // Other embedded tracks tried as a timing reference when the preferred-language one gives
+        // no clean as-authored verdict. Ranked by cue count; each costs one as-authored scoring pass.
+        private const val MATCH_ALT_REFERENCE_MAX = 3
+        // Retimer budget: distinct subtitle timings × reference tracks. Each pair measured 6–49ms
+        // on a desktop JVM against a 40-minute episode; a TV box is several times slower.
+        private const val MATCH_RETIME_MAX_CANDIDATES = 6
+        private const val MATCH_RETIME_MAX_REFERENCES = 3
+        // The retimer is skipped only when a candidate fits this well AS AUTHORED. The 0.70 accept
+        // bar is too low for that: chance overlap in dense dialogue reaches 0.70–0.75 for a file
+        // ~47s out (Peaky Blinders S01E04), while verified in-sync files mostly score 0.83–0.98.
+        private const val MATCH_RETIME_SKIP_SCORE = 0.85
+        // A track below this density is signs/songs, not a dialogue timeline (The Shards' 17-cue
+        // Russian track: 0.4/min, against 7/min for its full one)
+        private const val MATCH_ALT_REFERENCE_MIN_CUES_PER_MIN = 2.0
+
+        // Reference windows kept from a container-index reference (which can hold thousands).
+        // Evenly spread across the file, so coverage stays whole-film while the offset sweep's
+        // cost stays comparable to a buffer-collected reference.
+        private const val MATCH_INDEX_MAX_REFS = 60
+
         private const val MATCH_SUCCESS_THRESHOLD_TIMING = 0.70
         private const val MATCH_SUCCESS_THRESHOLD_HEARING = 0.30
-        private const val MATCH_MAX_CANDIDATES = 10      // cap downloaded candidates (best release-name matches first)
+        // Candidate loading is throttled, not capped (see the candidate pool in findBestSubtitleMatch):
+        // six downloads and two parses in flight.
+        private const val MATCH_PARALLEL_DOWNLOADS = 6
+        // The whole pool used to be downloaded; these bound it (see loadAll).
+        private const val MATCH_POOL_MAX_CANDIDATES = 30
+        private const val MATCH_POOL_BUDGET_MS = 20_000L
+        private const val MATCH_PARALLEL_PARSES = 2
         private const val MATCH_CACHE_MAX_ENTRIES = 50   // per-stream remembered matches (oldest evicted)
+
+        /**
+         * Master switch for the per-stream remembered match. Turn it OFF while testing the scan
+         * itself: a remembered match short-circuits the whole pipeline on the second playback of a
+         * stream, so every re-test of the same episode silently skips the code under test.
+         */
+        // Off by product decision (Sept 2026): every playback scans. A remembered match replays
+        // without scanning, so a stale one kept serving an old wrong result, and the scan now
+        // settles in ~10s with the container index read at stream open. Read, remember and write
+        // are all gated on this switch.
+        private const val MATCH_CACHE_ENABLED = false
+
+        /**
+         * How much *playback* a match must survive before it is remembered for next time. A cache
+         * entry is a claim about the file that skips the entire scan on future playbacks, so it
+         * must not be written on the strength of a verdict the user rejected ten seconds later —
+         * that would make a single bad match permanent. Counts playing time only, so pausing to
+         * make coffee neither confirms nor cancels it.
+         */
+        private const val MATCH_CACHE_DWELL_MS = 120_000L
+        private const val MATCH_CACHE_DWELL_TICK_MS = 5_000L
 
         // Constant-offset rescue: a candidate that fails at offset 0 but is a perfectly-cut sub
         // with a UNIFORM delay gets shifted into sync instead of rejected (common addon defect).
@@ -4711,7 +8944,13 @@ class PlayerViewModel @Inject constructor(
         // Orphan-drop only fires when at least this fraction of reference windows stay covered by
         // some candidate; below it, keep all windows (widespread non-coverage = bad sync, not SDH).
         private const val MATCH_ORPHAN_KEEP_MIN_FRACTION = 0.7
-        private const val MATCH_OFFSET_MIN_MS = 300L      // below this the sub is "already aligned" — normal path owns it
+        // Below this the sub is "already aligned" — the normal path owns it. Must stay above
+        // MATCH_OVERLAP_TOLERANCE_MS: we already declare sub-400ms differences unmeasurable noise
+        // when scoring, so "correcting" by less than that contradicts our own metric. Raised from
+        // 300ms after From S01E03 (Sept 2026), where a user-confirmed perfectly-timed subtitle was
+        // shifted +450ms — see the centring artifact described on scoreCandidatesWithOffsets.
+        // Real offsets are far larger (the verified Dutton Ranch case was +1000ms).
+        private const val MATCH_OFFSET_MIN_MS = 700L
         private const val MATCH_OFFSET_MAX_MS = 10_000L   // above this a "constant offset" is implausible
         private const val MATCH_OFFSET_ACCEPT = 0.80      // single candidate: strict bar (no corroboration available)
         private const val MATCH_OFFSET_EARLY_REFS = 6     // min refs before the mid-scan offset check runs
@@ -4729,10 +8968,38 @@ class PlayerViewModel @Inject constructor(
         // lines) are segmented differently even at the perfect offset. A corroborated match may accept
         // below 0.70 — see the offset clause in findBestSubtitleMatch's accept test.
         private const val MATCH_OFFSET_CORROBORATED_ACCEPT = 0.68
-        // Marker appended to a served copy's id when an offset was baked in (e.g. "…#ofs2000").
-        // Forces a distinct track id (so preload mode rebuilds onto the shifted file rather than
-        // overriding to the un-shifted preloaded copy); the menu strips it to match rows by base id.
-        const val MATCH_OFFSET_ID_MARKER = "#ofs"
+        // How much a shift must actually BUY before it is applied. Any-improvement (`> base`) let a
+        // centring artifact through: when a reference cue is much longer than the candidate's, the
+        // score peaks where the short cue sits centred in the long window, not where the subtitle is
+        // in sync — worth a few hundredths, and wrong. A genuine constant-offset rescue moves the
+        // score by a lot more than this (0.3 → 0.9 in the verified cases).
+        private const val MATCH_OFFSET_MIN_GAIN = 0.10
+        // ── AI semantic sync (users with an API key only) ───────────────────────
+        private const val MATCH_AI_REFERENCE_LINES = 8   // reference lines sent per request
+        private const val MATCH_AI_CANDIDATE_LINES = 40  // candidate window sent per request
+        private const val MATCH_AI_MIN_PAIRS = 3         // fewer pairs than this can't measure an offset
+        private const val MATCH_AI_OUTLIER_MS = 450L     // pairs this far from the median are mis-pairings
+        /**
+         * Paired lines the model needs before its playhead measurement is the audio sync's check.
+         * The same bar the model needs to report a shift at all: The Shards S01E04 (Sept 2026) had
+         * 4 buffered lines, no check, and the audio's +13.5s replaced a correct AI at +11.8s.
+         */
+        private const val MATCH_AI_ANCHOR_MIN_PAIRS = MATCH_AI_MIN_PAIRS
+        /** A retime whose placed lines the model finds further out than this at the playhead is wrong. */
+        private const val MATCH_AI_RETIME_VETO_MS = 1_000L
+        /**
+         * How much a MODEL-measured shift must improve the timing score. Deliberately far smaller
+         * than [MATCH_OFFSET_MIN_GAIN]: that one has to distinguish a real offset from the sweep's
+         * own artifacts, whereas here the semantic pairing already established the shift and the
+         * score is only a sanity check that applying it doesn't make the subtitle worse.
+         */
+        private const val MATCH_AI_MIN_GAIN = 0.01
+        /**
+         * Call budget per scan. Must be large enough to work down a realistic candidate list,
+         * because running out is NOT a licence to accept the next one unverified — see the
+         * cleared check after the loop.
+         */
+        private const val MATCH_AI_MAX_VERIFICATIONS = 6
 
         /** Known debrid service CDN domains. Reachability checks are skipped for these. */
         private val DEBRID_CDN_DOMAINS = setOf(
@@ -4763,4 +9030,7 @@ class PlayerViewModel @Inject constructor(
 private object PlayerViewModelRegexes {
     val HTML_TAG_REGEX = Regex("<[^>]*>")
     val MULTI_SPACE_REGEX = Regex("\\s+")
+    // A cue that is ONLY music notation or a bracketed sound effect — SDH decoration with no
+    // counterpart in a translated file, so it can only produce false pairs when line-matching.
+    val SDH_ONLY = Regex("""^[\s♪♫]*(\[[^]]*]|\([^)]*\)|[-–—\s])*[\s♪♫]*$""")
 }

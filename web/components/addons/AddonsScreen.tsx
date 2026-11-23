@@ -1,66 +1,41 @@
 "use client";
+import "./addons.css";
+import { useTranslation } from "@/lib/i18n";
 
-import { Plus, Sparkles } from "lucide-react";
-import { useState } from "react";
-import { useApp } from "@/lib/store";
+import { Server, Tv } from "lucide-react";
+import { useAppPick } from "@/lib/store";
+import { requestSourceSettings, sourceSetupState } from "@/lib/sourceSetup";
+import { AddonManager } from "./AddonManager";
 
-function resourceLabel(resources: unknown) {
-  if (!Array.isArray(resources)) return "manifest";
-  const names = resources.map((resource) => {
-    if (typeof resource === "string") return resource;
-    if (resource && typeof resource === "object") {
-      const name = (resource as { name?: unknown }).name;
-      return typeof name === "string" ? name : "";
-    }
-    return "";
-  }).filter(Boolean);
-  return names.join(", ") || "manifest";
-}
-
+/**
+ * The one addon manager (install with preview, enable/disable, order,
+ * configure, remove). Open it with `setSection("addons")` from anywhere.
+ */
 export function AddonsScreen() {
-  const { addons, installAddon, removeAddon, setToast } = useApp();
-  const [url, setUrl] = useState("");
-  const [installing, setInstalling] = useState(false);
-  const install = async () => {
-    if (!url.trim()) {
-      setToast("Enter an addon manifest URL first.");
-      return;
-    }
-    setInstalling(true);
-    try {
-      await installAddon(url.trim());
-      setUrl("");
-      setToast("Addon installed.");
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : "Could not install addon.");
-    } finally {
-      setInstalling(false);
-    }
+  const translateUi = useTranslation();
+  const { addons, addonsReady, settings, setSection } = useAppPick("addons", "addonsReady", "settings", "setSection");
+  const sources = sourceSetupState(addons, settings);
+  const openSettings = (target: "homeserver" | "tv") => {
+    requestSourceSettings(target);
+    setSection("settings");
   };
   return (
-    <div className="screen has-section-heading">
+    <div className="screen has-section-heading addons-screen">
       <section className="section-heading">
-        <p className="eyebrow">Sources</p>
-        <h2>Addons</h2>
+        <p className="eyebrow">{translateUi("Sources")}</p>
+        <h2>{translateUi("Addons")}</h2>
+        <p className="addons-intro">{translateUi("Addons supply catalogs, sources and subtitles. They are shared by every profile and every ARVIO app on your account.")}</p>
       </section>
-      <div className="inline-form wide">
-        <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://addon.example.com/manifest.json" />
-        <button type="button" className="primary" disabled={installing} onClick={() => void install()}><Plus size={18} /> {installing ? "Installing..." : "Install"}</button>
-      </div>
-      <div className="addon-grid">
-        {addons.map((addon) => (
-          <article className="addon-tile" key={addon.id}>
-            <Sparkles size={24} />
-            <h3>{addon.name}</h3>
-            <p>{addon.description || addon.manifestUrl}</p>
-            <div className="chips">
-              <span>{addon.version}</span>
-              <span>{resourceLabel(addon.resources)}</span>
-            </div>
-            <button type="button" className="secondary" onClick={() => removeAddon(addon)}>Remove</button>
-          </article>
-        ))}
-      </div>
+      {addonsReady && !sources.hasOnDemand && <section className="source-setup-panel" aria-labelledby="addon-setup-title">
+        <h3 id="addon-setup-title">{translateUi("Connect your media sources")}</h3>
+        {sources.catalogOnly && <p className="source-setup-warning">{translateUi("None of your enabled addons provide playback sources.")}</p>}
+        <p>{translateUi("ARVIO does not include a film or TV subscription. Connect your Plex, Emby or Jellyfin server in Settings, or add a compatible addon supplied by a service you are authorized to use.")}</p>
+        <div className="source-setup-actions">
+          <button type="button" className="secondary" onClick={() => openSettings("homeserver")}><Server size={17} />{translateUi("Home Server")}</button>
+          <button type="button" className="secondary" onClick={() => openSettings("tv")}><Tv size={17} />{translateUi("Live TV")}</button>
+        </div>
+      </section>}
+      <AddonManager />
     </div>
   );
 }

@@ -16,25 +16,20 @@
 
 # ============================================
 # Log stripping for release builds
-# Remove ALL logs for maximum performance
+# Remove debug/verbose/info logs for maximum performance
 # ============================================
-# -assumenosideeffects class android.util.Log {
-#     public static int v(...);
-#     public static int d(...);
-#     public static int i(...);
-#     public static int w(...);
-#     public static int e(...);
-#     public static int wtf(...);
-# }
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}
 
-# Also strip ALL our custom AppLogger methods
-# -assumenosideeffects class com.arflix.tv.util.AppLogger {
-#     public static void v(...);
-#     public static void d(...);
-#     public static void i(...);
-#     public static void w(...);
-#     public static void e(...);
-# }
+# Also strip debug/verbose/info custom AppLogger methods
+-assumenosideeffects class com.arflix.tv.util.AppLogger {
+    public static void v(...);
+    public static void d(...);
+    public static void i(...);
+}
 
 # Strip Kotlin debug assertions in release
 -assumenosideeffects class kotlin.jvm.internal.Intrinsics {
@@ -83,6 +78,18 @@
 -keep class com.google.gson.** { *; }
 -keep class com.arflix.tv.data.model.** { *; }
 -keep class com.arflix.tv.data.api.** { *; }
+
+# Calendar's persisted schedule is read through Gson, including after app updates.
+-keep class com.arflix.tv.data.repository.CalendarTvSchedule { *; }
+
+# SIMKL playback checkpoints must retain stable JSON fields in optimized releases.
+-keep class com.arflix.tv.data.repository.simkl.SimklSyncService$PersistedSimklSnapshot { *; }
+
+# Complete sports catalogue cache is deserialized reflectively in signed builds.
+-keep class com.arflix.tv.ui.screens.tv.live.SportsScheduleSnapshot { *; }
+-keep class com.arflix.tv.ui.screens.tv.live.SportsScheduleKey { *; }
+-keep class com.arflix.tv.ui.screens.tv.live.SportsGuideEvent { *; }
+-keep enum com.arflix.tv.ui.screens.tv.live.GuideSport { *; }
 
 # Keep generic type information for Gson
 -keep class com.google.gson.reflect.TypeToken { *; }
@@ -251,3 +258,14 @@
 -keep class com.arflix.tv.util.Result$* { *; }
 -keep class com.arflix.tv.util.UiState { *; }
 -keep class com.arflix.tv.util.UiState$* { *; }
+
+# ============================================
+# android-youtube-player (IFrame API)
+# ============================================
+-keep class com.pierfrancescosoffritti.androidyoutubeplayer.** { *; }
+-keepnames class com.pierfrancescosoffritti.youtubeplayer.* { *; }
+-dontwarn com.pierfrancescosoffritti.androidyoutubeplayer.**
+
+# sherpa-onnx (audio subtitle sync speech recognition): JNI reads config fields by name.
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-keep interface com.k2fsa.sherpa.onnx.** { *; }

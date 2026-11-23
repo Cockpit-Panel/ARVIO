@@ -1,6 +1,7 @@
 package com.arflix.tv.ui.screens.tv.live
 
 import com.arflix.tv.data.model.IptvChannel
+import com.arflix.tv.data.model.PlaylistGroupKey
 import com.arflix.tv.data.repository.IptvConfig
 import com.arflix.tv.data.repository.IptvPlaylistEntry
 import com.arflix.tv.data.repository.orderXtreamChannelsByProviderCategories
@@ -43,6 +44,27 @@ class LiveCategoryIndexTest {
         assertThat(index.channelsFor("recent", favorites = emptyList(), recents = recents).map { it.id })
             .containsExactly("2", "3", "1")
             .inOrder()
+    }
+
+    @Test
+    fun lockedGroupCannotLeakThroughAllFavoritesOrItsCategoryBeforePinUnlock() {
+        val channels = listOf(
+            channel("list_1:1", "Public", "General"),
+            channel("list_1:2", "Restricted", "Premium"),
+        ).mapIndexed { index, channel -> channel.enrich(index + 1) }
+        val restrictedGroup = PlaylistGroupKey.build("list_1", "Premium")
+        val restrictedCategory = playlistGroupCategoryId("list_1", "Premium")
+
+        val lockedIndex = buildCategoryIndex(channels, restrictedGroups = setOf(restrictedGroup))
+
+        assertThat(lockedIndex.channelsFor("all", emptyList(), emptyList()).map { it.id })
+            .containsExactly("list_1:1")
+        assertThat(lockedIndex.channelsFor("fav", listOf("list_1:2"), emptyList())).isEmpty()
+        assertThat(lockedIndex.channelsFor(restrictedCategory, emptyList(), emptyList())).isEmpty()
+
+        val unlockedIndex = buildCategoryIndex(channels)
+        assertThat(unlockedIndex.channelsFor(restrictedCategory, emptyList(), emptyList()).map { it.id })
+            .containsExactly("list_1:2")
     }
 
     @Test
@@ -199,6 +221,27 @@ class LiveCategoryIndexTest {
         assertThat(state.index.channelsFor(sportsCategory.id, emptyList(), emptyList()).map { it.id })
             .containsExactly("list_1:xtream:30", "list_1:xtream:10")
             .inOrder()
+    }
+
+    @Test
+    fun stalkerPortalsWithSameGroupRemainSeparateCategories() {
+        val state = buildFastStartupChannelState(
+            channels = listOf(
+                channel("stalker:stalker1:10", "Portal One News", "News"),
+                channel("stalker:stalker2:10", "Portal Two News", "News"),
+            ),
+            favorites = emptySet(),
+            recents = emptySet(),
+        )
+
+        val newsCategories = state.tree.global.categories.filter { it.label == "News" }
+        assertThat(newsCategories.map { it.playlistId })
+            .containsExactly("stalker1", "stalker2")
+            .inOrder()
+        assertThat(state.index.channelsFor(newsCategories[0].id, emptyList(), emptyList()).map { it.id })
+            .containsExactly("stalker:stalker1:10")
+        assertThat(state.index.channelsFor(newsCategories[1].id, emptyList(), emptyList()).map { it.id })
+            .containsExactly("stalker:stalker2:10")
     }
 
     private fun channel(id: String, name: String, group: String): IptvChannel =

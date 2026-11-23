@@ -70,32 +70,21 @@ fun Modifier.arvioFocusable(
     }
 
     val tokens = ArvioSkin.focus
-    val scale = if (animateFocus) {
-        val animatedScale by animateFloatAsState(
+    val animatedScale = if (animateFocus) {
+        animateFloatAsState(
             targetValue = targetScale,
             animationSpec = tween(durationMillis = 105, easing = tokens.easing),
             label = "arvio_focus_scale",
         )
-        animatedScale
     } else {
-        targetScale
+        androidx.compose.runtime.rememberUpdatedState(targetScale)
     }
 
-    // Focus-in must be immediately visible on TV D-pad moves; only fade out.
-    val animatedHighlightAlpha = if (animateFocus) {
-        val animatedAlpha by animateFloatAsState(
-            targetValue = if (visualFocused) 1f else 0f,
-            animationSpec = tween(durationMillis = 120, easing = tokens.easing),
-            label = "arvio_focus_alpha",
-        )
-        animatedAlpha
-    } else {
-        if (visualFocused) 1f else 0f
-    }
-    val highlightAlpha = if (visualFocused) 1f else animatedHighlightAlpha
+    // Focus ownership changes immediately; fading out leaves two highlighted cards.
+    val highlightAlpha = if (visualFocused) 1f else 0f
 
     // Subtle luminous edge always visible on cards that opt in (glass morphism).
-    val restBorderAlpha by animateFloatAsState(
+    val restBorderAlpha = animateFloatAsState(
         targetValue = if (showRestBorder && !visualFocused) 0.4f else 0f,
         animationSpec = tween(durationMillis = 150, easing = tokens.easing),
         label = "arvio_rest_border",
@@ -145,8 +134,9 @@ fun Modifier.arvioFocusable(
 
     // Keep the focus drawing modifier stable so fast D-pad moves do not
     // produce a one-frame missing-focus flash.
-    val layerModifier = if (visualFocused || isPressed || kotlin.math.abs(scale - 1f) > 0.001f) {
+    val layerModifier = if (visualFocused || isPressed) {
         Modifier.graphicsLayer {
+            val scale = animatedScale.value
             scaleX = scale
             scaleY = scale
             transformOrigin = focusTransformOrigin
@@ -155,18 +145,18 @@ fun Modifier.arvioFocusable(
         Modifier
     }
 
-    val borderModifier = if (highlightAlpha > 0.01f || restBorderAlpha > 0.01f) {
+    val borderModifier = if (visualFocused || showRestBorder) {
         Modifier.drawWithCache {
             val outline = shape.createOutline(size, layoutDirection, this)
             val borderWidth = if (highlightAlpha > 0f) outlineWidth.toPx() else 0.5.dp.toPx()
-            val ringAlpha = if (highlightAlpha > 0f) highlightAlpha else restBorderAlpha * 0.5f
-            val ringColor = resolvedOutlineColor.copy(alpha = ringAlpha)
             val glowStrokeWidth = glowWidth.toPx()
             val drawGlow = highlightAlpha > 0.3f && glowStrokeWidth > 0.01f && glowAlpha > 0.01f
             val glowColor = resolvedOutlineColor.copy(alpha = highlightAlpha * glowAlpha)
 
             onDrawWithContent {
                 drawContent()
+                val ringAlpha = if (highlightAlpha > 0f) highlightAlpha else restBorderAlpha.value * 0.5f
+                val ringColor = resolvedOutlineColor.copy(alpha = ringAlpha)
                 when (outline) {
                     is Outline.Rounded -> {
                         val radius = outline.roundRect.topLeftCornerRadius

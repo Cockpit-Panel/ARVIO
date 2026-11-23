@@ -65,7 +65,8 @@ class PluginManager @Inject constructor() {
         tmdbId: String,
         mediaType: String,
         season: Int? = null,
-        episode: Int? = null
+        episode: Int? = null,
+        allowedProviderIds: Set<String>? = null
     ): Flow<Pair<ScraperInfo, List<LocalScraperResult>?>> = emptyFlow()
 
     suspend fun executeScraper(

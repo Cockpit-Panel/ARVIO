@@ -2,6 +2,7 @@ package com.arflix.tv.ui.screens.details
 
 import com.arflix.tv.data.model.StreamBehaviorHints
 import com.arflix.tv.data.model.StreamSource
+import com.arflix.tv.ui.screens.player.eligiblePlayerAutoplayStreams
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -142,4 +143,59 @@ class AutoPlaySourcePlannerTest {
         url = "https://example.com/${source.hashCode()}",
         behaviorHints = StreamBehaviorHints(cached = cached, notWebReady = notWebReady)
     )
+
+    // ── Stalker VOD placeholder URLs ──────────────────────────────────────
+
+    @Test
+    fun `a stalker vod placeholder counts as an autoplayable source`() {
+        // Reported on device: the source list showed the Stalker match and it
+        // played when picked by hand, but pressing play reported "no source
+        // matches this filter" - autoplay required an http url and the portal
+        // only issues one once playback resolves the placeholder.
+        val stalker = StreamSource(
+            source = "LEGO Star Wars: The Mandalorian",
+            addonName = "IPTV VOD",
+            addonId = "iptv_stalker_vod",
+            quality = "VOD",
+            size = "",
+            url = "stalker_vod://stalker1/%2Fmedia%2F1.mpg"
+        )
+
+        assertTrue(isAutoPlayableStream(stalker))
+        assertEquals(listOf(stalker), eligiblePlayerAutoplayStreams(listOf(stalker), minimumQuality = 0))
+    }
+
+    @Test
+    fun `unresolvable urls stay out of autoplay`() {
+        val magnet = StreamSource(
+            source = "Movie 1080p",
+            addonName = "Torrentio",
+            addonId = "torrentio",
+            quality = "1080p",
+            size = "2 GB",
+            url = "magnet:?xt=urn:btih:abc"
+        )
+
+        assertFalse(isAutoPlayableStream(magnet))
+    }
+
+    @Test
+    fun `sources a debrid service is still downloading are never picked automatically`() {
+        val uncached = StreamSource(
+            source = "Movie 2160p",
+            addonName = "AIOStreams",
+            addonId = "aiostreams",
+            quality = "4K",
+            size = "20 GB",
+            url = "https://aiostreams.example/api/v1/debrid/playback/abc",
+            rawLabel = "[RD⏳] AIOStreams 2160p"
+        )
+        val cached = uncached.copy(rawLabel = "[RD⚡] AIOStreams 1080p", quality = "1080p", size = "8 GB")
+
+        assertTrue(isAwaitingDebridDownload(uncached))
+        assertFalse(isAwaitingDebridDownload(cached))
+        assertFalse(matchesAutoplayLimits(uncached, minimumQuality = 0, limits = com.arflix.tv.data.model.AutoplayLimits()))
+        assertEquals(cached, bestAutoPlayStream(listOf(uncached, cached), minQualityScore = 0))
+        assertEquals(listOf(cached), eligiblePlayerAutoplayStreams(listOf(uncached, cached), minimumQuality = 0))
+    }
 }

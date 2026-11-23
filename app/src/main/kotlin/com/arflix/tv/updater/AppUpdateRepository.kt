@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import com.arflix.tv.BuildConfig
+import com.arflix.tv.R
 import com.arflix.tv.util.Constants
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
@@ -56,6 +57,7 @@ class AppUpdateRepository @Inject constructor(
     suspend fun getLatestUpdate(): Result<AppUpdate> {
         return withContext(Dispatchers.IO) {
             runCatching {
+                // Cockpit: releases come from the panel, not GitHub.
                 val url = Constants.COCKPIT_API_URL + "update.php"
                 val request = Request.Builder()
                     .url(url)
@@ -65,7 +67,7 @@ class AppUpdateRepository @Inject constructor(
 
                 okHttpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        error("Update API error: ${response.code}")
+                        error(context.getString(R.string.update_error_github_api, response.code))
                     }
                     val body = response.body?.string().orEmpty()
                     val releases: List<GitHubReleaseDto> = if (body.trimStart().startsWith("[")) {
@@ -75,13 +77,13 @@ class AppUpdateRepository @Inject constructor(
                         listOfNotNull(gson.fromJson(body, GitHubReleaseDto::class.java))
                     } ?: emptyList()
                     val dto = releases.firstOrNull { !it.draft && !it.prerelease }
-                        ?: error("No stable release available")
+                        ?: error(context.getString(R.string.update_error_draft_prerelease))
 
                     val tag = dto.tagName?.takeIf { it.isNotBlank() }
                         ?: dto.name?.takeIf { it.isNotBlank() }
-                        ?: error("Release has no tag/name")
+                        ?: error(context.getString(R.string.update_error_missing_release_tag))
                     val asset = AbiSelector.chooseBestApkAsset(dto.assets)
-                        ?: error("No APK asset found in release")
+                        ?: error(context.getString(R.string.update_error_no_apk_asset))
 
                     AppUpdate(
                         tag = tag,

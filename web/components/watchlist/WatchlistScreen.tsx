@@ -1,11 +1,21 @@
 "use client";
+import { useTranslation } from "@/lib/i18n";
 
-import { Bookmark, Film, LoaderCircle, RefreshCw, Search, Server, Tv } from "lucide-react";
+
+import { Bookmark, Compass, Film, LoaderCircle, RefreshCw, Search, Server, Tv, SlidersHorizontal, ArrowLeft, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MediaCard } from "@/components/media/MediaCard";
+import { CollectionPreview } from "@/components/media/CollectionPreview";
+import { mediaPreviewKey } from "@/lib/mediaPreview";
+import { CollectionCover, LibraryGrid, LibraryDialog } from "./LibraryPresentation";
+import { CalendarScreen } from "./CalendarScreen";
+import { LIBRARY_SORT_OPTIONS, compareLibraryItems } from "@/lib/librarySort";
 import type { HomeServerLibraryOption, HomeServerLibraryPage, HomeServerLibrarySort } from "@/lib/homeserver";
-import { useApp } from "@/lib/store";
+import { useAppPick } from "@/lib/store";
+import { requestSourceSettings } from "@/lib/sourceSetup";
 import type { HomeServerConfig, MediaItem } from "@/lib/types";
+import "@/app/library.css";
+import { weTrakrClient } from "@/lib/wetrakr";
 
 type WatchlistFilter = "all" | "movie" | "tv";
 type LibraryTab = "watchlist" | HomeServerConfig["type"];
@@ -21,6 +31,9 @@ const PROVIDER_LABELS: Record<HomeServerConfig["type"], string> = {
   emby: "Emby"
 };
 const libraryCache = new Map<string, HomeServerLibraryPage>();
+const viewportPositions = new Map<string, number>();
+interface LibraryView { section: "watchlists" | "lists" | "libraries" | "calendar"; openedList: string | null; tab: LibraryTab; trackerTab: "trakt" | "simkl" | "wetrakr" | null; trackerSource: string; selectedLibrary: string; sort: HomeServerLibrarySort; filter: WatchlistFilter; search: string }
+const savedViews = new Map<string, LibraryView>();
 
 function itemKey(item: MediaItem): string {
   return item.isHomeServer
@@ -29,10 +42,11 @@ function itemKey(item: MediaItem): string {
 }
 
 export function WatchlistScreen() {
+  const translateUi = useTranslation();
   const {
     watchlist, traktConnected, simklConnected, mdblistConnected, openDetails,
-    settings, trackingPreferences, loadTraktLists, loadTraktListItems
-  } = useApp();
+    settings, trackingPreferences, loadTraktLists, loadTraktListItems, loadTrackerLibrary, loadCatalogRow, catalogConfigs, auth, activeProfile, setSection: navigate
+  } = useAppPick("watchlist", "traktConnected", "simklConnected", "mdblistConnected", "openDetails", "settings", "trackingPreferences", "loadTraktLists", "loadTraktListItems", "loadTrackerLibrary", "loadCatalogRow", "catalogConfigs", "auth", "activeProfile", "setSection");
   const posterMode = settings.cardLayoutMode === "poster";
   const homeServers = useMemo(
     () => (settings.homeServers ?? []).filter((server) => server.enabled && server.url),
@@ -43,21 +57,33 @@ export function WatchlistScreen() {
     [homeServers]
   );
 
-  const [tab, setTab] = useState<LibraryTab>("watchlist");
-  const [filter, setFilter] = useState<WatchlistFilter>("all");
-  const [sort, setSort] = useState<HomeServerLibrarySort>("added");
-  const [search, setSearch] = useState("");
+  const viewScope = `${auth?.userId ?? "local"}:${activeProfile?.id ?? "default"}`;
+  const saved = savedViews.get(viewScope);
+  const [section, setSection] = useState<LibraryView["section"]>(saved?.section ?? "watchlists");
+  const [openedList, setOpenedList] = useState<string | null>(saved?.openedList ?? null);
+  const [showFilters, setShowFilters] = useState(false);
+  const [trackerSource, setTrackerSource] = useState(saved?.trackerSource ?? "watchlist");
+  const [retry, setRetry] = useState(0);
+  const [tab, setTab] = useState<LibraryTab>(saved?.tab ?? "watchlist");
+  const [trackerTab, setTrackerTab] = useState<"trakt" | "simkl" | "wetrakr" | null>(saved?.trackerTab ?? null);
+  const [filter, setFilter] = useState<WatchlistFilter>(saved?.filter ?? "all");
+  const [sort, setSort] = useState<HomeServerLibrarySort>(saved?.sort ?? "added");
+  const [search, setSearch] = useState(saved?.search ?? "");
   const [searchQuery, setSearchQuery] = useState("");
   const [watchlistSource, setWatchlistSource] = useState("watchlist");
   const [customLists, setCustomLists] = useState<Array<{ id: string; name: string }>>([]);
   const [libraries, setLibraries] = useState<HomeServerLibraryOption[]>([]);
-  const [selectedLibrary, setSelectedLibrary] = useState("");
+  const [selectedLibrary, setSelectedLibrary] = useState(saved?.selectedLibrary ?? "");
   const [libraryPage, setLibraryPage] = useState<HomeServerLibraryPage>({ items: [], hasMore: false, total: 0 });
   const [sourceItems, setSourceItems] = useState<MediaItem[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [libraryError, setLibraryError] = useState(false);
+  const latestView = useRef<LibraryView>({ section, openedList, tab, trackerTab, trackerSource, selectedLibrary, sort, filter, search });
+  latestView.current = { section, openedList, tab, trackerTab, trackerSource, selectedLibrary, sort, filter, search };
+  useEffect(() => () => { savedViews.set(viewScope, latestView.current); if(savedViews.size > 12) savedViews.delete(savedViews.keys().next().value!); }, [viewScope]);
   const requestRef = useRef(0);
+  const librariesRequest = useRef(0);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -73,16 +99,21 @@ export function WatchlistScreen() {
   }, [traktConnected, loadTraktLists]);
 
   const refreshLibraries = useCallback(async () => {
+    const id = ++librariesRequest.current;
     if (!homeServers.length) {
       setLibraries([]);
       return;
     }
     const { listHomeServerLibraries } = await import("@/lib/homeserver");
-    const next = await listHomeServerLibraries(homeServers).catch(() => []);
-    setLibraries(next);
+    try {
+      const next = await listHomeServerLibraries(homeServers);
+      if (librariesRequest.current === id) setLibraries(next);
+    } catch {
+      if (librariesRequest.current === id) setLibraryError(true);
+    }
   }, [homeServers]);
 
-  useEffect(() => { void refreshLibraries(); }, [refreshLibraries]);
+  useEffect(() => { void refreshLibraries(); return () => { librariesRequest.current++; requestRef.current++; }; }, [refreshLibraries]);
 
   useEffect(() => {
     if (tab !== "watchlist" && !providerTypes.includes(tab)) setTab("watchlist");
@@ -109,21 +140,28 @@ export function WatchlistScreen() {
     [libraries, selectedLibrary]
   );
 
+  const personalLists = useMemo(() => [
+    ...customLists.map((list) => ({ id: `list:${list.id}`, name: list.name, provider: "Trakt", catalog: null as typeof catalogConfigs[number] | null })),
+    ...catalogConfigs.filter((catalog) => !catalog.isPreinstalled && !["preinstalled", "home_server"].includes(catalog.sourceType.toLowerCase()) && !["collection", "collection_rail"].includes((catalog.kind ?? "").toLowerCase()))
+      .map((catalog) => ({ id: `catalog:${catalog.id}`, name: catalog.title || catalog.name, provider: catalog.addonName || catalog.sourceType, catalog }))
+  ], [customLists, catalogConfigs]);
+  const activeList = personalLists.find((list) => list.id === openedList);
   useEffect(() => {
-    if (tab !== "watchlist" || watchlistSource === "watchlist") {
-      setSourceItems(null);
-      return;
-    }
+    if (tab !== "watchlist") return;
+    if (!trackerTab && !openedList && watchlistSource === "watchlist") { setSourceItems(null); setLoading(false); setLibraryError(false); return; }
     const requestId = ++requestRef.current;
-    setLoading(true);
-    void loadTraktListItems(watchlistSource)
-      .then((items) => { if (requestId === requestRef.current) setSourceItems(items); })
-      .catch(() => { if (requestId === requestRef.current) setSourceItems([]); })
+    setSourceItems(null); setLoading(true); setLibraryError(false);
+    const task = activeList?.catalog ? loadCatalogRow(activeList.catalog).then((row) => row?.items ?? [])
+      : trackerTab ? loadTrackerLibrary(trackerTab, trackerSource)
+      : loadTraktListItems(openedList ?? watchlistSource);
+    void task.then((rows) => { if (requestId === requestRef.current) setSourceItems(rows); })
+      .catch(() => { if (requestId === requestRef.current) setLibraryError(true); })
       .finally(() => { if (requestId === requestRef.current) setLoading(false); });
-  }, [tab, watchlistSource, loadTraktListItems]);
+    return () => { requestRef.current++; };
+  }, [tab, trackerTab, trackerSource, openedList, activeList?.catalog, watchlistSource, loadTraktListItems, loadTrackerLibrary, loadCatalogRow, retry]);
 
   const libraryFilter: WatchlistFilter = "all";
-  const cacheKey = `${selectedLibrary}|${sort}|${searchQuery.toLowerCase()}`;
+  const cacheKey = `${auth?.userId ?? "local"}:${activeProfile?.id}:${selectedLibrary}|${sort}|${searchQuery.toLowerCase()}`;
   const loadLibrary = useCallback(async (force = false) => {
     if (tab === "watchlist" || !selectedLibrary) return;
     const requestId = ++requestRef.current;
@@ -146,16 +184,17 @@ export function WatchlistScreen() {
       libraryCache.set(cacheKey, page);
       setLibraryPage(page);
     } catch {
-      if (requestId === requestRef.current && !cached) setLibraryError(true);
+      if (requestId === requestRef.current) setLibraryError(true);
     } finally {
       if (requestId === requestRef.current) setLoading(false);
     }
   }, [activeLibrary?.mediaType, cacheKey, homeServers, libraryFilter, searchQuery, selectedLibrary, sort, tab]);
 
-  useEffect(() => { void loadLibrary(); }, [loadLibrary]);
+  useEffect(() => { void loadLibrary(); return () => { requestRef.current++; }; }, [loadLibrary]);
 
-  const loadMore = useCallback(async () => {
-    if (tab === "watchlist" || loading || loadingMore || !libraryPage.hasMore || !selectedLibrary) return;
+  const loadMore = useCallback(async (retry = false) => {
+    if (tab === "watchlist" || loading || loadingMore || (libraryError && !retry) || !libraryPage.hasMore || !selectedLibrary) return;
+    setLibraryError(false);
     setLoadingMore(true);
     const requestId = requestRef.current;
     const { loadHomeServerLibraryPage } = await import("@/lib/homeserver");
@@ -177,160 +216,109 @@ export function WatchlistScreen() {
         libraryCache.set(cacheKey, page);
         return page;
       });
+    } catch {
+      if (requestId === requestRef.current) setLibraryError(true);
     } finally {
       setLoadingMore(false);
     }
-  }, [activeLibrary?.mediaType, cacheKey, homeServers, libraryFilter, libraryPage.hasMore, libraryPage.items.length, loading, loadingMore, searchQuery, selectedLibrary, sort, tab]);
+  }, [activeLibrary?.mediaType, cacheKey, homeServers, libraryError, libraryFilter, libraryPage.hasMore, libraryPage.items.length, loading, loadingMore, searchQuery, selectedLibrary, sort, tab]);
 
-  useEffect(() => {
-    const target = loadMoreRef.current;
-    if (!target || tab === "watchlist") return;
-    const observer = new IntersectionObserver((entries) => {
-      if (entries[0]?.isIntersecting) void loadMore();
-    }, { rootMargin: "600px" });
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [loadMore, tab]);
-
-  const watchlistList = watchlistSource === "watchlist" ? watchlist : (sourceItems ?? []);
+  const watchlistList = !trackerTab && !openedList && watchlistSource === "watchlist" ? watchlist : (sourceItems ?? []);
   const items = useMemo(() => {
     if (tab !== "watchlist") return libraryPage.items;
-    const filtered = filter === "all" ? watchlistList : watchlistList.filter((item) => item.mediaType === filter);
-    return [...filtered].sort((a, b) => {
-      if (sort === "rating") return (Number(b.rating) || 0) - (Number(a.rating) || 0);
-      if (sort === "title") return a.title.localeCompare(b.title);
-      return (b.activityAt ?? 0) - (a.activityAt ?? 0);
-    });
-  }, [filter, libraryPage.items, sort, tab, watchlistList]);
+    const filtered = watchlistList.filter((item) => (filter === "all" || item.mediaType === filter) && item.title.toLowerCase().includes(searchQuery.toLowerCase()));
+    return [...filtered].sort((a, b) => compareLibraryItems(a, b, sort));
+  }, [filter, libraryPage.items, sort, tab, watchlistList, searchQuery]);
 
-  const activeServerName = activeLibrary?.serverName ?? visibleLibraries[0]?.serverName ?? "Home server";
-  const heading = tab === "watchlist" ? "Watchlist" : `${PROVIDER_LABELS[tab]} Library`;
-  const watchlistSyncLabel = (() => {
-    const mode = trackingPreferences.watchlistReadMode;
-    if (mode === "both" && traktConnected && simklConnected) return "Trakt + Simkl";
-    if (mode === "simkl" && simklConnected) return "Simkl";
-    if (mode === "mdblist" && mdblistConnected) return "MDBList";
-    if (mode === "trakt" && traktConnected) return "Trakt";
-    if (traktConnected) return "Trakt";
-    if (simklConnected) return "Simkl";
-    if (mdblistConnected) return "MDBList";
-    return null;
-  })();
-  const eyebrow = tab === "watchlist"
-    ? watchlistSyncLabel ? `Synced with ${watchlistSyncLabel}` : "Saved across your ARVIO devices"
-    : loading && !items.length ? `Connecting to ${PROVIDER_LABELS[tab]}` : `${libraryPage.total.toLocaleString()} titles${activeLibrary ? ` in ${activeLibrary.libraryName}` : ""}`;
-
+  const collections = section === "lists" && !openedList;
+  const trackerSources = [
+    ...(weTrakrClient.isConnected ? ["planning", "watching", "watched", "hold", "dropped"].map((id, index) => ({ provider: "wetrakr" as const, id, name: ["Watchlist", "Watching", "Watched", "On hold", "Dropped"][index] })) : []),
+    ...(traktConnected ? [{ provider: "trakt" as const, id: "watchlist", name: "Watchlist" }, { provider: "trakt" as const, id: "collection", name: "Collection" }, { provider: "trakt" as const, id: "watched", name: "Watched" }] : []),
+    ...(simklConnected ? ["plantowatch", "watching", "completed", "hold", "dropped"].map((id, index) => ({ provider: "simkl" as const, id, name: ["Plan to watch", "Watching", "Completed", "On hold", "Dropped"][index] })) : [])
+  ];
+  const sourceValue = tab !== "watchlist" ? selectedLibrary : trackerTab ? `${trackerTab}:${trackerSource}` : "saved";
+  const selectSource = (value: string) => {
+    if (value === "saved") { setTab("watchlist"); setTrackerTab(null); setWatchlistSource("watchlist"); }
+    else if (value.startsWith("trakt:") || value.startsWith("simkl:") || value.startsWith("wetrakr:")) { const [provider, id] = value.split(":"); setTab("watchlist"); setTrackerTab(provider as "trakt" | "simkl" | "wetrakr"); setTrackerSource(id); }
+    else { const library = libraries.find((entry) => entry.value === value); if(library) { setTrackerTab(null); setTab(library.serverType); setSelectedLibrary(value); } }
+  };
+  const changeSection = (value: typeof section) => {
+    setSection(value); setOpenedList(null); setSearch(""); setSearchQuery(""); setFilter("all"); setTrackerTab(null);
+    if(value === "libraries") { setTab(providerTypes[0] ?? "watchlist"); if(libraries[0]) selectSource(libraries[0].value); }
+    else { setTab("watchlist"); setWatchlistSource("watchlist"); }
+  };
+  const refresh = () => { if(tab === "watchlist") setRetry((value) => value + 1); else void loadLibrary(true); };
+  // Empty states open the exact Settings section (lib/sourceSetup), not Settings' first page.
+  const connectServer = () => { requestSourceSettings("homeserver"); navigate("settings"); };
+  const browse = () => navigate("search");
+  const sourceOptions = section === "libraries" ? libraries.map((entry) => ({ value: entry.value, name: `${entry.serverName} / ${entry.libraryName}` }))
+    : [{ value: "saved", name: translateUi("My watchlist") }, ...trackerSources.map((entry) => ({ value: `${entry.provider}:${entry.id}`, name: `${entry.provider === "trakt" ? "Trakt" : entry.provider === "wetrakr" ? "WeTrakr" : "Simkl"} / ${translateUi(entry.name)}` }))];
+  const previewScope = `${viewScope}:${section}:${sourceValue}:${openedList}:${sort}:${searchQuery}:${filter}`;
+  const [focusedPreview, setFocusedPreview] = useState<{ scope: string; key: string } | null>(null);
+  const preview = focusedPreview?.scope === previewScope
+    ? items.find(item => mediaPreviewKey(item) === focusedPreview.key) ?? items[0] : items[0];
+  const updatePreview = useCallback((item: MediaItem) => {
+    const key = mediaPreviewKey(item);
+    setFocusedPreview(current => current?.scope === previewScope && current.key === key ? current : { scope: previewScope, key });
+  }, [previewScope]);
   return (
-    <div className={`screen has-section-heading library-screen ${posterMode ? "poster-results" : ""}`}>
-      <section className="section-heading library-heading">
-        <div className="library-title-block">
-          <p className="eyebrow">{eyebrow}</p>
-          <h2>{heading}</h2>
-        </div>
-        <nav className="library-provider-tabs" aria-label="Library source">
-          <button type="button" className={tab === "watchlist" ? "is-active" : ""} onClick={() => setTab("watchlist")}>
-            <Bookmark size={17} /> Watchlist
-          </button>
-          {providerTypes.map((type) => (
-            <button key={type} type="button" className={tab === type ? "is-active" : ""} onClick={() => setTab(type)}>
-              <span className={`library-provider-mark is-${type}`} aria-hidden="true" /> {PROVIDER_LABELS[type]}
-            </button>
-          ))}
-          {tab !== "watchlist" && (
-            <select className="library-provider-sort" value={sort} onChange={(event) => setSort(event.target.value as HomeServerLibrarySort)} aria-label="Sort titles">
-              <option value="added">Recently added</option>
-              <option value="rating">Highest rated</option>
-              <option value="title">Title A-Z</option>
-            </select>
-          )}
-        </nav>
-      </section>
-
-      <div className={`library-workspace ${tab !== "watchlist" && visibleLibraries.length ? "has-library-sidebar" : ""}`}>
-        {tab !== "watchlist" && visibleLibraries.length > 0 && (
-          <aside className="library-sidebar" aria-label={`${PROVIDER_LABELS[tab]} libraries`}>
-            <strong className="library-sidebar-server">{activeServerName}</strong>
-            <span className="library-sidebar-label">Libraries</span>
-            <div role="tablist">
-              {visibleLibraries.map((library) => (
-                <button key={library.value} type="button" role="tab" aria-selected={selectedLibrary === library.value}
-                  className={selectedLibrary === library.value ? "is-active" : ""} onClick={() => setSelectedLibrary(library.value)}>
-                  {library.mediaType === "movie"
-                    ? <Film className={`library-type-icon is-${library.serverType}`} size={17} aria-hidden="true" />
-                    : <Tv className={`library-type-icon is-${library.serverType}`} size={17} aria-hidden="true" />}
-                  <span>{library.libraryName}</span>
-                  {visibleLibraries.filter((item) => item.libraryName === library.libraryName).length > 1 && <small>{library.serverName}</small>}
-                </button>
-              ))}
-            </div>
-          </aside>
-        )}
-        <div className={`library-main ${loading && items.length > 0 ? "is-refreshing" : ""}`}>
-          {tab !== "watchlist" && visibleLibraries.length > 0 && (
-            <label className="library-mobile-select">
-              {activeLibrary?.mediaType === "movie" ? <Film size={16} /> : <Tv size={16} />}
-              <select value={selectedLibrary} onChange={(event) => setSelectedLibrary(event.target.value)} aria-label="Choose library">
-                {visibleLibraries.map((library) => (
-                  <option key={library.value} value={library.value}>
-                    {library.libraryName}{visibleLibraries.filter((item) => item.libraryName === library.libraryName).length > 1 ? ` — ${library.serverName}` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-
-          <div className="library-toolbar">
-        {tab === "watchlist" && (customLists.length > 0 || watchlistSource !== "watchlist") && (
-          <select className="watchlist-source" value={watchlistSource} onChange={(event) => setWatchlistSource(event.target.value)} aria-label="Choose list">
-            {traktConnected && BUILTIN_SOURCES.map((source) => <option key={source.value} value={source.value}>{source.label}</option>)}
-            {!traktConnected && <option value="watchlist">Watchlist</option>}
-            {customLists.map((list) => <option key={list.id} value={`list:${list.id}`}>{list.name}</option>)}
-          </select>
-        )}
-        {tab === "watchlist" && (
-          <div className="watchlist-pills" role="group" aria-label="Filter titles">
-            {([["all", "All"], ["movie", "Movies"], ["tv", "Series"]] as const).map(([value, label]) => (
-              <button key={value} type="button" className={`watchlist-pill ${filter === value ? "is-active" : ""}`} onClick={() => setFilter(value)}>{label}</button>
-            ))}
-          </div>
-        )}
-        {tab === "watchlist" && (
-          <select className="watchlist-sort" value={sort} onChange={(event) => setSort(event.target.value as HomeServerLibrarySort)} aria-label="Sort titles">
-            <option value="added">Recently added</option>
-            <option value="rating">Highest rated</option>
-            <option value="title">Title A-Z</option>
-          </select>
-        )}
-        {tab !== "watchlist" && (
-          <label className="library-search">
-            <Search size={17} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={`Search ${PROVIDER_LABELS[tab]}`} />
+    <div className={`screen oled-library ${section === "calendar" ? "oled-calendar-screen" : ""} ${posterMode ? "poster-results" : ""}`}>
+      <header className="oled-library-toolbar">
+        <nav aria-label={translateUi("Library sections")}>{([ ["watchlists", "Watchlists"], ["lists", "My lists"], ["libraries", "Home servers"], ["calendar", "Calendar"] ] as const).map(([value, label]) =>
+          <button key={value} aria-current={section === value ? "page" : undefined} onClick={() => changeSection(value)}>{translateUi(label)}</button>)}</nav>
+        {/* The row stays (empty) on Calendar so switching tabs doesn't make the page jump. */}
+        <div className={`oled-library-actions ${section === "calendar" ? "is-empty" : ""}`}>{section !== "calendar" && <>
+          <span className="oled-library-count">{collections ? (personalLists.length === 1 ? translateUi("{value0} list", {value0: 1}) : translateUi("{value0} lists", {value0: personalLists.length}))
+            : (() => { const count = tab !== "watchlist" ? libraryPage.total : items.length; return count === 1 ? translateUi("{value0} title", {value0: 1}) : translateUi("{value0} titles", {value0: count}); })()}</span>
+          {collections && <button onClick={() => navigate("settings")}>{translateUi("+ New list")}</button>}
+          <label className="oled-library-search"><Search size={18} aria-hidden />
+            <input type="search" value={search} onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Escape" && search) { event.preventDefault(); setSearch(""); } }}
+              placeholder={collections ? translateUi("Search lists") : translateUi("Search titles")} aria-label={translateUi("Search library")} />
+            {search && <button type="button" className="oled-library-search-clear" aria-label={translateUi("Clear search")} onClick={() => setSearch("")}><X size={16} /></button>}
           </label>
-        )}
-        {tab !== "watchlist" && (
-          <button type="button" className="library-refresh" title="Refresh library" aria-label="Refresh library" onClick={() => void loadLibrary(true)} disabled={loading}>
-            <RefreshCw size={17} />
-          </button>
-        )}
-          </div>
-
-          {loading && items.length === 0 ? (
-            <div className="library-loading" aria-label="Loading library"><LoaderCircle size={34} /></div>
-          ) : libraryError ? (
-            <div className="watchlist-empty"><Server size={42} /><p>Server unavailable</p><span>Check the server connection and try again.</span><button type="button" onClick={() => void loadLibrary(true)}>Retry</button></div>
-          ) : items.length === 0 ? (
-            <div className="watchlist-empty"><Bookmark size={42} /><p>{searchQuery ? "No matching titles" : "This library is empty"}</p><span>{tab === "watchlist" ? "Add movies and series from their details page." : "Try another library or filter."}</span></div>
-          ) : (
-            <>
-              <div className="grid-results library-grid">
-                {items.map((item) => <MediaCard key={itemKey(item)} item={item} onOpen={openDetails} posterMode={posterMode} />)}
-              </div>
-              {loading && items.length > 0 && <div className="library-refreshing-indicator" aria-label="Updating library"><LoaderCircle size={24} /></div>}
-              {tab !== "watchlist" && <div ref={loadMoreRef} className="library-load-more">{loadingMore && <LoaderCircle size={26} />}</div>}
-            </>
-          )}
-        </div>
+          <button className="oled-filter-button" aria-label={translateUi("Filters")} onClick={() => setShowFilters(true)}><SlidersHorizontal size={20} /><span>{translateUi("Filters")}</span></button>
+        </>}</div>
+      </header>
+      {section === "calendar" ? <CalendarScreen key={viewScope} /> : <>
+      {/* Phones: sources as one scrollable row of buttons (the native select rendered 340px tall). */}
+      {!collections && !openedList && sourceOptions.length > 1 && <div className="oled-source-chips" role="group" aria-label={translateUi("Library source")}>
+        {sourceOptions.map((source) => <button key={source.value} type="button" aria-pressed={sourceValue === source.value} onClick={() => selectSource(source.value)}>{source.name}</button>)}
+      </div>}
+      {openedList && <div className="oled-list-breadcrumb"><button onClick={() => setOpenedList(null)}><ArrowLeft size={18}/> {translateUi(" My lists")}</button><span>{activeList?.name}</span></div>}
+      <div className={`oled-library-body ${!collections && !openedList ? "with-sources" : ""}`}>
+        {!collections && !openedList && <aside className="oled-source-nav" aria-label={translateUi("Library sources")}>
+          {section === "watchlists" ? <>
+            <p>{translateUi("Saved")}</p><button aria-current={sourceValue === "saved" ? "true" : undefined} onClick={() => selectSource("saved")}><Bookmark size={18}/>{translateUi("My watchlist")}</button>
+            {(["trakt", "simkl", "wetrakr"] as const).map((provider) => trackerSources.some((source) => source.provider === provider) && <div key={provider}><p>{provider === "trakt" ? translateUi("Trakt") : provider === "wetrakr" ? "WeTrakr" : translateUi("Simkl")}</p>{trackerSources.filter((source) => source.provider === provider).map((source) => <button key={source.id} aria-current={sourceValue === `${provider}:${source.id}` ? "true" : undefined} onClick={() => selectSource(`${provider}:${source.id}`)}>{translateUi(source.name)}</button>)}</div>)}
+          </> : homeServers.map((server) => <div key={server.id}><p>{server.name}<small>{PROVIDER_LABELS[server.type]}</small></p>{libraries.filter((library) => library.serverId === server.id).map((library) => <button key={library.value} aria-current={selectedLibrary === library.value ? "true" : undefined} onClick={() => selectSource(library.value)}>{library.mediaType === "movie" ? <Film size={18}/> : <Tv size={18}/>}<span>{library.libraryName}</span></button>)}</div>)}
+          {section === "libraries" && <button className="oled-connect" onClick={connectServer}>{translateUi("+ Connect server")}</button>}
+        </aside>}
+        <section className={`oled-library-content ${!collections && items.length ? 'has-preview' : ''}`} aria-label={collections ? translateUi("Personal lists") : activeList?.name || translateUi("Library titles")}>
+          {!collections && items.length > 0 && <CollectionPreview key={previewScope} preview={preview} language={settings.language} />}
+          {collections ? <div className="oled-collections">{personalLists.filter((list) => list.name.toLowerCase().includes(searchQuery.toLowerCase())).map((list) => <CollectionCover key={list.id} title={list.name} provider={list.provider} load={() => list.catalog ? loadCatalogRow(list.catalog).then((row) => row?.items ?? []) : loadTraktListItems(list.id)} onOpen={() => { setOpenedList(list.id); setSearch(""); setSearchQuery(""); }} />)}{!personalLists.length && <div className="watchlist-empty"><p>{translateUi("No personal lists yet")}</p><span>{translateUi("Your custom catalogs and connected personal lists appear here.")}</span></div>}</div>
+          : section === "libraries" && !libraries.length ? <div className="watchlist-empty"><Server size={36}/><p>{translateUi("No libraries connected")}</p><span>{translateUi("Connect your Plex, Jellyfin or Emby server to browse its libraries here.")}</span>
+            <div className="watchlist-empty-actions"><button onClick={connectServer}>{translateUi("Connect home server")}</button><button onClick={browse}><Compass size={18} aria-hidden />{translateUi("Browse")}</button></div></div>
+          : loading && !items.length ? <div className="library-loading" aria-label={translateUi("Loading library")}><LoaderCircle size={32}/></div>
+          : !items.length ? <div className="watchlist-empty"><Bookmark size={36}/>
+            {libraryError ? <><p>{translateUi("Library unavailable")}</p><button onClick={refresh}>{translateUi("Retry")}</button></>
+              : searchQuery ? <><p>{translateUi("No titles found")}</p><button onClick={() => setSearch("")}>{translateUi("Clear search")}</button></>
+              : sourceValue === "saved" && section === "watchlists" ? <><p>{translateUi("Your watchlist is empty")}</p>
+                <span>{translateUi("Add movies and series with the bookmark on any title. Your watchlist syncs with the ARVIO Android app.")}</span>
+                <div className="watchlist-empty-actions"><button onClick={browse}><Compass size={18} aria-hidden />{translateUi("Browse")}</button></div></>
+              : <><p>{translateUi("No titles found")}</p><span>{translateUi("Choose another source or add titles to your watchlist.")}</span>
+                <div className="watchlist-empty-actions"><button onClick={browse}><Compass size={18} aria-hidden />{translateUi("Browse")}</button></div></>}</div>
+          : <><LibraryGrid key={`${auth?.userId}:${activeProfile?.id}:${sourceValue}:${openedList}:${sort}:${searchQuery}:${filter}`} positions={viewportPositions} positionKey={`${viewScope}:${sourceValue}:${openedList}:${sort}:${searchQuery}:${filter}:${posterMode}`} items={items} poster={posterMode} onOpen={openDetails} onPreview={updatePreview} onNearEnd={tab !== "watchlist" ? loadMore : undefined}/>
+            {libraryError && <div className="library-error" role="alert">{translateUi("Could not update this source. ")}<button onClick={refresh}>{translateUi("Retry")}</button></div>}
+            {tab !== "watchlist" && <div ref={loadMoreRef} className="library-load-more">{loadingMore && <LoaderCircle size={24}/>}</div>}</>}
+        </section>
       </div>
+      {showFilters && <LibraryDialog title={translateUi("Filters")} close={() => setShowFilters(false)}>
+        <label>{translateUi("Sort titles")}<select value={sort} onChange={(event) => setSort(event.target.value as HomeServerLibrarySort)}>{LIBRARY_SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{translateUi(option.label)}</option>)}</select></label>
+        {tab === "watchlist" && !collections && <label>{translateUi("Type")}<select value={filter} onChange={(event) => setFilter(event.target.value as WatchlistFilter)}><option value="all">{translateUi("All titles")}</option><option value="movie">{translateUi("Movies")}</option><option value="tv">{translateUi("Series")}</option></select></label>}
+        {!collections && <button onClick={refresh}><RefreshCw size={18}/>{translateUi("Refresh source")}</button>}
+      </LibraryDialog>}
+      </>}
     </div>
   );
 }

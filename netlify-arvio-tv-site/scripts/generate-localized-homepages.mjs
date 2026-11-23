@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const siteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = fs.readFileSync(path.join(siteRoot, "index.html"), "utf8");
+const newCopy = JSON.parse(fs.readFileSync(path.join(siteRoot, "scripts/homepage-copy-v2.json"), "utf8"));
 
 const locales = {
   pt: {
@@ -12,10 +13,8 @@ const locales = {
     locale: "pt_BR",
     canonical: "https://arvio.tv/pt-br/",
     guides: "/pt-br/guias/",
-    title: "ARVIO para Android TV - Central de mídia de código aberto",
-    description: "O ARVIO é uma central de mídia gratuita e de código aberto para Android TV e Google TV. Organize servidores autorizados, TV ao vivo, integrações pessoais, listas, legendas, Trakt e Simkl.",
-    ogTitle: "ARVIO para Android TV",
-    ogDescription: "Uma central de mídia gratuita e de código aberto para seus servidores, serviços e integrações pessoais autorizados, criada para Android TV.",
+    title: "ARVIO — Player gratuito para Android TV e APK",
+    description: "Player gratuito e de código aberto para Android TV com Jellyfin, Plex, Emby, IPTV e addons compatíveis. Baixe o APK e conecte suas próprias fontes, Trakt e Simkl.",
     playBadge: "https://play.google.com/intl/pt-BR/badges/static/images/badges/pt-br_badge_web_generic.png",
   },
   es: {
@@ -24,25 +23,34 @@ const locales = {
     locale: "es_ES",
     canonical: "https://arvio.tv/es/",
     guides: "/es/guias/",
-    title: "ARVIO para Android TV - Centro multimedia de código abierto",
-    description: "ARVIO es un centro multimedia gratuito y de código abierto para Android TV y Google TV. Organiza servidores autorizados, TV en vivo, integraciones personales, listas, subtítulos, Trakt y Simkl.",
-    ogTitle: "ARVIO para Android TV",
-    ogDescription: "Un centro multimedia gratuito y de código abierto para tus servidores, servicios e integraciones personales autorizados, creado para Android TV.",
+    title: "ARVIO — Reproductor gratis para Android TV y APK",
+    description: "Reproductor gratuito y de código abierto para Android TV con Jellyfin, Plex, Emby, IPTV y addons compatibles. Descarga el APK y conecta tus fuentes, Trakt y Simkl.",
     playBadge: "https://play.google.com/intl/es/badges/static/images/badges/es_badge_web_generic.png",
   },
 };
 
 const copy = [
+  ["Web App", "Web App", "App web"],
+  ["Media kit", "Kit de imprensa", "Kit de prensa"],
+  ["Guides", "Guias", "Guías"],
+  ["ARVIO 2.0.", "ARVIO 2.0.", "ARVIO 2.0."],
+  ["On your screen.", "Na sua tela.", "En tu pantalla."],
+  ["Explore the actual app on TV, mobile, tablet and the web. Open a screenshot to see it in full.", "Explore o aplicativo real na TV, no celular, no tablet e na web. Abra uma captura para vê-la por inteiro.", "Explora la aplicación real en TV, móvil, tableta y web. Abre una captura para verla completa."],
+  ["Demo setup · Phone and tablet use demonstration libraries and channels; content and subscriptions are not included.", "Configuração de demonstração · Celular e tablet usam bibliotecas e canais de demonstração; conteúdo e assinaturas não estão incluídos.", "Configuración de demostración · El móvil y la tableta usan bibliotecas y canales de demostración; no se incluyen contenidos ni suscripciones."],
+  ["Screenshots show connected sources and example setups. ARVIO includes no media or subscriptions.", "As capturas mostram fontes conectadas e exemplos de configuração. O ARVIO não inclui conteúdo nem assinaturas.", "Las capturas muestran fuentes conectadas y ejemplos de configuración. ARVIO no incluye contenidos ni suscripciones."],
+  ["Library", "Biblioteca", "Biblioteca"],
+  ["Homeserver", "Servidor doméstico", "Servidor doméstico"],
+  ["Sports", "Esportes", "Deportes"],
+  ["Mobile", "Celular", "Móvil"],
+  ["Tablet", "Tablet", "Tableta"],
   ["Features", "Recursos", "Funciones"],
   ["Guide", "Guia", "Guía"],
   ["Dashboard", "Painel", "Panel"],
-  ["Try Premium", "Testar Premium", "Probar Premium"],
   ["Free Android media hub · Open source · No ads", "Central de mídia Android gratuita · Código aberto · Sem anúncios", "Centro multimedia Android gratuito · Código abierto · Sin anuncios"],
   ["Your media services,", "Seus serviços de mídia,", "Tus servicios multimedia,"],
   ["one organized home.", "em uma casa organizada.", "en un hogar organizado."],
   ["A free, open-source media management hub for Android. Connect your authorized Plex, Emby or Jellyfin server, live TV provider, personal integrations, Telegram files, subtitles, Trakt and Simkl in one remote-first interface.", "Uma central de gerenciamento de mídia gratuita e de código aberto para Android. Conecte seu servidor Plex, Emby ou Jellyfin autorizado, provedor de TV ao vivo, integrações pessoais, arquivos do Telegram, legendas, Trakt e Simkl em uma interface criada para o controle remoto.", "Un centro de gestión multimedia gratuito y de código abierto para Android. Conecta tu servidor Plex, Emby o Jellyfin autorizado, proveedor de TV en vivo, integraciones personales, archivos de Telegram, subtítulos, Trakt y Simkl en una interfaz pensada para el mando."],
   ["Open Dashboard", "Abrir Painel", "Abrir Panel"],
-  ["Open Premium Web", "Abrir Web Premium", "Abrir Web Premium"],
   ["Android APK is free and open source ·", "O APK Android é gratuito e de código aberto ·", "El APK de Android es gratuito y de código abierto ·"],
   ["View releases on GitHub", "Ver versões no GitHub", "Ver versiones en GitHub"],
   ["· ARVIO provides software, not media", "· O ARVIO fornece software, não conteúdo", "· ARVIO proporciona software, no contenido"],
@@ -70,9 +78,9 @@ const copy = [
   ["Browser playback and one-click VLC handoff", "Reprodução no navegador e envio ao VLC com um clique", "Reproducción en navegador y envío a VLC con un clic"],
   ["Web app source is public on GitHub", "O código do web app é público no GitHub", "El código de la aplicación web es público en GitHub"],
   ["Android and TV APK remains completely free", "O APK para Android e TV continua totalmente gratuito", "El APK para Android y TV sigue siendo completamente gratuito"],
-  ["Try Premium free for 3 days", "Teste o Premium grátis por 3 dias", "Prueba Premium gratis durante 3 días"],
+  ["Get Premium on Ko-fi", "Assine o Premium no Ko-fi", "Obtén Premium en Ko-fi"],
+  ["View the open-source web app", "Ver o código aberto do web app", "Ver el código abierto de la aplicación web"],
   ["View web source", "Ver código do web app", "Ver código de la aplicación web"],
-  ["/ month after · no payment details for trial", "/ mês depois · sem dados de pagamento no teste", "/ mes después · sin datos de pago para la prueba"],
   ["10,000+ users", "Mais de 10.000 usuários", "Más de 10.000 usuarios"],
   ["10+ contributors", "Mais de 10 colaboradores", "Más de 10 colaboradores"],
   ["Actual ARVIO Web interface", "Interface real do ARVIO Web", "Interfaz real de ARVIO Web"],
@@ -202,9 +210,6 @@ const copy = [
   ["Use the open-source ARVIO Web experience on Windows, Mac, iPhone, iPad, Chromebook and smart-TV browsers at web.arvio.tv. No install, APK or sideloading required.", "Use a experiência ARVIO Web de código aberto no Windows, Mac, iPhone, iPad, Chromebook e navegadores de Smart TV em web.arvio.tv. Não exige instalação, APK nem sideload.", "Usa la experiencia ARVIO Web de código abierto en Windows, Mac, iPhone, iPad, Chromebook y navegadores de Smart TV en web.arvio.tv. No requiere instalación, APK ni sideload."],
   ["Synced with the app", "Sincronizado com o app", "Sincronizado con la app"],
   ["Profiles, Library, Continue Watching, Trakt and Simkl stay in sync through ARVIO Cloud. Access authorized connected services across your screens and save compatible files when the provider allows it.", "Perfis, Biblioteca, Continuar assistindo, Trakt e Simkl permanecem sincronizados pelo ARVIO Cloud. Acesse serviços autorizados conectados nas suas telas e salve arquivos compatíveis quando o provedor permitir.", "Perfiles, Biblioteca, Seguir viendo, Trakt y Simkl permanecen sincronizados mediante ARVIO Cloud. Accede a servicios autorizados conectados en tus pantallas y guarda archivos compatibles cuando el proveedor lo permita."],
-  ["Try it free for 3 days", "Teste grátis por 3 dias", "Pruébalo gratis durante 3 días"],
-  ["Start after connecting ARVIO Cloud, then continue for $2.99/month through Ko‑fi. The Android/TV app remains 100% free.", "Comece após conectar o ARVIO Cloud e continue por US$ 2,99/mês pelo Ko‑fi. O app para Android/TV continua 100% gratuito.", "Empieza tras conectar ARVIO Cloud y continúa por 2,99 $/mes mediante Ko‑fi. La app para Android/TV sigue siendo 100 % gratuita."],
-  ["No payment details for trial", "Sem dados de pagamento no teste", "Sin datos de pago para la prueba"],
   ["Web · Live TV", "Web · TV ao vivo", "Web · TV en vivo"],
   ["Web · Catalogs", "Web · Catálogos", "Web · Catálogos"],
   ["Web · Details", "Web · Detalhes", "Web · Detalles"],
@@ -297,7 +302,6 @@ const copy = [
   ["or delete cloud data at", "ou exclua os dados da nuvem em", "o elimina los datos de la nube en"],
   ["What is ARVIO Web and what does it cost?", "O que é ARVIO Web e quanto custa?", "¿Qué es ARVIO Web y cuánto cuesta?"],
   ["The ARVIO media-management interface in your browser at", "A interface de gerenciamento de mídia do ARVIO no navegador em", "La interfaz de gestión multimedia de ARVIO en el navegador en"],
-  ["on Windows, Mac, iPhone, iPad and more. Profiles, Library and progress sync with the app. Compatible media from your authorized connected services can be played or downloaded when the provider permits it. A one-time 3-day trial starts after you connect ARVIO Cloud. It then costs $2.99/month via", "no Windows, Mac, iPhone, iPad e outros. Perfis, Biblioteca e progresso sincronizam com o app. Conteúdo compatível dos serviços autorizados pode ser reproduzido ou baixado quando o provedor permitir. Um teste único de 3 dias começa após conectar o ARVIO Cloud. Depois custa US$ 2,99/mês pela", "en Windows, Mac, iPhone, iPad y otros. Perfiles, Biblioteca y progreso se sincronizan con la app. El contenido compatible de servicios autorizados puede reproducirse o descargarse cuando el proveedor lo permita. Una prueba única de 3 días empieza tras conectar ARVIO Cloud. Después cuesta 2,99 $/mes mediante la"],
   [". Browsers cannot decode every format, so some authorized files may require the one-tap VLC handoff.", ". Navegadores não decodificam todos os formatos, portanto alguns arquivos autorizados podem exigir envio ao VLC com um toque.", ". Los navegadores no decodifican todos los formatos, por lo que algunos archivos autorizados pueden requerir envío a VLC con un toque."],
   ["Does ARVIO provide media or subscriptions?", "O ARVIO fornece conteúdo ou assinaturas?", "¿ARVIO proporciona contenido o suscripciones?"],
   ["No. ARVIO is software for organizing and using services configured by the user. It does not host, store, sell, bundle or redistribute movies, series, channels, playlists or streams, and it does not include provider accounts. Built-in integrations are limited to metadata, subtitles and account connections. Users must have permission to access every connected service and file.", "Não. O ARVIO é software para organizar e usar serviços configurados pelo usuário. Não hospeda, armazena, vende, inclui nem redistribui filmes, séries, canais, listas ou transmissões, e não inclui contas de provedores. As integrações internas são limitadas a metadados, legendas e conexões de conta. O usuário deve ter permissão para cada serviço e arquivo conectado.", "No. ARVIO es software para organizar y usar servicios configurados por el usuario. No aloja, almacena, vende, incluye ni redistribuye películas, series, canales, listas o emisiones, y no incluye cuentas de proveedores. Las integraciones internas se limitan a metadatos, subtítulos y conexiones de cuenta. El usuario debe tener permiso para cada servicio y archivo conectado."],
@@ -337,6 +341,11 @@ const copy = [
 ];
 
 const attributes = [
+  ["Explore ARVIO Premium screenshots and features", "Explore as capturas e os recursos do ARVIO Premium", "Explora las capturas y funciones de ARVIO Premium"],
+  ["ARVIO Web home in a desktop browser", "Início do ARVIO Web em um navegador de computador", "Inicio de ARVIO Web en un navegador de escritorio"],
+  ["ARVIO Web live TV guide in a desktop browser", "Guia de TV ao vivo do ARVIO Web em um navegador de computador", "Guía de TV en vivo de ARVIO Web en un navegador de escritorio"],
+  ["ARVIO Web collections in a desktop browser", "Coleções do ARVIO Web em um navegador de computador", "Colecciones de ARVIO Web en un navegador de escritorio"],
+  ["ARVIO Web title details in a desktop browser", "Detalhes de títulos no ARVIO Web em um navegador de computador", "Detalles de títulos de ARVIO Web en un navegador de escritorio"],
   ["ARVIO home", "Início do ARVIO", "Inicio de ARVIO"],
   ["Toggle theme", "Alternar tema", "Cambiar tema"],
   ["Get ARVIO on Google Play", "Baixar ARVIO no Google Play", "Descargar ARVIO en Google Play"],
@@ -360,7 +369,7 @@ function replaceTextNodes(html, translations) {
   });
 
   html = html.replace(/>([^<>]+)</gu, (match, text) => {
-    const value = text.replace(/\s+/gu, " ").trim();
+    const value = text.replace(/\s+/gu, " ").trim().replaceAll("&amp;", "&");
     const translated = translations.get(value);
     if (!translated) return match;
     const start = text.match(/^\s*/u)?.[0] ?? "";
@@ -374,23 +383,42 @@ function replaceTextNodes(html, translations) {
 function render(localeKey) {
   const locale = locales[localeKey];
   const valueIndex = localeKey === "pt" ? 1 : 2;
-  const translations = new Map(copy.map((entry) => [entry[0], entry[valueIndex]]));
-  const attributeTranslations = new Map(attributes.map((entry) => [entry[0], entry[valueIndex]]));
+  const translations = new Map([...copy, ...newCopy].map((entry) => [entry[0], entry[valueIndex]]));
+  const attributeTranslations = new Map([...attributes, ...newCopy].map((entry) => [entry[0], entry[valueIndex]]));
   let html = replaceTextNodes(source, translations);
+  html = html.replace('data-release-label="LATEST RELEASE"', `data-release-label="${localeKey === 'pt' ? 'ÚLTIMA VERSÃO' : 'ÚLTIMA VERSIÓN'}"`);
 
   html = html.replace('<html lang="en">', `<html lang="${locale.lang}">`);
   html = html.replace(/<title>[^<]+<\/title>/u, `<title>${locale.title}</title>`);
   html = html.replace(/<meta name="description" content="[^"]+">/u, `<meta name="description" content="${locale.description}">`);
   html = html.replace('<link rel="canonical" href="https://arvio.tv/">', `<link rel="canonical" href="${locale.canonical}">`);
   html = html.replace('<meta property="og:site_name" content="ARVIO">', `<meta property="og:site_name" content="ARVIO">\n<meta property="og:locale" content="${locale.locale}">`);
-  html = html.replace('<meta property="og:title" content="ARVIO for Android TV">', `<meta property="og:title" content="${locale.ogTitle}">`);
-  html = html.replace(/<meta property="og:description" content="[^"]+">/u, `<meta property="og:description" content="${locale.ogDescription}">`);
+  html = html.replace(/<meta property="og:title" content="[^"]+">/u, `<meta property="og:title" content="${locale.title}">`);
+  html = html.replace(/<meta property="og:description" content="[^"]+">/u, `<meta property="og:description" content="${locale.description}">`);
   html = html.replace('<meta property="og:url" content="https://arvio.tv/">', `<meta property="og:url" content="${locale.canonical}">`);
-  html = html.replace('<meta name="twitter:title" content="ARVIO for Android TV">', `<meta name="twitter:title" content="${locale.ogTitle}">`);
-  html = html.replace(/<meta name="twitter:description" content="[^"]+">/u, `<meta name="twitter:description" content="${locale.ogDescription}">`);
-  html = html.replace('"description":"A free, open-source media management hub for organizing user-authorized home servers, live TV services, personal integrations, watchlists and playback settings on Android TV."', `"description":"${locale.ogDescription}","inLanguage":"${locale.lang}","url":"${locale.canonical}"`);
+  html = html.replace(/<meta name="twitter:title" content="[^"]+">/u, `<meta name="twitter:title" content="${locale.title}">`);
+  html = html.replace(/<meta name="twitter:description" content="[^"]+">/u, `<meta name="twitter:description" content="${locale.description}">`);
+  // Metadata translations must survive changes to the English SEO copy.
+  html = html.replace(/(<script type="application\/ld\+json">)([\s\S]*?)(<\/script>)/gu, (_, start, json, end) => {
+    const data = JSON.parse(json);
+    if (data["@type"] === "SoftwareApplication") {
+      data.description = locale.description;
+      data.inLanguage = locale.lang;
+      data.url = locale.canonical;
+    }
+    return start + JSON.stringify(data).replaceAll("<", "\\u003c") + end;
+  });
   html = html.replace('https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png', locale.playBadge);
   html = html.replaceAll('href="/guides/"', `href="${locale.guides}"`);
+  const serviceRoutes = {
+    "/jellyfin-android-tv/": { pt: "/pt-br/jellyfin-android-tv/", es: "/es/jellyfin-android-tv/" },
+    "/plex-emby-jellyfin/": { pt: "/pt-br/plex-emby-jellyfin/", es: "/es/plex-emby-jellyfin/" },
+    "/trakt-simkl-sync/": { pt: "/pt-br/sincronizacao-trakt-simkl/", es: "/es/sincronizacion-trakt-simkl/" },
+    "/live-tv-epg/": { pt: "/pt-br/tv-ao-vivo-epg/", es: "/es/tv-en-vivo-epg/" }
+  };
+  for (const [route, localized] of Object.entries(serviceRoutes)) {
+    html = html.replaceAll(`href="${route}"`, `href="${localized[localeKey]}"`);
+  }
   html = html.replaceAll('src="assets/', 'src="/assets/');
   html = html.replaceAll('url("assets/', 'url("/assets/');
   html = html.replaceAll('&quot;assets/', '&quot;/assets/');
@@ -400,6 +428,13 @@ function render(localeKey) {
     html = html.replaceAll(`alt="${english}"`, `alt="${translated}"`);
   }
 
+  html = html.replace(/alt="ARVIO 2\.0 · ([^"]+)"/gu, (_, label) =>
+    `alt="ARVIO 2.0 · ${label.split(' · ').map(part => translations.get(part) ?? part).join(' · ')}"`);
+
+  const clientCopy = JSON.stringify(Object.fromEntries(translations)).replaceAll("<", "\\u003c");
+  html = html.replace(/(<script type="application\/json" id="home-copy">)[\s\S]*?(<\/script>)/u, (_, start, end) => start + clientCopy + end);
+  // The Premium page in the same language (scripts/build-localized-premium.mjs).
+  html = html.replaceAll('href="/premium/"', `href="/${locale.directory}/premium/"`);
   return html.replace(/[ \t]+$/gmu, "");
 }
 

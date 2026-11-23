@@ -63,6 +63,11 @@ class TraktOutboxRepository @Inject constructor(
         }
     }
 
+    /** Drops every queued item for every profile (sign-out). */
+    suspend fun clearAll() {
+        context.traktOutboxDataStore.edit { it.clear() }
+    }
+
     suspend fun remove(ids: Set<String>) {
         if (ids.isEmpty()) return
         context.traktOutboxDataStore.edit { prefs ->

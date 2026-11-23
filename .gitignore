@@ -43,6 +43,9 @@ captures/
 *.ipr
 *.iws
 
+# Visual Studio local state
+.vs/
+
 # Keystore files
 # Uncomment if you have a release keystore that needs to be kept secret
 #*.jks
@@ -54,6 +57,8 @@ captures/
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json
+# Firebase client identifiers are public; no service-account credentials belong here.
+!app/google-services.json
 
 # Freeline
 freeline.py
@@ -137,6 +142,8 @@ supabase/functions/tv-auth-web/
 !**/drawable*/*.png
 !**/mipmap*/*.png
 !screenshots/*.png
+!assets/badges/*.png
+!web/public/**/*.png
 
 # Build logs and dev artifacts
 build_*.txt
@@ -166,3 +173,14 @@ _tmp_tv_perf/
 
 # Agent skills & customizations
 .agents/
+!app/src/androidTest/assets/library/*.png
+!app/src/androidTest/assets/library/*.jpg
+/.playback-fixtures/
+graphify-out/
+skills-lock.json
+
+# sherpa-onnx speech recognition AAR (~50 MB), downloaded and verified by app/build.gradle.kts
+app/libs/sherpa-onnx-*.aar
+app/libs/sherpa-onnx-*.aar.part
+# Private, encrypted web SIMKL session storage for source/self-hosted installs.
+web/.data/

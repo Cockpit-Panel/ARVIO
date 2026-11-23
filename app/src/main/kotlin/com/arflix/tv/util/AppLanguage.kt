@@ -2,18 +2,65 @@ package com.arflix.tv.util
 
 import android.content.Context
 import android.content.res.Configuration
+import android.content.res.Resources
 import android.os.Build
 import android.os.LocaleList
 import androidx.annotation.StringRes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.res.stringResource
+import androidx.core.os.ConfigurationCompat
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.arflix.tv.R
 import java.util.Locale
 
 val LocalAppLanguage = staticCompositionLocalOf { "en-US" }
 val LAST_APP_LANGUAGE_KEY = stringPreferencesKey("last_app_language")
+
+fun defaultAppLanguage(): String {
+    // Locale.getDefault() is changed by the app's own language override.
+    val systemLocale = ConfigurationCompat.getLocales(Resources.getSystem().configuration)[0]
+    return defaultAppLanguage(systemLocale ?: Locale.US)
+}
+
+internal fun defaultAppLanguage(systemLocale: Locale): String {
+    val language = systemLocale.language.lowercase(Locale.ROOT)
+    val country = systemLocale.country.uppercase(Locale.ROOT)
+    return when {
+        language == "pt" && country == "PT" -> "pt-PT"
+        language == "pt" -> "pt-BR"
+        language == "nl" -> "nl-NL"
+        language == "fr" -> "fr-FR"
+        language == "es" -> "es-ES"
+        language == "de" -> "de-DE"
+        language == "it" -> "it-IT"
+        language == "ru" -> "ru-RU"
+        language == "tr" -> "tr-TR"
+        language == "ar" -> "ar-SA"
+        language == "hi" -> "hi-IN"
+        language == "zh" && systemLocale.script == "Hans" -> "zh-CN"
+        language == "zh" && (systemLocale.script == "Hant" || country in setOf("TW", "HK", "MO")) -> "zh-TW"
+        language == "zh" -> "zh-CN"
+        language == "ja" -> "ja-JP"
+        language == "ko" -> "ko-KR"
+        language == "pl" -> "pl-PL"
+        else -> "en-US"
+    }
+}
+
+fun resolveAppLanguage(
+    preferences: Preferences,
+    profileId: String?,
+    systemDefault: () -> String = ::defaultAppLanguage
+): String {
+    val profileLanguage = profileId?.takeIf { it.isNotBlank() }?.let {
+        preferences[stringPreferencesKey("profile_${it}_content_language")]
+    }
+    return profileLanguage?.takeIf { it.isNotBlank() }
+        ?: preferences[LAST_APP_LANGUAGE_KEY]?.takeIf { it.isNotBlank() }
+        ?: systemDefault()
+}
 
 fun appLocale(languageTag: String): Locale {
     val normalized = languageTag.replace('_', '-')
@@ -42,6 +89,33 @@ fun localizedAppContext(context: Context, languageTag: String): Context {
 fun tr(text: String): String {
     if (text.isBlank()) return text
     @StringRes val resId: Int? = when (text.trim()) {
+        "Homeserver" -> R.string.library_homeserver_tab
+        "Calendar" -> R.string.library_calendar
+        "All watchlists" -> R.string.calendar_all_watchlists
+        "ARVIO watchlist" -> R.string.calendar_arvio_watchlist
+        "Today" -> R.string.live_label_today
+        "Local time" -> R.string.calendar_local_time
+        "Time TBA" -> R.string.calendar_time_tba
+        "Next month" -> R.string.calendar_next_month
+        "Previous month" -> R.string.calendar_previous_month
+        "release" -> R.string.calendar_release
+        "releases" -> R.string.calendar_releases
+        "more" -> R.string.calendar_more
+        "Navigate days" -> R.string.calendar_navigate_days
+        "Open day" -> R.string.calendar_open_day
+        "Some sources unavailable" -> R.string.calendar_partial
+        "Some release details unavailable" -> R.string.calendar_partial_details
+        "Next release" -> R.string.calendar_next_release
+        "Refresh calendar" -> R.string.calendar_refresh
+        "Finding your releases…" -> R.string.calendar_loading
+        "Calendar unavailable" -> R.string.calendar_unavailable
+        "Your watchlist, on the calendar" -> R.string.calendar_empty_watchlist
+        "No releases on this day" -> R.string.calendar_empty_day
+        "Add movies and shows to your ARVIO watchlist. No tracking account needed." -> R.string.calendar_add_watchlist
+        "Choose another day or watchlist to explore upcoming releases." -> R.string.calendar_choose_day
+        "Cinema" -> R.string.calendar_cinema
+        "Digital" -> R.string.calendar_digital
+        "Physical" -> R.string.calendar_physical
         // Navigation
         "Home" -> R.string.home
         "Search",
@@ -97,7 +171,7 @@ fun tr(text: String): String {
         "Min quality for auto-play",
         "Auto" -> R.string.auto
         "Trailer Auto-Play",
-        "Play trailers in hero banner",
+        "TV: play trailers in the home background",
         "Trailer",
         "Close trailer" -> R.string.trailer
         // Interface
@@ -323,7 +397,38 @@ private object AppLanguageRegexes {
         "de" to commonUi("Start", "Suche", "Merkliste", "Einstellungen", "Allgemein", "Filme", "Film", "Serien", "Serien", "Serie", "Alle Genres", "Jede Sprache", "App-Sprache", "Sprache und Untertitel", "Untertitel", "Audio", "Wiedergabe", "Oberfläche", "Netzwerk", "Kataloge", "Konten", "Quellen", "Details", "Abspielen", "Trailer", "Staffeln", "Staffel", "Episoden", "Besetzung", "Rezensionen", "Mehr davon", "Schließen", "Zurück", "Abbrechen", "Bestätigen", "Erneut versuchen", "Laden", "Leer", "Löschen", "Hinzufügen", "Aktualisieren", "ausgewählt", "Anmelden", "Abmelden", "Weiter", "Live", "Jetzt", "Später", "Aus", "Ein", "Auto", "Budget", "Läuft", "Quellen werden gesucht...", "Verfügbare Quellen", "Keine Ergebnisse gefunden", "Keine Ergebnisse gefunden für", "Deine Merkliste ist leer", "Füge Filme und Serien für später hinzu", "Quellen verfügbar", "Endet um"),
         "es" to commonUi("Inicio", "Buscar", "Lista", "Ajustes", "General", "Películas", "Película", "Series", "Series", "Serie", "Todos los géneros", "Cualquier idioma", "Idioma de la app", "Idioma y subtítulos", "Subtítulos", "Audio", "Reproducción", "Interfaz", "Red", "Catálogos", "Cuentas", "Fuentes", "Detalles", "Reproducir", "Tráiler", "Temporadas", "Temporada", "Episodios", "Reparto", "Reseñas", "Más como esto", "Cerrar", "Atrás", "Cancelar", "Confirmar", "Reintentar", "Cargando", "Vacío", "Eliminar", "Añadir", "Actualizar", "seleccionado", "Iniciar sesión", "Cerrar sesión", "Siguiente", "En vivo", "Ahora", "Más tarde", "No", "Sí", "Auto", "Presupuesto", "En curso", "Buscando fuentes...", "Fuentes disponibles", "No se encontraron resultados", "No se encontraron resultados para", "Tu lista está vacía", "Añade películas y series para ver más tarde", "fuentes disponibles", "Termina a las"),
         "pt-PT" to commonUi("Início", "Pesquisar", "Lista", "Definições", "Geral", "Filmes", "Filme", "Séries TV", "Séries", "Série", "Todos os géneros", "Qualquer idioma", "Idioma da app", "Idioma e legendas", "Legendas", "Áudio", "Reprodução", "Interface", "Rede", "Catálogos", "Contas", "Fontes", "Detalhes", "Reproduzir", "Trailer", "Temporadas", "Temporada", "Episódios", "Elenco", "Críticas", "Mais assim", "Fechar", "Voltar", "Cancelar", "Confirmar", "Tentar novamente", "A carregar", "Vazio", "Eliminar", "Adicionar", "Atualizar", "selecionado", "Iniciar sessão", "Terminar sessão", "Seguinte", "Direto", "Agora", "Mais tarde", "Desligado", "Ligado", "Auto", "Orçamento", "Em curso", "A procurar fontes...", "Fontes disponíveis", "Nenhum resultado encontrado", "Nenhum resultado encontrado para", "A sua lista está vazia", "Adicione filmes e séries para ver mais tarde", "fontes disponíveis", "Termina às"),
-        "pt-BR" to commonUi("Início", "Buscar", "Lista", "Configurações", "Geral", "Filmes", "Filme", "Séries", "Séries", "Série", "Todos os gêneros", "Qualquer idioma", "Idioma do app", "Idioma e legendas", "Legendas", "Áudio", "Reprodução", "Interface", "Rede", "Catálogos", "Contas", "Fontes", "Detalhes", "Reproduzir", "Trailer", "Temporadas", "Temporada", "Episódios", "Elenco", "Avaliações", "Mais como este", "Fechar", "Voltar", "Cancelar", "Confirmar", "Tentar novamente", "Carregando", "Vazio", "Excluir", "Adicionar", "Atualizar", "selecionado", "Entrar", "Sair", "Próximo", "Ao vivo", "Agora", "Mais tarde", "Desligado", "Ligado", "Auto", "Orçamento", "Em andamento", "Procurando fontes...", "Fontes disponíveis", "Nenhum resultado encontrado", "Nenhum resultado encontrado para", "Sua lista está vazia", "Adicione filmes e séries para assistir depois", "fontes disponíveis", "Termina às"),
+        "pt-BR" to commonUi(
+            home = "Início", search = "Buscar", watchlist = "Lista", settings = "Configurações", general = "Geral",
+            movies = "Filmes", movie = "Filme", tvShows = "Séries", shows = "Séries", series = "Série",
+            allGenres = "Todos os gêneros", anyLanguage = "Qualquer idioma", appLanguage = "Idioma do app",
+            languageAndSubtitles = "Idioma e legendas", subtitles = "Legendas", audio = "Áudio", playback = "Reprodução",
+            interfaceText = "Interface", network = "Rede", catalogs = "Catálogos", accounts = "Contas", sources = "Fontes",
+            details = "Detalhes", play = "Reproduzir", trailer = "Trailer", seasons = "Temporadas", season = "Temporada",
+            episodes = "Episódios", cast = "Elenco", reviews = "Avaliações", moreLikeThis = "Mais como este",
+            close = "Fechar", back = "Voltar", cancel = "Cancelar", confirm = "Confirmar", retry = "Tentar novamente",
+            loading = "Carregando", empty = "Vazio", delete = "Excluir", add = "Adicionar", refresh = "Atualizar",
+            selected = "selecionado", signIn = "Entrar", logOut = "Sair", next = "Próximo", live = "Ao vivo",
+            now = "Agora", later = "Mais tarde", off = "Desligado", on = "Ligado", auto = "Auto", budget = "Orçamento",
+            ongoing = "Em andamento", findingSources = "Procurando fontes...", availableSources = "Fontes disponíveis",
+            noResults = "Nenhum resultado encontrado", noResultsFor = "Nenhum resultado encontrado para",
+            emptyWatchlist = "Sua lista está vazia", addLater = "Adicione filmes e séries para assistir depois",
+            sourcesAvailable = "fontes disponíveis", endsAt = "Termina às",
+            extras = mapOf(
+                "Content Language" to "Idioma do Conteúdo",
+                "App text, titles, descriptions and metadata" to "Texto do aplicativo, títulos, descrições e metadados",
+                "Titles, descriptions and metadata" to "Títulos, descrições e metadados",
+                "Auto-select subtitle language" to "Selecionar idioma da legenda automaticamente",
+                "Preferred audio track" to "Faixa de áudio preferida",
+                "Off opens the source picker on Play" to "Desligado abre o seletor de fontes ao Reproduzir",
+                "Show Budget on Home" to "Mostrar Orçamento no Início",
+                "Display the movie budget on the home hero banner" to "Exibir o orçamento do filme no banner de destaque inicial",
+                "Trakt/MDBList URLs can be added manually. Addon catalogs appear automatically." to "URLs do Trakt/MDBList podem ser adicionadas manualmente. Catálogos de complementos aparecem automaticamente.",
+                "Optional account for syncing profiles, addons, catalogs and IPTV settings" to "Conta opcional para sincronizar perfis, complementos, catálogos e configurações de IPTV",
+                "ARVIO uses community streaming addons to find video sources. Without at least one streaming addon, content cannot be played." to "O ARVIO usa complementos de transmissão da comunidade para encontrar fontes de vídeo. Sem pelo menos um complemento, o conteúdo não poderá ser reproduzido.",
+                "Switch tabs • Navigate • BACK Close" to "Alternar abas • Navegar • VOLTAR Fechar",
+                "Waiting for authorization... (Press OK to cancel)" to "Aguardando autorização... (Pressione OK para cancelar)"
+            )
+        ),
         "it" to commonUi("Home", "Cerca", "Lista", "Impostazioni", "Generale", "Film", "Film", "Serie TV", "Serie", "Serie", "Tutti i generi", "Qualsiasi lingua", "Lingua app", "Lingua e sottotitoli", "Sottotitoli", "Audio", "Riproduzione", "Interfaccia", "Rete", "Cataloghi", "Account", "Fonti", "Dettagli", "Riproduci", "Trailer", "Stagioni", "Stagione", "Episodi", "Cast", "Recensioni", "Altri simili", "Chiudi", "Indietro", "Annulla", "Conferma", "Riprova", "Caricamento", "Vuoto", "Elimina", "Aggiungi", "Aggiorna", "selezionato", "Accedi", "Esci", "Successivo", "Live", "Ora", "Più tardi", "Spento", "Acceso", "Auto", "Budget", "In corso", "Ricerca fonti...", "Fonti disponibili", "Nessun risultato trovato", "Nessun risultato trovato per", "La tua lista è vuota", "Aggiungi film e serie da guardare più tardi", "fonti disponibili", "Finisce alle"),
         "ru" to commonUi("Главная", "Поиск", "Список", "Настройки", "Общие", "Фильмы", "Фильм", "Сериалы", "Сериалы", "Сериал", "Все жанры", "Любой язык", "Язык приложения", "Язык и субтитры", "Субтитры", "Аудио", "Воспроизведение", "Интерфейс", "Сеть", "Каталоги", "Аккаунты", "Источники", "Детали", "Смотреть", "Трейлер", "Сезоны", "Сезон", "Эпизоды", "Актеры", "Отзывы", "Похожие", "Закрыть", "Назад", "Отмена", "Подтвердить", "Повторить", "Загрузка", "Пусто", "Удалить", "Добавить", "Обновить", "выбрано", "Войти", "Выйти", "Далее", "Эфир", "Сейчас", "Позже", "Выкл", "Вкл", "Авто", "Бюджет", "Идет", "Поиск источников...", "Доступные источники", "Ничего не найдено", "Ничего не найдено для", "Ваш список пуст", "Добавьте фильмы и сериалы на потом", "источников доступно", "Заканчивается в"),
         "ja" to commonUi("ホーム", "検索", "ウォッチリスト", "設定", "一般", "映画", "映画", "テレビ番組", "番組", "シリーズ", "すべてのジャンル", "すべての言語", "アプリの言語", "言語と字幕", "字幕", "音声", "再生", "インターフェース", "ネットワーク", "カタログ", "アカウント", "ソース", "詳細", "再生", "予告編", "シーズン", "シーズン", "エピソード", "出演者", "レビュー", "関連作品", "閉じる", "戻る", "キャンセル", "確認", "再試行", "読み込み中", "空", "削除", "追加", "更新", "選択済み", "サインイン", "ログアウト", "次", "ライブ", "現在", "後で", "オフ", "オン", "自動", "予算", "配信中", "ソースを検索中...", "利用可能なソース", "結果が見つかりません", "結果が見つかりません:", "ウォッチリストは空です", "後で見る映画や番組を追加", "件のソースが利用可能", "終了"),
@@ -353,7 +458,7 @@ private object AppLanguageRegexes {
         "sr" to commonUi("Почетна", "Претрага", "Листа", "Подешавања", "Опште", "Филмови", "Филм", "ТВ емисије", "Емисије", "Серија", "Сви жанрови", "Било који језик", "Језик апликације", "Језик и титлови", "Титлови", "Аудио", "Репродукција", "Интерфејс", "Мрежа", "Каталози", "Налози", "Извори", "Детаљи", "Пусти", "Трејлер", "Сезоне", "Сезона", "Епизоде", "Глумци", "Рецензије", "Још сличног", "Затвори", "Назад", "Откажи", "Потврди", "Покушај поново", "Учитавање", "Празно", "Обриши", "Додај", "Освежи", "изабрано", "Пријава", "Одјава", "Следеће", "Уживо", "Сада", "Касније", "Искљ.", "Укљ.", "Ауто", "Буџет", "У току", "Тражење извора...", "Доступни извори", "Нема резултата", "Нема резултата за", "Ваша листа је празна", "Додајте филмове и серије за касније", "извора доступно", "Завршава се у"),
         "sk" to commonUi("Domov", "Hľadať", "Zoznam", "Nastavenia", "Všeobecné", "Filmy", "Film", "TV relácie", "Relácie", "Seriál", "Všetky žánre", "Ľubovoľný jazyk", "Jazyk aplikácie", "Jazyk a titulky", "Titulky", "Zvuk", "Prehrávanie", "Rozhranie", "Sieť", "Katalógy", "Účty", "Zdroje", "Detaily", "Prehrať", "Trailer", "Série", "Séria", "Epizódy", "Obsadenie", "Recenzie", "Podobné", "Zavrieť", "Späť", "Zrušiť", "Potvrdiť", "Skúsiť znova", "Načítava sa", "Prázdne", "Odstrániť", "Pridať", "Obnoviť", "vybrané", "Prihlásiť", "Odhlásiť", "Ďalšie", "Naživo", "Teraz", "Neskôr", "Vyp", "Zap", "Auto", "Rozpočet", "Prebieha", "Hľadanie zdrojov...", "Dostupné zdroje", "Nenašli sa výsledky", "Nenašli sa výsledky pre", "Váš zoznam je prázdny", "Pridajte filmy a seriály na neskôr", "zdrojov dostupných", "Končí o"),
         "sl" to commonUi("Domov", "Iskanje", "Seznam", "Nastavitve", "Splošno", "Filmi", "Film", "TV oddaje", "Oddaje", "Serija", "Vsi žanri", "Kateri koli jezik", "Jezik aplikacije", "Jezik in podnapisi", "Podnapisi", "Zvok", "Predvajanje", "Vmesnik", "Omrežje", "Katalogi", "Računi", "Viri", "Podrobnosti", "Predvajaj", "Napovednik", "Sezone", "Sezona", "Epizode", "Igralci", "Ocene", "Več podobnega", "Zapri", "Nazaj", "Prekliči", "Potrdi", "Poskusi znova", "Nalaganje", "Prazno", "Izbriši", "Dodaj", "Osveži", "izbrano", "Prijava", "Odjava", "Naslednje", "V živo", "Zdaj", "Pozneje", "Izkl.", "Vkl.", "Samodejno", "Proračun", "V teku", "Iskanje virov...", "Razpoložljivi viri", "Ni najdenih rezultatov", "Ni najdenih rezultatov za", "Vaš seznam je prazen", "Dodajte filme in serije za pozneje", "virov na voljo", "Konča se ob"),
-        "he" to commonUi("בית", "חיפוש", "רשימת צפייה", "הגדרות", "כללי", "סרטים", "סרט", "סדרות טלוויזיה", "תוכניות", "סדרה", "כל הז'אנרים", "כל שפה", "שפת האפליקציה", "שפה וכתוביות", "כתוביות", "אודיו", "ניגון", "ממשק", "רשת", "קטלוגים", "חשבונות", "מקורות", "פרטים", "נגן", "טריילר", "עונות", "עונה", "פרקים", "שחקנים", "ביקורות", "עוד דומים", "סגור", "חזרה", "ביטול", "אישור", "נסה שוב", "טוען", "ריק", "מחק", "הוסף", "רענן", "נבחר", "כניסה", "יציאה", "הבא", "שידור חי", "עכשיו", "מאוחר יותר", "כבוי", "פועל", "אוטומטי", "תקציב", "מתמשך", "מחפש מקורות...", "מקורות זמינים", "לא נמצאו תוצאות", "לא נמצאו תוצאות עבור", "רשימת הצפייה ריקה", "הוסף סרטים וסדרות לצפייה מאוחר יותר", "מקורות זמינים", "מסתיים ב"),
+        "he" to commonUi("מסך הבית", "חיפוש", "רשימת צפייה", "הגדרות", "כללי", "סרטים", "סרט", "סדרות", "סדרות", "סדרה", "כל הז׳אנרים", "כל שפה", "שפת האפליקציה", "שפה וכתוביות", "כתוביות", "שמע", "הפעלה", "ממשק", "רשת", "קטלוגים", "חשבונות", "מקורות", "פרטים", "הפעלה", "טריילר", "עונות", "עונה", "פרקים", "שחקנים", "ביקורות", "עוד כאלה", "סגירה", "חזרה", "ביטול", "אישור", "ניסיון נוסף", "טוען", "ריק", "מחיקה", "הוספה", "ריענון", "נבחר", "התחברות", "התנתקות", "הבא", "שידור חי", "עכשיו", "מאוחר יותר", "כבוי", "פועל", "אוטומטי", "תקציב", "מתמשך", "מחפש מקורות…", "מקורות זמינים", "לא נמצאו תוצאות", "לא נמצאו תוצאות עבור", "רשימת הצפייה שלך ריקה", "אפשר להוסיף סרטים וסדרות לצפייה מאוחרת", "מקורות זמינים", "מסתיים ב-"),
         "fa" to commonUi("خانه", "جستجو", "فهرست تماشا", "تنظیمات", "عمومی", "فیلم‌ها", "فیلم", "برنامه‌های تلویزیونی", "برنامه‌ها", "سریال", "همه ژانرها", "هر زبان", "زبان برنامه", "زبان و زیرنویس", "زیرنویس", "صدا", "پخش", "رابط", "شبکه", "کاتالوگ‌ها", "حساب‌ها", "منابع", "جزئیات", "پخش", "تریلر", "فصل‌ها", "فصل", "قسمت‌ها", "بازیگران", "نقدها", "موارد مشابه", "بستن", "بازگشت", "لغو", "تأیید", "دوباره تلاش کن", "در حال بارگذاری", "خالی", "حذف", "افزودن", "تازه‌سازی", "انتخاب‌شده", "ورود", "خروج", "بعدی", "زنده", "اکنون", "بعدا", "خاموش", "روشن", "خودکار", "بودجه", "در حال پخش", "در حال یافتن منابع...", "منابع موجود", "نتیجه‌ای یافت نشد", "نتیجه‌ای یافت نشد برای", "فهرست تماشای شما خالی است", "فیلم‌ها و سریال‌ها را برای بعد اضافه کنید", "منبع موجود", "پایان در"),
         "bn" to commonUi("হোম", "অনুসন্ধান", "ওয়াচলিস্ট", "সেটিংস", "সাধারণ", "সিনেমা", "সিনেমা", "টিভি শো", "শো", "সিরিজ", "সব ঘরানা", "যে কোনো ভাষা", "অ্যাপের ভাষা", "ভাষা ও সাবটাইটেল", "সাবটাইটেল", "অডিও", "প্লেব্যাক", "ইন্টারফেস", "নেটওয়ার্ক", "ক্যাটালগ", "অ্যাকাউন্ট", "সোর্স", "বিস্তারিত", "চালান", "ট্রেলার", "সিজন", "সিজন", "এপিসোড", "কাস্ট", "রিভিউ", "আরও একই রকম", "বন্ধ", "ফিরে", "বাতিল", "নিশ্চিত", "আবার চেষ্টা", "লোড হচ্ছে", "খালি", "মুছুন", "যোগ করুন", "রিফ্রেশ", "নির্বাচিত", "সাইন ইন", "লগ আউট", "পরবর্তী", "লাইভ", "এখন", "পরে", "বন্ধ", "চালু", "অটো", "বাজেট", "চলমান", "সোর্স খোঁজা হচ্ছে...", "উপলব্ধ সোর্স", "কোনো ফল পাওয়া যায়নি", "কোনো ফল পাওয়া যায়নি:", "আপনার ওয়াচলিস্ট খালি", "পরে দেখার জন্য সিনেমা ও শো যোগ করুন", "সোর্স উপলব্ধ", "শেষ হবে"),
         "ta" to commonUi("முகப்பு", "தேடு", "பார்க்கும் பட்டியல்", "அமைப்புகள்", "பொது", "திரைப்படங்கள்", "திரைப்படம்", "டிவி நிகழ்ச்சிகள்", "நிகழ்ச்சிகள்", "தொடர்", "அனைத்து வகைகள்", "எந்த மொழியும்", "பயன்பாட்டு மொழி", "மொழி மற்றும் வசனங்கள்", "வசனங்கள்", "ஆடியோ", "இயக்கு", "இடைமுகம்", "நெட்வொர்க்", "கேட்டலாக்கள்", "கணக்குகள்", "மூலங்கள்", "விவரங்கள்", "இயக்கு", "ட்ரெய்லர்", "சீசன்கள்", "சீசன்", "எபிசோடுகள்", "நடிகர்கள்", "விமர்சனங்கள்", "இதுபோன்றவை", "மூடு", "பின்", "ரத்து", "உறுதி", "மீண்டும் முயற்சி", "ஏற்றுகிறது", "காலி", "நீக்கு", "சேர்", "புதுப்பி", "தேர்ந்தெடுக்கப்பட்டது", "உள்நுழை", "வெளியேறு", "அடுத்து", "நேரலை", "இப்போது", "பின்னர்", "ஆஃப்", "ஆன்", "தானாக", "பட்ஜெட்", "நடந்து கொண்டிருக்கிறது", "மூலங்கள் தேடப்படுகின்றன...", "கிடைக்கும் மூலங்கள்", "முடிவுகள் இல்லை", "முடிவுகள் இல்லை:", "உங்கள் பார்க்கும் பட்டியல் காலியாக உள்ளது", "பின்னர் பார்க்க திரைப்படங்கள் மற்றும் நிகழ்ச்சிகளைச் சேர்க்கவும்", "மூலங்கள் கிடைக்கும்", "முடிவு"),
@@ -482,7 +587,7 @@ private object AppLanguageRegexes {
         "Auto-Play Min Quality" to auto,
         "Min quality for auto-play" to auto,
         "Trailer Auto-Play" to trailer,
-        "Play trailers in hero banner" to trailer,
+        "TV: play trailers in the home background" to trailer,
         "Match Frame Rate" to playback,
         "Off, Seamless, or Always" to "$off / $auto",
         "Quality Regex Filters" to "Regex",

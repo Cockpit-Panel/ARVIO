@@ -8,12 +8,14 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.BaseColumns
+import android.util.LruCache
 import androidx.annotation.RequiresApi
 import androidx.tvprovider.media.tv.Channel
 import androidx.tvprovider.media.tv.ChannelLogoUtils
 import androidx.tvprovider.media.tv.PreviewProgram
 import androidx.tvprovider.media.tv.TvContractCompat
 import androidx.tvprovider.media.tv.WatchNextProgram
+import com.arflix.tv.data.api.TmdbEpisode
 import com.arflix.tv.MainActivity
 import com.arflix.tv.R
 import com.arflix.tv.data.model.MediaType
@@ -25,6 +27,14 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -36,6 +46,8 @@ data class LauncherContinueWatchingRequest(
     val startPositionMs: Long? = null
 )
 
+internal data class LauncherContinueWatchingProgram(val item: ContinueWatchingItem, val artwork: LauncherArtwork)
+
 @Singleton
 class LauncherContinueWatchingRepository @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -43,8 +55,14 @@ class LauncherContinueWatchingRepository @Inject constructor(
     private val traktRepository: TraktRepository,
     private val remoteSyncManager: com.arflix.tv.data.repository.sync.RemoteSyncManager,
     private val watchHistoryRepository: WatchHistoryRepository,
-    private val streamRepository: StreamRepository
+    private val streamRepository: StreamRepository,
+    private val mediaRepository: MediaRepository,
+    private val artworkRepository: LauncherArtworkRepository
 ) {
+
+    private val titleCache = LruCache<String, String>(200)
+    private val episodeCache = LruCache<String, TmdbEpisode>(200)
+    private val publicationMutex = Mutex()
     companion object {
         private const val TAG = "LauncherCW"
         private const val CHANNEL_INTERNAL_ID = "arvio_continue_watching_channel"
@@ -57,22 +75,40 @@ class LauncherContinueWatchingRepository @Inject constructor(
     suspend fun refreshForCurrentProfile() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !supportsLauncherPublishing()) return
 
-        val activeProfileId = runCatching { profileManager.getProfileIdSync() }.getOrDefault("")
-        if (activeProfileId.isBlank()) {
-            clearPublishedPrograms()
-            return
-        }
-
-        val items = loadPublisherItems()
-        withContext(Dispatchers.IO) {
-            runTvProviderCall("refresh launcher continue watching") {
-                syncPublishedRows(items)
+        publicationMutex.withLock {
+            val activeProfileId = runCatching { profileManager.getProfileIdSync() }.getOrDefault("")
+            if (activeProfileId.isBlank()) {
+                clearPublishedRows()
+                return
+            }
+            val language = mediaRepository.contentLanguage
+            val items = loadPublisherItems()
+            val semaphore = Semaphore(4)
+            val programs = coroutineScope {
+                items.map { item -> async {
+                    semaphore.withPermit {
+                        val logo = withTimeoutOrNull(4_000L) { mediaRepository.getLogoUrl(item.toMediaItem()) }
+                        LauncherContinueWatchingProgram(item, artworkRepository.artworkFor(item, activeProfileId, language, logo))
+                    }
+                } }.awaitAll()
+            }
+            // A switch/logout while artwork loads must not republish the old profile.
+            if (profileManager.getProfileIdSync() != activeProfileId) return
+            withContext(Dispatchers.IO) {
+                runTvProviderCall("refresh launcher continue watching") {
+                    syncPublishedRows(programs)
+                }
             }
         }
     }
 
     suspend fun clearPublishedPrograms() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !supportsLauncherPublishing()) return
+        publicationMutex.withLock { clearPublishedRows() }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private suspend fun clearPublishedRows() {
         withContext(Dispatchers.IO) {
             runTvProviderCall("clear launcher continue watching") {
                 val channelId = findExistingChannelId()
@@ -80,6 +116,7 @@ class LauncherContinueWatchingRepository @Inject constructor(
                     deletePreviewPrograms(channelId)
                 }
                 deleteWatchNextPrograms()
+                artworkRepository.clear()
             }
         }
     }
@@ -106,48 +143,80 @@ class LauncherContinueWatchingRepository @Inject constructor(
                 id = item.id,
                 streamAddonId = item.streamAddonId,
                 title = item.title,
-                addons = installedAddons
+                addons = installedAddons,
+                isAddonNative = !item.addonNativeId.isNullOrBlank()
             )
         }
-        if (filteredPrimary.isNotEmpty()) {
-            return filteredPrimary.take(Constants.MAX_CONTINUE_WATCHING)
+
+        val localItems = runCatching { traktRepository.getLocalContinueWatchingSnapshot() }.getOrDefault(emptyList())
+        val historyItems = runCatching { watchHistoryRepository.getContinueWatching() }.getOrDefault(emptyList())
+            .map(ContinueWatchingMerge::fromHistory)
+            .sortedByDescending { it.updatedAtMs }
+            .distinctBy { "${it.mediaType}:${it.id}" }
+        val mergedItems = ContinueWatchingMerge.merge(
+            filteredPrimary.ifEmpty { historyItems.ifEmpty { localItems } }, localItems, historyItems
+        ).filterNot { item ->
+            SportsAddonCapabilities.isLiveStreamOrSportsItem(
+                mediaType = item.mediaType,
+                id = item.id,
+                streamAddonId = item.streamAddonId,
+                title = item.title,
+                addons = installedAddons,
+                isAddonNative = !item.addonNativeId.isNullOrBlank()
+            )
         }
-
-        val historyFallback = runCatching { watchHistoryRepository.getContinueWatching() }.getOrDefault(emptyList())
-        return historyFallback
-            .sortedByDescending { it.updated_at ?: it.paused_at.orEmpty() }
-            .map { entry ->
-                ContinueWatchingItem(
-                    id = entry.show_tmdb_id,
-                    title = entry.title.orEmpty(),
-                    mediaType = if (entry.media_type == "tv") MediaType.TV else MediaType.MOVIE,
-                    progress = (entry.progress * 100f).toInt().coerceIn(0, 99),
-                    season = entry.season,
-                    episode = entry.episode,
-                    episodeTitle = entry.episode_title,
-                    posterPath = entry.poster_path,
-                    backdropPath = entry.backdrop_path,
-                    resumePositionSeconds = entry.position_seconds,
-                    durationSeconds = entry.duration_seconds,
-                    streamAddonId = entry.stream_addon_id
-                )
-            }
-            .filterNot { item ->
-                SportsAddonCapabilities.isLiveStreamOrSportsItem(
-                    mediaType = item.mediaType,
-                    id = item.id,
-                    streamAddonId = item.streamAddonId,
-                    title = item.title,
-                    addons = installedAddons
-                )
-            }
-            .distinctBy { "${it.mediaType}:${it.id}:${it.season ?: -1}:${it.episode ?: -1}" }
+        val selectedItems = traktRepository.filterDismissedContinueWatchingItems(mergedItems)
             .take(Constants.MAX_CONTINUE_WATCHING)
+        selectedItems.filter { !it.addonNativeId.isNullOrBlank() }
+            .forEach { mediaRepository.cacheItem(it.toMediaItem()) }
+
+       // Limit of 4 simultaneous calls to avoid saturating the network
+        val semaphore = Semaphore(4)
+        val currentLang = mediaRepository.contentLanguage
+
+        return coroutineScope {
+            selectedItems.map { item ->
+                async {
+                    semaphore.withPermit {
+                        // Cache keys including current language
+                        val titleKey = "${currentLang}_${item.mediaType}_${item.id}"
+                        val epKey = "${currentLang}_tv_${item.id}_${item.season}_${item.episode}"
+
+                        val localizedTitle = if (item.id <= 0) item.title else titleCache.get(titleKey) ?: runCatching {
+                            val t = if (item.mediaType == MediaType.TV) {
+                                mediaRepository.getLightweightTvTitle(item.id, currentLang)
+                            } else {
+                                mediaRepository.getLightweightMovieTitle(item.id, currentLang)
+                            }
+                            t?.takeIf { it.isNotBlank() }?.also { titleCache.put(titleKey, it) }
+                        }.getOrNull() ?: item.title
+
+                        val episode = if (item.id > 0 && item.mediaType == MediaType.TV && item.season != null && item.episode != null) {
+                            episodeCache.get(epKey) ?: runCatching {
+                                mediaRepository.getLightweightEpisode(
+                                    item.id,
+                                    item.season,
+                                    item.episode,
+                                    currentLang
+                                )?.also { episodeCache.put(epKey, it) }
+                            }.getOrNull()
+                        } else {
+                            null
+                        }
+
+                        item.copy(
+                            title = localizedTitle,
+                            episodeTitle = episode?.name?.takeIf { it.isNotBlank() } ?: item.episodeTitle,
+                            episodeStillPath = item.episodeStillPath?.takeIf { it.isNotBlank() }
+                                ?: episode?.stillPath?.takeIf { it.isNotBlank() }?.let { "${Constants.IMAGE_BASE_LARGE}$it" }
+                        )
+                    }
+                }
+            }.awaitAll()
+        }
     }
-
-
     @RequiresApi(Build.VERSION_CODES.O)
-    private fun syncPublishedRows(items: List<ContinueWatchingItem>) {
+    internal fun syncPublishedRows(items: List<LauncherContinueWatchingProgram>) {
         val channelId = ensurePreviewChannel() ?: return
         deletePreviewPrograms(channelId)
         deleteWatchNextPrograms()
@@ -156,10 +225,11 @@ class LauncherContinueWatchingRepository @Inject constructor(
             return
         }
 
-        items.forEachIndexed { index, item ->
-            insertPreviewProgram(channelId = channelId, item = item, index = index)
-            insertWatchNextProgram(item = item, index = index)
+        items.forEachIndexed { index, program ->
+            insertPreviewProgram(channelId = channelId, item = program.item, artwork = program.artwork, index = index)
+            insertWatchNextProgram(item = program.item, artwork = program.artwork, index = index)
         }
+        artworkRepository.prune(items.mapNotNull { it.artwork.uri }.toSet())
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -187,15 +257,24 @@ class LauncherContinueWatchingRepository @Inject constructor(
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
-    private fun insertPreviewProgram(channelId: Long, item: ContinueWatchingItem, index: Int) {
+    private fun insertPreviewProgram(channelId: Long, item: ContinueWatchingItem, artwork: LauncherArtwork, index: Int) {
         val program = PreviewProgram.Builder()
             .setChannelId(channelId)
             .setType(item.toPreviewType())
             .setTitle(item.title.ifBlank { context.getString(R.string.continue_watching) })
             .setDescription(item.buildSubtitle())
             .setInternalProviderId(item.previewProgramId())
-            .setPosterArtUri(item.posterPath?.takeIf { it.isNotBlank() }?.let(Uri::parse))
-            .setThumbnailUri(item.backdropPath?.takeIf { it.isNotBlank() }?.let(Uri::parse))
+            .setPosterArtUri(artwork.uri)
+            .setPosterArtAspectRatio(artwork.aspectRatio)
+            .setThumbnailUri(artwork.uri)
+            .setThumbnailAspectRatio(artwork.aspectRatio)
+            .apply {
+                if (item.mediaType == MediaType.TV) {
+                    (item.displaySeason ?: item.season)?.let { setSeasonNumber(it) }
+                    (item.displayEpisode ?: item.episode)?.let { setEpisodeNumber(it) }
+                    item.episodeTitle?.takeIf { it.isNotBlank() }?.let { setEpisodeTitle(it) }
+                }
+            }
             .setIntentUri(buildLaunchIntent(item).toUri(Intent.URI_INTENT_SCHEME).let(Uri::parse))
             .setWeight((Constants.MAX_CONTINUE_WATCHING - index).coerceAtLeast(1))
             .build()
@@ -204,16 +283,26 @@ class LauncherContinueWatchingRepository @Inject constructor(
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
-    private fun insertWatchNextProgram(item: ContinueWatchingItem, index: Int) {
+    private fun insertWatchNextProgram(item: ContinueWatchingItem, artwork: LauncherArtwork, index: Int) {
         val builder = WatchNextProgram.Builder()
             .setType(item.toPreviewType())
             .setTitle(item.title.ifBlank { context.getString(R.string.continue_watching) })
             .setDescription(item.buildSubtitle())
             .setInternalProviderId(item.watchNextProgramId())
             .setIntentUri(buildLaunchIntent(item).toUri(Intent.URI_INTENT_SCHEME).let(Uri::parse))
-            .setPosterArtUri(item.posterPath?.takeIf { it.isNotBlank() }?.let(Uri::parse))
-            .setThumbnailUri(item.backdropPath?.takeIf { it.isNotBlank() }?.let(Uri::parse))
-            .setWatchNextType(TvContractCompat.WatchNextPrograms.WATCH_NEXT_TYPE_CONTINUE)
+            .setPosterArtUri(artwork.uri)
+            .setPosterArtAspectRatio(artwork.aspectRatio)
+            .setThumbnailUri(artwork.uri)
+            .setThumbnailAspectRatio(artwork.aspectRatio)
+            .apply {
+                if (item.mediaType == MediaType.TV) {
+                    (item.displaySeason ?: item.season)?.let { setSeasonNumber(it) }
+                    (item.displayEpisode ?: item.episode)?.let { setEpisodeNumber(it) }
+                    item.episodeTitle?.takeIf { it.isNotBlank() }?.let { setEpisodeTitle(it) }
+                }
+            }
+            .setWatchNextType(if (item.isUpNext) TvContractCompat.WatchNextPrograms.WATCH_NEXT_TYPE_NEXT
+                else TvContractCompat.WatchNextPrograms.WATCH_NEXT_TYPE_CONTINUE)
             .setLastEngagementTimeUtcMillis(System.currentTimeMillis() - index)
 
         val durationMs = item.durationSeconds.coerceAtLeast(0L) * 1000L
@@ -305,15 +394,24 @@ class LauncherContinueWatchingRepository @Inject constructor(
     }
 
     private fun runTvProviderCall(action: String, block: () -> Unit) {
-        runCatching(block).onFailure { error ->
+        try {
+            block()
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
             AppLogger.w(TAG, "Skipping launcher publish action: $action", error)
         }
     }
 
     private fun <T> runTvProviderCall(action: String, fallback: T, block: () -> T): T {
-        return runCatching(block).onFailure { error ->
+        return try {
+            block()
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
             AppLogger.w(TAG, "Skipping launcher publish action: $action", error)
-        }.getOrDefault(fallback)
+            fallback
+        }
     }
 
     private fun buildLaunchIntent(item: ContinueWatchingItem): Intent {

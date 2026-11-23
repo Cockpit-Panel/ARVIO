@@ -1,4 +1,5 @@
 gradlew text eol=lf
+scripts/build-seek-keyframes.sh text eol=lf
 gradlew.bat text eol=crlf
 # Windows batch scripts must use CRLF (served as-is to users who run them).
 gradlew.bat text eol=crlf
@@ -6,3 +7,5 @@ gradlew.bat text eol=crlf
 # so pin CRLF into the blob itself by treating it as binary — text-normalization
 # would strip CR from the stored object and hand Windows an LF-only script.
 web/public/vlc-setup.bat -text
+# Migration checksums must be identical for Windows CLI and Linux CI deploys.
+netlify-auth-site/netlify/database/migrations/**/migration.sql text eol=lf

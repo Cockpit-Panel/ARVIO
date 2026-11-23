@@ -9,6 +9,17 @@ import android.content.Context
 data object DiagnosticsManager {
     private const val PREFERENCES_NAME = "arvio_privacy_preferences"
     private const val REPORTING_ENABLED_KEY = "diagnostics_and_usage_enabled"
+    private const val USAGE_ENABLED_KEY = "usage_statistics_enabled"
+
+    fun isUsageEnabled(context: Context): Boolean = context.applicationContext
+        .getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        .getBoolean(USAGE_ENABLED_KEY, false)
+
+    fun setUsageEnabled(context: Context, enabled: Boolean) {
+        context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(USAGE_ENABLED_KEY, enabled).apply()
+        UsageAnalytics.configure(context, enabled)
+    }
 
     fun isReportingEnabled(context: Context): Boolean {
         return context.applicationContext
@@ -19,15 +30,14 @@ data object DiagnosticsManager {
     @Synchronized
     fun initialize(context: Context): Boolean {
         val appContext = context.applicationContext
+        UsageAnalytics.configure(appContext, isUsageEnabled(appContext))
         if (!isReportingEnabled(appContext)) {
             disableProviders()
             return false
         }
 
-        return if (SentryCrashReporter.initialize(appContext)) {
-            true
-        } else {
-            CrashlyticsProvider.initialize()
+        return CrashlyticsProvider.initialize().also { enabled ->
+            LegacyAnrMonitor.configure(appContext, enabled)
         }
     }
 
@@ -43,11 +53,11 @@ data object DiagnosticsManager {
             initialize(appContext)
         } else {
             disableProviders()
+            LegacyAnrMonitor.configure(appContext, false)
         }
     }
 
     private fun disableProviders() {
-        SentryCrashReporter.disable()
         CrashlyticsProvider.disable()
         AppLogger.init(null)
     }
