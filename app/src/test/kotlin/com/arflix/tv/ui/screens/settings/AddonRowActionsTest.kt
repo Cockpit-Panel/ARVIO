@@ -7,6 +7,9 @@ import org.junit.Test
 
 class AddonRowActionsTest {
 
+    // Cockpit: panel-provisioned addons cannot be deleted from the app.
+    private val delete = if (CockpitSettings.ADDON_MANAGEMENT_ENABLED) listOf(AddonRowAction.DELETE) else emptyList()
+
     private fun addon(id: String = "addon", type: AddonType = AddonType.CUSTOM, configureUrl: String? = null) = Addon(
         id = id,
         name = "Addon",
@@ -20,14 +23,14 @@ class AddonRowActionsTest {
     @Test
     fun `configurable addon gets the settings button between toggle and delete`() {
         assertEquals(
-            listOf(AddonRowAction.TOGGLE, AddonRowAction.CONFIGURE, AddonRowAction.DELETE),
+            listOf(AddonRowAction.TOGGLE, AddonRowAction.CONFIGURE) + delete,
             addonRowActions(addon(configureUrl = "https://addon.example.com/configure"))
         )
     }
 
     @Test
     fun `addon without settings page keeps toggle and delete`() {
-        assertEquals(listOf(AddonRowAction.TOGGLE, AddonRowAction.DELETE), addonRowActions(addon()))
+        assertEquals(listOf(AddonRowAction.TOGGLE) + delete, addonRowActions(addon()))
     }
 
     @Test

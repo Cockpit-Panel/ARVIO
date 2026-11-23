@@ -51,9 +51,10 @@ object Constants {
             candidate.isBlank() || candidate.startsWith("your-", ignoreCase = true)
         } ?: ""
 
-    // TMDB direct-call credentials.
-    const val TMDB_API_KEY = "38208ec0916665e6989a1163bb362859"
-    const val TMDB_READ_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIzODIwOGVjMDkxNjY2NWU2OTg5YTExNjNiYjM2Mjg1OSIsIm5iZiI6MTU4OTE0ODMzNC45OTcsInN1YiI6IjVlYjg3YWFlYzM1MTRjMDAxZTVhN2Q5ZCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Xq8vQPnachkv69Tf2Q2up5G0Eo89RvLDEYZ-eJBsR3Q"
+    // Cockpit: TMDB direct-call credentials are hardcoded for this build.
+    // Getters (not const) so tests can still mock them like upstream.
+    val TMDB_API_KEY: String get() = "38208ec0916665e6989a1163bb362859"
+    val TMDB_READ_ACCESS_TOKEN: String get() = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIzODIwOGVjMDkxNjY2NWU2OTg5YTExNjNiYjM2Mjg1OSIsIm5iZiI6MTU4OTE0ODMzNC45OTcsInN1YiI6IjVlYjg3YWFlYzM1MTRjMDAxZTVhN2Q5ZCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.Xq8vQPnachkv69Tf2Q2up5G0Eo89RvLDEYZ-eJBsR3Q"
 
     // Optional local direct-call credentials.
     val TRAKT_CLIENT_ID: String get() = usableSecret(BuildConfig.TRAKT_CLIENT_ID)

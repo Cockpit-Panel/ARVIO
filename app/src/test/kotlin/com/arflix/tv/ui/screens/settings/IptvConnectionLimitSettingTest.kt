@@ -55,6 +55,7 @@ class IptvConnectionLimitSettingTest {
         mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
         mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
         mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+        cockpitArvioApi = mockk(relaxed = true),
         partnerDelivery = dagger.Lazy { partner }
     ).also {
         created = it
