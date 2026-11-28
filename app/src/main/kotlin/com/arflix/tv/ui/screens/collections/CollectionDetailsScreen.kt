@@ -1,5 +1,9 @@
 package com.arflix.tv.ui.screens.collections
 
+import com.arflix.tv.ui.focus.TvPivotScroll
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
+
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -55,7 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -64,11 +68,10 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.tv.foundation.lazy.grid.TvGridCells
-import androidx.tv.foundation.PivotOffsets
-import androidx.tv.foundation.lazy.grid.TvLazyVerticalGrid
-import androidx.tv.foundation.lazy.grid.itemsIndexed
-import androidx.tv.foundation.lazy.grid.rememberTvLazyGridState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import com.arflix.tv.R
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.CatalogKind
@@ -209,7 +212,13 @@ class CollectionDetailsViewModel @Inject constructor(
      * [serviceHome] lets a streaming service open as its Home-like page; the grid otherwise.
      * [serviceRowId] opens the full query for one row rather than the whole service.
      */
-    fun load(catalogId: String, serviceHome: Boolean = false, serviceRowId: String? = null, serviceFilter: String? = null) {
+    fun load(
+        catalogId: String,
+        serviceHome: Boolean = false,
+        serviceRowId: String? = null,
+        serviceFilter: String? = null,
+        touch: Boolean = false
+    ) {
         val normalizedCatalogId = normalizeCatalogId(catalogId)
         // Preserve partial and paginated data when composition is recreated during a load.
         if (loadedCatalogId == normalizedCatalogId &&
@@ -241,7 +250,8 @@ class CollectionDetailsViewModel @Inject constructor(
                 )
                 return@launch
             }
-            if (serviceHome && ServiceHome.supports(catalog)) {
+            // Touch devices keep a service's grid, but a folder of catalogs shows its rows everywhere.
+            if (serviceHome && ServiceHome.supports(catalog) && (!touch || ServiceHome.isCatalogFolder(catalog))) {
                 // ServiceHomeViewModel loads the page's rows; the grid's tabs are never needed.
                 _uiState.value = CollectionDetailsUiState(
                     catalog = catalog,
@@ -779,14 +789,24 @@ fun CollectionDetailsScreen(
     LaunchedEffect(catalogId) {
         viewModel.load(
             catalogId,
-            serviceHome = serviceRowId == null && serviceFilter == null && !isTouchDevice,
+            serviceHome = serviceRowId == null && serviceFilter == null,
             serviceRowId = serviceRowId,
-            serviceFilter = serviceFilter
+            serviceFilter = serviceFilter,
+            touch = isTouchDevice
         )
     }
     BackHandler(onBack = onBack)
 
     val serviceCatalog = uiState.catalog?.takeIf { uiState.serviceHome }
+    if (serviceCatalog != null && isTouchDevice) {
+        CollectionFolderRowsMobile(
+            folder = serviceCatalog,
+            onOpen = { item -> onNavigateToDetails(item.mediaType, item.id) },
+            onViewAll = { viewAll -> onOpenServiceGrid(serviceCatalog.id, viewAll.rowId, viewAll.filter.name) },
+            onBack = onBack
+        )
+        return
+    }
     if (serviceCatalog != null) {
         ServiceHomeScreen(
             service = serviceCatalog,
@@ -817,8 +837,8 @@ fun CollectionDetailsScreen(
             if (requested == CollectionTab.MOVIES) uiState.supportsMovies else uiState.supportsSeries
         } ?: defaultTab)
     }
-    val moviesGridState = rememberTvLazyGridState()
-    val seriesGridState = rememberTvLazyGridState()
+    val moviesGridState = rememberLazyGridState()
+    val seriesGridState = rememberLazyGridState()
     val moviesTabFocusRequester = remember { FocusRequester() }
     val seriesTabFocusRequester = remember { FocusRequester() }
     // True after the first focus has been delivered; subsequent ON_RESUME uses saved index.
@@ -1215,7 +1235,7 @@ internal fun CollectionItemsGrid(
     onBack: () -> Unit,
     items: List<MediaItem>,
     usePosterCards: Boolean,
-    gridState: androidx.tv.foundation.lazy.grid.TvLazyGridState,
+    gridState: LazyGridState,
     pendingFocusIndex: Int,
     onClearPendingFocus: () -> Unit,
     hasMovies: Boolean,
@@ -1335,13 +1355,12 @@ internal fun CollectionItemsGrid(
                 ?: previewItem?.primaryNetworkLogo,
             clearLogoUrl = cardLogoUrls["${previewItem?.mediaType}_${previewItem?.id}"]
         )
-        TvLazyVerticalGrid(
-        columns = TvGridCells.Fixed(gridColumns),
+        TvPivotScroll(parentFraction = 0f) { LazyVerticalGrid(
+        columns = GridCells.Fixed(gridColumns),
         state = gridState,
         // On TV, reveal whole rows ourselves; automatic pivot scrolling follows
         // the focus scale and fights the row animation. Touch retains native scrolling.
         userScrollEnabled = isMobile,
-        pivotOffsets = PivotOffsets(parentFraction = 0f),
         modifier = Modifier.weight(1f).fillMaxWidth().arvioDpadFocusGroup().clipToBounds()
             .testTag("collection_grid"),
         contentPadding = PaddingValues(
@@ -1353,14 +1372,14 @@ internal fun CollectionItemsGrid(
         verticalArrangement = Arrangement.spacedBy(if (usePosterCards) 18.dp else 14.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        if (isMobile) item(span = { androidx.tv.foundation.lazy.grid.TvGridItemSpan(maxLineSpan) }, contentType = "spotlight") {
+        if (isMobile) item(span = { GridItemSpan(maxLineSpan) }, contentType = "spotlight") {
             CollectionSpotlight(catalog, previewItem, true, compact, onBack,
                 providerLogoUrl = providerLogos["${previewItem?.mediaType}_${previewItem?.id}"] ?: previewItem?.primaryNetworkLogo,
                 clearLogoUrl = cardLogoUrls["${previewItem?.mediaType}_${previewItem?.id}"],
                 showBackButton = false, horizontalInset = 0.dp)
         }
         if (showTabs) item(
-            span = { androidx.tv.foundation.lazy.grid.TvGridItemSpan(maxLineSpan) },
+            span = { GridItemSpan(maxLineSpan) },
             contentType = "header"
         ) {
             CollectionTabBar(
@@ -1398,7 +1417,7 @@ internal fun CollectionItemsGrid(
             }
         } else if (items.isEmpty() && !isLoadingMore) {
             item(
-                span = { androidx.tv.foundation.lazy.grid.TvGridItemSpan(maxLineSpan) },
+                span = { GridItemSpan(maxLineSpan) },
                 contentType = "empty"
             ) {
                 CollectionEmptyState(message = emptyMessage)
@@ -1473,7 +1492,7 @@ internal fun CollectionItemsGrid(
 
         if (isLoadingMore) {
             item(
-                span = { androidx.tv.foundation.lazy.grid.TvGridItemSpan(maxLineSpan) },
+                span = { GridItemSpan(maxLineSpan) },
                 contentType = "loading_more"
             ) {
                 Box(
@@ -1490,7 +1509,7 @@ internal fun CollectionItemsGrid(
                 }
             }
         }
-    }
+    } }
     }
     }
 }

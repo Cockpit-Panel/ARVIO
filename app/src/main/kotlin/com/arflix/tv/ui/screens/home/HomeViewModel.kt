@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import com.arflix.tv.data.repository.effectiveSettingsDataStore as settingsDataStore
 import com.arflix.tv.util.traktDataStore
+import com.arflix.tv.updater.installableApk
 import com.arflix.tv.util.IPTV_FAVORITES_ON_HOME
 import com.arflix.tv.util.WATCHLIST_ON_HOME
 import androidx.compose.runtime.mutableStateMapOf
@@ -224,6 +225,35 @@ internal fun dropCategoriesMissingFromSavedCatalogs(
             category.id == HomeViewModel.FAVORITE_TV_CATEGORY_ID ||
             category.id == SportsAddonCapabilities.SPORTS_CATEGORY_ROW_ID ||
             category.id == SportsAddonCapabilities.POPULAR_LIVE_TV_ROW_ID
+    }
+}
+
+/**
+ * Brings Home's Favorite TV row in line with the stored favourites without needing the channel
+ * list: a card whose channel is no longer a favourite is dropped and the rest follow the stored
+ * order. Returns [categories] unchanged when there is no such row, and without the row when none
+ * of its channels is a favourite any more.
+ *
+ * The row is cached on disk and kept on screen whenever the channel list is still loading, so
+ * without this a removed favourite stayed on Home, across restarts, until the list was warm.
+ */
+internal fun pruneFavoriteTvRow(categories: List<Category>, favoriteIds: List<String>): List<Category> {
+    val index = categories.indexOfFirst { it.id == HomeViewModel.FAVORITE_TV_CATEGORY_ID }
+    if (index < 0) return categories
+    val row = categories[index]
+    val rank = HashMap<String, Int>(favoriteIds.size)
+    favoriteIds.forEachIndexed { i, id -> if (id.isNotBlank()) rank.putIfAbsent(id, i) }
+    fun channelIdOf(item: MediaItem): String? = item.status
+        ?.takeIf { it.startsWith(HomeViewModel.IPTV_STATUS_PREFIX) }
+        ?.removePrefix(HomeViewModel.IPTV_STATUS_PREFIX)
+    val kept = row.items
+        .filter { item -> channelIdOf(item)?.let(rank::containsKey) == true }
+        .sortedBy { item -> rank[channelIdOf(item)] ?: Int.MAX_VALUE }
+    if (kept == row.items) return categories
+    return if (kept.isEmpty()) {
+        categories.filterIndexed { i, _ -> i != index }
+    } else {
+        categories.toMutableList().also { it[index] = row.copy(items = kept) }
     }
 }
 
@@ -557,6 +587,7 @@ class HomeViewModel @Inject constructor(
         const val FAVORITE_TV_CATEGORY_ID = "favorite_tv"
         /** Unfiltered titles a kids top-up may load for one grid before it gives up. */
         private const val MAX_KIDS_TOP_UP_ITEMS = 600
+        internal const val HOME_RAIL_MAX_ITEMS = 60
         /** Prefix used in MediaItem.status to identify IPTV items. */
         const val IPTV_STATUS_PREFIX = "iptv:"
         private const val TOP_10_ITEM_LIMIT = 10
@@ -1481,6 +1512,46 @@ class HomeViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(categories = categories.filterNot { it.id == FAVORITE_TV_CATEGORY_ID })
     }
 
+    /** The active profile's favourite channel ids, straight from settings; null if unreadable. */
+    private suspend fun readStoredFavoriteChannelIds(): List<String>? = runCatching {
+        iptvRepository.observeFavoriteChannels().first().filter { it.isNotBlank() }
+    }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+
+    /**
+     * A channel was starred or unstarred (in Live TV, on another device, or by a cloud restore).
+     * Removals show at once from the stored list alone; the row is then rebuilt when the
+     * channels can be read, so a new favourite appears too. The disk cache is rewritten so a
+     * restart does not bring back the old row.
+     */
+    private suspend fun onFavoriteChannelsChanged(favoriteIds: List<String>) {
+        val ids = favoriteIds.filter { it.isNotBlank() }
+        val before = _uiState.value.categories
+        val pruned = pruneFavoriteTvRow(before, ids)
+        if (pruned !== before) {
+            _uiState.value = _uiState.value.copy(categories = pruned)
+        }
+        val outcome = withContext(Dispatchers.IO) {
+            runCatching { buildFavoriteTvOutcome() }.getOrDefault(FavoriteTvOutcome.Unavailable)
+        }
+        when (outcome) {
+            is FavoriteTvOutcome.Available -> {
+                val cfg = savedCatalogById[FAVORITE_TV_CATEGORY_ID]
+                val titled = if (cfg != null && cfg.title.isNotBlank()) {
+                    outcome.category.copy(title = cfg.title)
+                } else {
+                    outcome.category
+                }
+                updateMobileCategoryRow(FAVORITE_TV_CATEGORY_ID, titled)
+            }
+            FavoriteTvOutcome.Empty -> removeFavoriteTvRow()
+            FavoriteTvOutcome.Unavailable -> Unit
+        }
+        if (_uiState.value.categories !== before) {
+            val snapshot = _uiState.value.categories
+            withContext(Dispatchers.IO) { runCatching { persistCategoriesCache(snapshot) } }
+        }
+    }
+
     /**
      * The Favorite TV row's now/next only shows on a focused card, so it is brought up to date
      * when focus reaches the row, not on a timer. A Home screen left open used to download the
@@ -1696,6 +1767,8 @@ class HomeViewModel @Inject constructor(
     }
     val cardLogoUrls = mutableStateMapOf<String, String>()
     val cardImdbRatings = mutableStateMapOf<String, String>()
+    /** Hero artwork without baked-in title text: "<type>_<id>:poster" / ":backdrop" to a URL. */
+    val heroTextlessArt = mutableStateMapOf<String, String>()
 
     // Debounce job for hero updates (Phase 6.1)
     private var heroUpdateJob: Job? = null
@@ -1763,10 +1836,8 @@ class HomeViewModel @Inject constructor(
     private val initialCategoryItemCap = if (isLowRamDevice) 8 else 10
     private val categoryPageSize = if (isLowRamDevice) 8 else 10
     private val initialMdblistCatalogCount = 1
-    private val nearEndThreshold = 4
-    // Home rails stop auto-paging here so their trailing "View all" card stays reachable
-    // with the D-pad; the rest of the catalog pages in the "View all" grid.
-    private val homeRowAutoPageLimit = 60
+    // About one page ahead, so a held D-pad never reaches the end before the next page arrives.
+    private val nearEndThreshold = 12
 
     // Track current focus for ahead-of-focus preloading
     private var currentRowIndex = 0
@@ -2256,6 +2327,14 @@ class HomeViewModel @Inject constructor(
                 .collectLatest { rebuildFavoriteTvAfterSourceChange() }
         }
 
+        // Starring or unstarring a channel must update the Favorite TV row (and its disk cache).
+        viewModelScope.launch {
+            iptvRepository.observeFavoriteChannels()
+                .distinctUntilChanged()
+                .drop(1)
+                .collectLatest { onFavoriteChannelsChanged(it) }
+        }
+
         // Keep Home preferences bound to the active profile. Cloud restore and profile
         // switching can update DataStore after this ViewModel has already been created.
         viewModelScope.launch {
@@ -2471,6 +2550,14 @@ class HomeViewModel @Inject constructor(
                         cached,
                         runCatching { catalogRepository.getCatalogs() }.getOrNull()
                     )
+                }.let { cached ->
+                    // A favourite removed after the cache was written must not come back from it.
+                    val favoriteIds = if (cached.any { it.id == FAVORITE_TV_CATEGORY_ID }) {
+                        readStoredFavoriteChannelIds()
+                    } else {
+                        null
+                    }
+                    if (favoriteIds == null) cached else pruneFavoriteTvRow(cached, favoriteIds)
                 }
                 // Gate on "no real BASE rows yet", not "no categories at all": Continue Watching
                 // is restored from its own cache by a coroutine launched alongside this one, and
@@ -2526,10 +2613,12 @@ class HomeViewModel @Inject constructor(
         // resolveContinueWatchingItems call (which saves Trakt-only data to the cache).
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // Read after the preload: its dismissal pass drops stamps that newer progress beat.
+                val preloaded = preloadStartupContinueWatchingItems()
                 val dismissedKeys = runCatching {
                     traktRepository.getDismissedContinueWatchingShowKeys()
                 }.getOrDefault(emptySet())
-                val cached = preloadStartupContinueWatchingItems().filterNot { item ->
+                val cached = preloaded.filterNot { item ->
                     dismissedKeys.contains("${item.mediaType.name}:${item.id}")
                 }
                 if (cached.isNotEmpty()) {
@@ -3178,6 +3267,11 @@ class HomeViewModel @Inject constructor(
                     runCatching { buildFavoriteTvOutcome() }
                         .getOrDefault(FavoriteTvOutcome.Unavailable)
                 }
+                val storedFavoriteIds = if (favoriteTvOutcome == FavoriteTvOutcome.Unavailable) {
+                    withContext(Dispatchers.IO) { readStoredFavoriteChannelIds() }
+                } else {
+                    null
+                }
 
                 var loadedFreshCatalogRows = false
                 var categories = withContext(networkDispatcher) {
@@ -3223,7 +3317,14 @@ class HomeViewModel @Inject constructor(
                             is FavoriteTvOutcome.Available ->
                                 put(FAVORITE_TV_CATEGORY_ID, favoriteTvOutcome.category)
                             FavoriteTvOutcome.Empty -> remove(FAVORITE_TV_CATEGORY_ID)
-                            FavoriteTvOutcome.Unavailable -> Unit
+                            // The channels can't be read yet, but the favourites can: a kept
+                            // row still loses the cards that are no longer favourites.
+                            FavoriteTvOutcome.Unavailable -> get(FAVORITE_TV_CATEGORY_ID)?.let { row ->
+                                if (storedFavoriteIds == null) return@let
+                                val pruned = pruneFavoriteTvRow(listOf(row), storedFavoriteIds).firstOrNull()
+                                if (pruned == null) remove(FAVORITE_TV_CATEGORY_ID)
+                                else put(FAVORITE_TV_CATEGORY_ID, pruned)
+                            }
                         }
                     }
 
@@ -3814,6 +3915,24 @@ class HomeViewModel @Inject constructor(
     fun preloadImdbRatingsForHeroItems(items: List<MediaItem>) {
         preloadLogosForCategoryItems(items)
         viewModelScope.launch(networkDispatcher) {
+            items.filter { isActionableMediaItem(it) && !isIptvItem(it) && it.id > 0 }.forEach { item ->
+                val key = "${item.mediaType}_${item.id}"
+                if (heroTextlessArt.containsKey("$key:checked")) return@forEach
+                try {
+                    val art = tmdbPriorityDispatcher.withPermit(Priority.BACKGROUND) {
+                        mediaRepository.getTextlessArtwork(item.mediaType, item.id)
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        heroTextlessArt["$key:checked"] = ""
+                        art?.posterPath?.let { heroTextlessArt["$key:poster"] = com.arflix.tv.util.Constants.IMAGE_BASE + it }
+                        art?.backdropPath?.let { heroTextlessArt["$key:backdrop"] = com.arflix.tv.util.Constants.BACKDROP_BASE + it }
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                }
+            }
+        }
+        viewModelScope.launch(networkDispatcher) {
             items.filter { isActionableMediaItem(it) && !isIptvItem(it) }.forEach { item ->
                 val key = "${item.mediaType}_${item.id}"
                 if (!cardImdbRatings.containsKey(key)) {
@@ -3822,6 +3941,7 @@ class HomeViewModel @Inject constructor(
                         if (!rating.isNullOrBlank()) {
                             withContext(Dispatchers.Main.immediate) {
                                 cardImdbRatings[key] = rating
+                                com.arflix.tv.ui.components.CardRatings.put(item.mediaType, item.id, rating)
                             }
                         }
                     } catch (e: Exception) {
@@ -4192,12 +4312,14 @@ class HomeViewModel @Inject constructor(
         loadNextHomeRowPage(categoryId)
     }
 
-    /** Next page for a home rail, capped at [homeRowAutoPageLimit] for rows that end in "View all". */
+    /**
+     * Next page for a home rail. A rail stops growing at [HOME_RAIL_MAX_ITEMS] titles so its
+     * trailing "View all" card stays reachable: with endless paging the card kept moving away
+     * as new posters arrived. The "View all" grid itself still pages through the whole catalog.
+     */
     fun loadNextHomeRowPage(categoryId: String) {
         val category = _uiState.value.categories.firstOrNull { it.id == categoryId } ?: return
-        val realCount = category.items.count { !it.isPlaceholder }
-        val hasMore = _uiState.value.categoryHasMoreMap[categoryId] == true
-        if (realCount >= homeRowAutoPageLimit && homeRowSupportsViewAll(category, hasMore)) return
+        if (category.items.count { !it.isPlaceholder } >= HOME_RAIL_MAX_ITEMS) return
         loadNextPageForCategory(categoryId)
     }
 
@@ -4666,10 +4788,31 @@ class HomeViewModel @Inject constructor(
     private val cloudPullThrottleMs = 30_000L
     private var cloudPullJob: Job? = null
 
-    fun pullCloudStateOnResume() {
-        val now = android.os.SystemClock.elapsedRealtime()
+    /**
+     * Called about once a minute while Home is on screen. With cloud sync there is no live channel,
+     * so a change another device saved (progress, watchlist, addons, settings) would otherwise wait
+     * for the next resume. This asks the server whether the account document changed, which downloads
+     * nothing, and pulls only when it did.
+     */
+    fun checkForRemoteCloudChange() {
         if (cloudPullJob?.isActive == true) return
-        if (lastCloudPullTimestamp != 0L && now - lastCloudPullTimestamp < cloudPullThrottleMs) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val changed = runCatching { cloudSyncRepository.remoteChangedSinceLastCheck() }
+                .getOrElse { if (it is CancellationException) throw it else false }
+            // A change is remembered until a pull really starts, so it is not lost to a pull in flight.
+            if (changed) remoteChangePending = true
+            if (remoteChangePending && pullCloudStateOnResume(force = true)) remoteChangePending = false
+        }
+    }
+
+    @Volatile
+    private var remoteChangePending = false
+
+    /** Returns true when a pull was started. */
+    fun pullCloudStateOnResume(force: Boolean = false): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (cloudPullJob?.isActive == true) return false
+        if (!force && lastCloudPullTimestamp != 0L && now - lastCloudPullTimestamp < cloudPullThrottleMs) return false
         lastCloudPullTimestamp = now
         cloudPullJob = viewModelScope.launch(Dispatchers.IO) {
             // Give the local Home/CW snapshots first access to IO and the main
@@ -4691,6 +4834,8 @@ class HomeViewModel @Inject constructor(
             val result = runCatching {
                 cloudSyncRepository.pullFromCloud()
             }
+            // This pull already brought in whatever the server holds now.
+            if (result.isSuccess) runCatching { cloudSyncRepository.rememberRemoteRevision() }
             result.onSuccess { restoreResult ->
                 if (restoreResult == CloudSyncRepository.RestoreResult.RESTORED) {
                     val profileId = profileManager.getProfileIdSync().ifBlank { "default" }
@@ -4708,6 +4853,7 @@ class HomeViewModel @Inject constructor(
                 android.util.Log.w("HomeViewModel", "ON_RESUME cloud pull failed: ${it.message}")
             }
         }
+        return true
     }
 
     fun refreshContinueWatchingOnly(force: Boolean = false) {
@@ -5680,6 +5826,22 @@ class HomeViewModel @Inject constructor(
         )
     }
 
+    /** A title just marked watched leaves the row at once, like an episode does. */
+    private fun removeFromContinueWatchingRow(item: MediaItem) {
+        val updated = _uiState.updateAndGet { state ->
+            state.copy(
+                categories = state.categories.map { category ->
+                    if (category.id == "continue_watching") {
+                        category.copy(items = category.items.filterNot { it.id == item.id && it.mediaType == item.mediaType })
+                    } else {
+                        category
+                    }
+                }.filter { category -> category.id != "continue_watching" || category.items.isNotEmpty() }
+            )
+        }
+        lastContinueWatchingItems = updated.categories.firstOrNull { it.id == "continue_watching" }?.items.orEmpty()
+    }
+
     fun toggleWatched(item: MediaItem) {
         viewModelScope.launch {
             try {
@@ -5692,6 +5854,7 @@ class HomeViewModel @Inject constructor(
                             toastType = ToastType.SUCCESS
                         )
                     } else {
+                        removeFromContinueWatchingRow(item)
                         traktRepository.markMovieWatched(item.id)
                         refreshWatchedBadgesAfterMark()
                         watchHistoryRepository.removeFromHistory(item.id, null, null)
@@ -5772,6 +5935,7 @@ class HomeViewModel @Inject constructor(
             try {
                 if (item.mediaType == MediaType.MOVIE) {
                     if (!item.isWatched) {
+                        removeFromContinueWatchingRow(item)
                         traktRepository.markMovieWatched(item.id)
                         watchHistoryRepository.removeFromHistory(item.id, null, null)
                         _uiState.value = _uiState.value.copy(
@@ -6006,11 +6170,7 @@ class HomeViewModel @Inject constructor(
     }
 
     fun installAppUpdateOrRequestPermission() {
-        val currentStatus = updateStatusManager.status.value
-        if (currentStatus !is com.arflix.tv.updater.UpdateStatus.ReadyToInstall && currentStatus !is com.arflix.tv.updater.UpdateStatus.Failure) return
-
-        val apkPath = if (currentStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall) currentStatus.apkPath else return
-        val update = currentStatus.update
+        val (apkPath, update) = updateStatusManager.status.value.installableApk() ?: return
         val apkFile = java.io.File(apkPath)
 
         if (!apkFile.exists()) {
@@ -6018,24 +6178,40 @@ class HomeViewModel @Inject constructor(
             return
         }
 
+        // Ask for "install unknown apps" before copying the APK, not after: otherwise Android
+        // refuses only once the copy is done. The install continues when the screen comes back.
         if (!com.arflix.tv.updater.ApkInstaller.canRequestPackageInstalls(context)) {
-            // If we can't request package installs, we should let the user know, but for now
-            // launchInstall handles falling back to Intent.ACTION_VIEW
+            val intent = com.arflix.tv.updater.ApkInstaller.buildUnknownSourcesSettingsIntent(context)
+            if (intent != null) {
+                updateStatusManager.awaitInstallPermission()
+                if (runCatching { context.startActivity(intent) }.isSuccess) return
+                updateStatusManager.takeInstallAfterPermission()
+            }
         }
 
-        val conflictMsg = com.arflix.tv.updater.ApkInstaller.checkSignatureConflict(context, apkFile)
-        if (conflictMsg != null) {
-            updateStatusManager.updateStatus(com.arflix.tv.updater.UpdateStatus.Failure(conflictMsg, update))
-            return
-        }
-
-        com.arflix.tv.updater.ApkInstaller.launchInstall(context, apkFile)
-        updateStatusManager.updateStatus(com.arflix.tv.updater.UpdateStatus.Installing(update))
-
-        // Mark this release as ignored so it doesn't pop up again if the user cancels the install
+        // Shows at once; checking the APK's signature reads the whole file, off the main thread.
+        updateStatusManager.updateStatus(
+            com.arflix.tv.updater.UpdateStatus.Installing(update, preparing = 0f, apkPath = apkPath)
+        )
         viewModelScope.launch {
+            val conflictMsg = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                com.arflix.tv.updater.ApkInstaller.checkSignatureConflict(context, apkFile)
+            }
+            if (conflictMsg != null) {
+                updateStatusManager.updateStatus(com.arflix.tv.updater.UpdateStatus.Failure(conflictMsg, update))
+                return@launch
+            }
+            com.arflix.tv.updater.ApkInstaller.launchInstall(context, apkFile)
+            // Mark this release as ignored so it doesn't pop up again if the user cancels the install
             updatePreferences.setIgnoredTag(update.tag)
         }
+    }
+
+    /** Home is back on screen: continue an install that was waiting for the permission. */
+    fun continueInstallAfterPermission() {
+        if (!updateStatusManager.takeInstallAfterPermission()) return
+        if (!com.arflix.tv.updater.ApkInstaller.canRequestPackageInstalls(context)) return
+        installAppUpdateOrRequestPermission()
     }
 
     fun dismissAppUpdateDialog() {

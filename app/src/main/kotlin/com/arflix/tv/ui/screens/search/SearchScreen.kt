@@ -90,7 +90,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -181,7 +181,8 @@ fun SearchScreen(
     val hasSearchResults = uiState.movieResults.isNotEmpty() || uiState.tvResults.isNotEmpty() || uiState.personResults.isNotEmpty()
     val hasAiResults = uiState.isAiSearch && uiState.aiResults.isNotEmpty()
     val searchTopResults = uiState.results
-    // The on-demand YouTube row goes first; it also shows when nothing else was found.
+    // The on-demand YouTube row goes first on TV; it also shows when nothing else was found.
+    // On phones and tablets the real results come first and YouTube follows them.
     val youTubeRow = youTubeSearchCategory(
         state = uiState,
         available = viewModel.youTubeSearchAvailable,
@@ -193,11 +194,15 @@ fun SearchScreen(
     val activeCategories: List<Category> = when {
         hasSearchResults || youTubeRow != null -> {
             val list = mutableListOf<Category>()
-            youTubeRow?.let(list::add)
-            if (searchTopResults.isNotEmpty()) list.add(Category("s_all", "${stringResource(R.string.search)} (${searchTopResults.size})", searchTopResults))
+            val topResultsTitle = if (isTouchDevice) stringResource(R.string.search_top_results)
+                else "${stringResource(R.string.search_top_results)} (${searchTopResults.size})"
+            if (searchTopResults.isNotEmpty()) list.add(Category("s_all", topResultsTitle, searchTopResults))
+            // On TV the YouTube row follows the top results, so the real results open first.
+            if (!isTouchDevice) youTubeRow?.let(list::add)
             if (uiState.movieResults.isNotEmpty()) list.add(Category("s_m", "${stringResource(R.string.movies)} (${uiState.movieResults.size})", uiState.movieResults))
             if (uiState.tvResults.isNotEmpty()) list.add(Category("s_t", "${stringResource(R.string.tv_shows)} (${uiState.tvResults.size})", uiState.tvResults))
             list.addAll(uiState.personResults)
+            if (isTouchDevice) youTubeRow?.let(list::add)
             list
         }
         uiState.query.isEmpty() -> uiState.discoverCategories.filter { it.items.isNotEmpty() }
@@ -819,7 +824,7 @@ fun SearchScreen(
                         FocusZone.PANEL -> false
                         FocusZone.SIDEBAR -> {
                             if (hasProfile && sidebarFocusIndex == 0) onSwitchProfile()
-                            else when (topBarFocusedItem(sidebarFocusIndex, hasProfile)) { SidebarItem.SEARCH -> Unit; SidebarItem.HOME -> onNavigateToHome(); SidebarItem.WATCHLIST -> onNavigateToWatchlist(); SidebarItem.TV -> onNavigateToTv(); SidebarItem.SETTINGS -> onNavigateToSettings(); null -> Unit }
+                            else when (topBarFocusedItem(sidebarFocusIndex, hasProfile)) { SidebarItem.SEARCH -> Unit; SidebarItem.HOME -> onNavigateToHome(); SidebarItem.WATCHLIST -> onNavigateToWatchlist(); SidebarItem.TV -> onNavigateToTv(); SidebarItem.NEWS -> com.arflix.tv.ui.components.NewsNavigation.open(); SidebarItem.MUSIC -> com.arflix.tv.ui.components.MusicNavigation.open(); SidebarItem.SETTINGS -> onNavigateToSettings(); null -> Unit }
                             true
                         }
                         FocusZone.SEARCH_INPUT -> {
@@ -966,7 +971,8 @@ fun SearchScreen(
                         viewModel.searchRecent(query)
                     },
                     onClear = viewModel::clearRecentSearches,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                    // Phones line the row up with the search field and results instead of centring it.
+                    modifier = if (isTouchDevice) Modifier.fillMaxWidth() else Modifier.align(Alignment.CenterHorizontally),
                     focusRequester = if (isTouchDevice) null else recentFocusRequester
                 )
             }
@@ -1260,6 +1266,8 @@ private fun SearchInputBar(
                         .clip(CircleShape)
                         .background(if (isClearFocused) Color.White else Color.White.copy(alpha = 0.08f))
                         .semantics { onClick { onClear(); true } }
+                        // Touch has no D-pad handler to press it for us.
+                        .then(if (isTouchDevice) Modifier.clickable { onClear() } else Modifier)
                         .testTag("search-clear")
                 ) {
                     Icon(
@@ -1295,6 +1303,7 @@ private fun SearchInputBar(
                             }
                         )
                         .semantics { onClick { onMic(); true } }
+                        .then(if (isTouchDevice) Modifier.clickable { onMic() } else Modifier)
                         .testTag("search-voice")
                 ) {
                     Icon(
@@ -1371,7 +1380,7 @@ private fun RowsLayer(
             modifier = Modifier.fillMaxSize().arvioDpadFocusGroup(),
             verticalArrangement = Arrangement.spacedBy(if (isTouchDevice) 20.dp else 0.dp)
         ) {
-            items(categories.size, key = { categories[it].id }) { index ->
+            items(categories.size, key = { categories[it].id }, contentType = { "SearchScreen.categories" }) { index ->
                 val category = categories[index]
                 val isCurrentRow = !isTouchDevice && isFocused && index == currentRowIndex
                 val rowKey = remember(category.id) { "search:${category.id}" }
@@ -1411,14 +1420,12 @@ private fun RowsLayer(
                             Text(
                                 localizedDiscoverRowTitle(category),
                                 style = if (isTouchDevice) {
+                                    // Same row title as the phone Home screen.
                                     ArflixTypography.sectionTitle.copy(
-                                        fontSize = 16.sp,
+                                        fontSize = 20.sp,
+                                        lineHeight = 26.sp,
                                         fontWeight = FontWeight.Bold,
-                                        shadow = Shadow(
-                                            color = Color.Black.copy(alpha = 0.8f),
-                                            offset = Offset(1f, 1f),
-                                            blurRadius = 4f
-                                        )
+                                        letterSpacing = (-0.2).sp
                                     )
                                 } else {
                                     ArvioSkin.typography.sectionTitle.copy(fontSize = 15.sp)
@@ -1468,7 +1475,7 @@ private fun RowsLayer(
                             },
                             horizontalArrangement = Arrangement.spacedBy(if (isTouchDevice) 14.dp else 18.dp)
                         ) {
-                            itemsIndexed(category.items, key = { _, item -> "${item.mediaType}_${item.id}" }) { itemIdx, item ->
+                            itemsIndexed(category.items, key = { _, item -> "${item.mediaType}_${item.id}" }, contentType = { _, _ -> "SearchScreen.category" }) { itemIdx, item ->
                                 val itemIsFocused = !isTouchDevice && isCurrentRow && itemIdx == currentItemIndex
                                 MediaCard(
                                     item = item.copy(
@@ -1601,7 +1608,7 @@ private fun ContentGrid(
         verticalArrangement = Arrangement.spacedBy(if (isTouchDevice) 18.dp else 26.dp),
         modifier = modifier.fillMaxSize().arvioDpadFocusGroup()
     ) {
-        items(items.size, key = { "${items[it].mediaType}_${items[it].id}" }) { idx ->
+        items(items.size, key = { "${items[it].mediaType}_${items[it].id}" }, contentType = { "SearchScreen.items" }) { idx ->
             val item = items[idx]
             val itemIsFocused = manualFocusIndex != null && isZoneFocused && idx == manualFocusIndex
             MediaCard(
@@ -1626,7 +1633,7 @@ private fun ContentGrid(
             )
         }
         if (loadFailed || scanPaused) {
-            item(key = "discover_retry", span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "discover_retry", span = { GridItemSpan(maxLineSpan) }, contentType = "SearchScreen.discover_retry") {
                 val retryFocused = isZoneFocused && manualFocusIndex == items.size
                 Text(
                     text = if (loadFailed) stringResource(R.string.search_discover_load_failed) + " · " + stringResource(R.string.retry)
@@ -1641,7 +1648,7 @@ private fun ContentGrid(
             }
         }
         if (isLoading) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(span = { GridItemSpan(maxLineSpan) }, contentType = "SearchScreen.span") {
                 Box(Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) { LoadingIndicator(color = Pink, size = 32.dp) }
             }
         }

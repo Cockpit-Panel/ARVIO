@@ -1,4 +1,5 @@
 // Part of the player overlay (see components/player/PlayerOverlay.tsx).
+import { recordSourceOutcome } from "@/lib/sourceReliability";
 import type { MediaItem, StreamSource, AppSettings, InstalledAddon } from "@/lib/types";
 import { useTranslation } from "@/lib/i18n";
 import { useRef, useMemo, useCallback, useState, useEffect } from "react";
@@ -12,6 +13,8 @@ import { subtitleLanguageName, SubtitleTranslator } from "@/lib/subtitleAi";
 import { trackLanguageName, languageCode } from "@/lib/languages";
 import { trackPremiumAttempt, trackPremiumDaily, trackPremiumMilestone, trackPremiumEvent } from "@/lib/premiumAnalytics";
 import { playbackAttemptDetail } from "@/lib/playbackTelemetry";
+import { fileMbps, recordPlaybackSample } from "@/lib/connectionBudget";
+import { readTally, recordStall, recordStart, startupBucket, subtractReported, tallyMetadata } from "@/lib/playbackStartStats";
 import { parseDebridStream, cachedDebridDirectUrl, resolveDebridDirectUrl, isUncachedDebridStream } from "@/lib/debrid";
 import { type SubtitleLoadState, groupSubtitles, positionSubtitleCues } from "@/lib/playerSubtitles";
 import type { RemuxAudioTrack } from "@/lib/remux";
@@ -20,7 +23,7 @@ import { canTryRemux, recordBrowserPlaybackFailure, canProviderTranscode, stream
 import { rememberSuccessfulSource } from "@/lib/autoplaySelection";
 import { markHomeScreenTipEligible } from "@/lib/homeScreenTip";
 import { isAudioOnlySource, monitorAudioDecode, monitorVideoFrames, monitorPlaybackStall, bufferedEndAt, bufferedAhead } from "@/lib/playerRecovery";
-import { streamSizeBytes, groupSourcesForPlayback } from "@/lib/sourceRank";
+import { streamSizeBytes, groupSourcesForPlayback, browserAudioClass } from "@/lib/sourceRank";
 import { getLogoUrl } from "@/lib/tmdb";
 import { browserAutoplayCandidates } from "@/lib/browserAutoplay";
 import { prefersVideoElementFullscreen, requestVideoFullscreen } from "@/lib/fullscreen";
@@ -33,9 +36,15 @@ import { usePlaybackEngine } from "./usePlaybackEngine";
 import { useProgressTracking } from "./useProgressTracking";
 import { usePlatformControls } from "./usePlatformControls";
 import { usePlayerKeys } from "./usePlayerKeys";
+import { useScreenWakeLock } from "./useScreenWakeLock";
+import { loadTrickplay, type Trickplay } from "@/lib/trickplay";
 import { useSkipAndUpNext, PlayerSkipUpNext } from "./skipUpNext";
 import { LiveDockControls, PlayerTopBar, PlayerControlsBar } from "./PlayerControls";
 import { PlayerStatusLayers, PlayerEndScreen } from "./PlayerScreens";
+
+// Chromium decodes a playable audio track within the first second of playback;
+// 2.5 s of picture with zero decoded audio bytes means the track is unsupported.
+const SILENT_AUDIO_GRACE_MS = 2_500;
 import { PlayerSidePanel } from "./PlayerPanels";
 
 export function VideoPlayer({
@@ -56,6 +65,7 @@ export function VideoPlayer({
   canAdvance,
   onSelectStream: selectStream,
   onAdvance: advance,
+  onPrefetchNext,
   onToast,
   onClose: close
 }: {
@@ -78,6 +88,8 @@ export function VideoPlayer({
   canAdvance: boolean;
   onSelectStream: (stream: StreamSource, options?: { forceTranscode?: boolean; forceRemux?: boolean; forceBrowser?: boolean }) => void;
   onAdvance: () => Promise<boolean>;
+  /** Look the next episode's sources up while Up next shows, so advancing starts at once. */
+  onPrefetchNext?: () => Promise<void> | void;
   onToast: (message: string) => void;
   onClose: () => void;
 }) {
@@ -319,7 +331,7 @@ export function VideoPlayer({
           probeUrl = resolved.url;
         }
         if (controller.signal.aborted) return;
-        const prepared = await probeAndPrepareRemux(probeUrl, current.behaviorHints?.proxyHeaders?.request, settings.audioLanguage, { signal: controller.signal });
+        const prepared = await probeAndPrepareRemux(probeUrl, current.behaviorHints?.proxyHeaders?.request, settings.secondaryAudioLanguage ? `${settings.audioLanguage || ""},${settings.secondaryAudioLanguage}` : settings.audioLanguage, { signal: controller.signal });
         if (!prepared) throw new Error("Could not read audio tracks");
         if (!controller.signal.aborted) {
           setRemuxTracks(prepared.probe.audioTracks);
@@ -331,29 +343,85 @@ export function VideoPlayer({
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveTv, settings.audioLanguage]);
+  }, [liveTv, settings.audioLanguage, settings.secondaryAudioLanguage]);
 
+  // Startup time runs from opening a title (or the next episode) to its first
+  // frame; source hops, URL refreshes and restarts in between count as part of
+  // the wait, never as another start. null = this title's start is counted.
+  const startupClockRef = useRef<number | null>(typeof performance === "undefined" ? 0 : performance.now());
+  const startKey = `${item?.mediaType ?? ""}:${item?.id ?? ""}:${selectedEpisode?.season ?? item?.seasonNumber ?? ""}:${selectedEpisode?.episode ?? item?.episodeNumber ?? ""}`;
+  const countedKeyRef = useRef(startKey);
+  useEffect(() => {
+    if (countedKeyRef.current === startKey) return;
+    countedKeyRef.current = startKey;
+    startupClockRef.current = performance.now();
+  }, [startKey]);
   useEffect(() => {
     setBooted(false);
     const video = videoRef.current;
     if (!video) return undefined;
     const onReady = () => setBooted(true);
     void trackPremiumDaily(authClient, "playback_requested", { playback_type: liveTv ? "live" : "vod" });
+    let started = false;
+    let seekedAt = 0;
+    // This session's evidence for connectionBudget: minutes watched and stalls.
+    let watched = 0;
+    let lastTime = -1;
+    let sessionStalls = 0;
+    let sampled = false;
+    const sessionStream = stream;
+    const onSeeking = () => { seekedAt = performance.now(); lastTime = -1; };
+    // A stall = buffering after the first frame that no seek explains.
+    const onWaiting = () => {
+      if (started && !liveTv && !video.seeking && performance.now() - seekedAt > 1500) { recordStall(); sessionStalls += 1; }
+    };
+    const onTimeUpdate = () => {
+      const now = video.currentTime;
+      if (lastTime >= 0 && !video.paused && now > lastTime && now - lastTime < 2) watched += now - lastTime;
+      lastTime = now;
+    };
+    const sampleConnection = () => {
+      if (sampled || liveTv || !started || sessionStream.transcoded || streamTransport(sessionStream) !== "file") return;
+      sampled = true;
+      recordPlaybackSample(fileMbps(streamSizeBytes(sessionStream), video.duration), watched, sessionStalls);
+    };
     const onPlaying = () => {
       onReady();
       void trackPremiumMilestone(authClient, "first_playback", { playback_type: liveTv ? "live" : "vod" });
-      void trackPremiumDaily(authClient, "playback_started", { playback_type: liveTv ? "live" : "vod" });
+      if (!started && startupClockRef.current !== null) {
+        const stream = currentStreamRef.current;
+        const detail = playbackAttemptDetail(stream, { liveTv, debrid: Boolean(parseDebridStream(stream.originalUrl ?? stream.url)) });
+        const elapsed = performance.now() - startupClockRef.current;
+        startupClockRef.current = null;
+        // Earlier film/series starts ride along on the one daily event; this
+        // start joins the tally after. Channel zapping is not counted.
+        const earlier = liveTv ? {} : tallyMetadata(readTally());
+        void trackPremiumDaily(authClient, "playback_started", { playback_type: liveTv ? "live" : "vod", ...detail, startup: startupBucket(elapsed), ...earlier },
+          undefined, () => subtractReported(earlier));
+        if (!liveTv) recordStart(detail.method, elapsed);
+      }
+      started = true;
       if (!liveTv) {
         // Autoplay waits briefly for this addon next time (see autoplaySelection).
         rememberSuccessfulSource(currentStreamRef.current);
+        recordSourceOutcome(currentStreamRef.current, true);
         markHomeScreenTipEligible();
       }
     };
     video.addEventListener("playing", onPlaying);
     video.addEventListener("loadeddata", onReady);
+    video.addEventListener("seeking", onSeeking);
+    video.addEventListener("waiting", onWaiting);
+    video.addEventListener("timeupdate", onTimeUpdate);
+    window.addEventListener("pagehide", sampleConnection);
     return () => {
+      sampleConnection();
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      window.removeEventListener("pagehide", sampleConnection);
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("loadeddata", onReady);
+      video.removeEventListener("seeking", onSeeking);
+      video.removeEventListener("waiting", onWaiting);
     };
   }, [stream.url, remuxRestartKey, liveTv]);
 
@@ -394,6 +462,15 @@ export function VideoPlayer({
     return monitorAudioDecode(video, () => {
       const playhead = video.currentTime;
       if (playhead > 5) resumeAtRef.current = playhead;
+      // An automatic pick went silent and the list holds a release whose audio
+      // is known to play here (AAC/Opus): switch to it at once. Converting a
+      // 30-60 GB disc rip's audio in the browser is slow and, for TrueHD, often
+      // fails only after another wait.
+      if (stream.autoSelect && hasKnownBrowserAudioAlternative(stream)) {
+        video.pause();
+        failureDiagnosticRef.current = { failure_kind: "format", phase: "playback" };
+        if (tryNextSource()) return;
+      }
       if (canTryRemux(stream)) {
         onToast("This file's audio can't play directly in this browser. Converting the audio…");
         onSelectStream({ ...stream, convertAudio: true }, { forceRemux: true, forceBrowser: true });
@@ -408,7 +485,7 @@ export function VideoPlayer({
       failureDiagnosticRef.current = { failure_kind: "format", phase: "playback" };
       if (tryNextSource()) return;
       onToast("This source's audio can't play in this browser. Choose another source or use an external player.");
-    });
+    }, SILENT_AUDIO_GRACE_MS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [booted, stream.url, stream.remux, remuxRestartKey, liveTv]);
 
@@ -524,6 +601,7 @@ export function VideoPlayer({
     const addonKey = current.addonId || current.addonName || "";
     if (addonKey) failedAddonStrikesRef.current.set(addonKey, (failedAddonStrikesRef.current.get(addonKey) ?? 0) + 1);
     recordBrowserPlaybackFailure(current, "This source failed during browser playback", true);
+    recordSourceOutcome(current, false);
     const pick = (skipStruckAddons: boolean) => browserAutoplayCandidates(sourceListRef.current, failedSourceUrlsRef.current).find((candidate) => {
       if (!candidate.url || failedSourceUrlsRef.current.has(candidate.url)) return false;
       // Uncached debrid torrents would stall on a server-side download.
@@ -546,6 +624,10 @@ export function VideoPlayer({
     onSelectStream({ ...next, autoSelect: true, resumePositionSeconds: resumeAtRef.current }, { forceBrowser: true });
     return true;
   }, [liveTv, onSelectStream, onToast, reportFailedAttempt]);
+  // Whether an untried candidate's release names audio this browser decodes.
+  const hasKnownBrowserAudioAlternative = useCallback((current: StreamSource) => browserAutoplayCandidates(sourceListRef.current, failedSourceUrlsRef.current)
+    .some((candidate) => candidate.url !== current.url && candidate.url !== current.originalUrl && !isUncachedDebridStream(candidate)
+      && streamPlayability(candidate).mode === "direct" && browserAudioClass(candidate) === "ok"), []);
   const badges = useMemo(() => {
     if (liveTv) return ["LIVE"];
     const base = qualityBadges(stream);
@@ -754,7 +836,7 @@ export function VideoPlayer({
     });
   }, [onToast]);
 
-  const { pipAvailable, pipActive, airPlayAvailable, airPlayAllowed, togglePip } = usePlatformControls({ canAdvance, item, liveTv, onAdvance, onToast, seekBy, stream, subtitleLabel, title, translateUi, videoRef });
+  const { pipAvailable, pipActive, airPlayAvailable, airPlayAllowed, togglePip, castAvailable, castConnected, toggleCast } = usePlatformControls({ canAdvance, item, liveTv, onAdvance, onToast, seekBy, stream, subtitleLabel, title, translateUi, videoRef });
 
   const openPanel = useCallback((panel: Exclude<PlayerPanel, null>) => {
     const next = activePanel === panel ? null : panel;
@@ -869,6 +951,23 @@ export function VideoPlayer({
   usePlayerKeys({ activePanel, booted, containerRef, dock, ended, error, flashControls, hideControlsNow, liveTv, onClose, openPanel, revealControls, seekBy, setActivePanel, showControls, toggleFullscreen, togglePlay, videoRef });
 
   const { activeSkip, showSkip, skipNow, nextEpisode, showUpNext, dismissUpNext, playNextNow } = useSkipAndUpNext({ booted, canAdvance, current, duration, ended, error, flashControls, item, liveTv, metadataPriority, nextCountdown, nextDismissed, onAdvance, selectedEpisode, setNextCountdown, setUpNextDismissed, stream, upNextDismissed, upNextShownRef, videoRef });
+  useEffect(() => { if (showUpNext) void onPrefetchNext?.(); }, [showUpNext, onPrefetchNext]);
+  useScreenWakeLock(videoRef, !error && !ended);
+  // Seek previews from the person's own Jellyfin/Plex server, when it has them.
+  const [trickplay, setTrickplay] = useState<Trickplay | null>(null);
+  useEffect(() => {
+    setTrickplay(null);
+    const video = videoRef.current;
+    if (liveTv || !booted || !video || !(stream.homeServer || stream.playbackSession)) return undefined;
+    const controller = new AbortController();
+    let loaded: Trickplay | null = null;
+    void loadTrickplay(stream, settings.homeServers ?? [], video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9, controller.signal)
+      .then((result) => { if (controller.signal.aborted) result?.destroy(); else { loaded = result; setTrickplay(result); } })
+      .catch(() => undefined);
+    return () => { controller.abort(); loaded?.destroy(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stream.url, booted, liveTv]);
+  const seekPreview = trickplay && hoverTime !== null ? trickplay.at(hoverTime) : null;
 
   // ---------- Touch: tap toggles the controls, double-tap seeks ±10 s ----------
   const lastTap = useRef<{ at: number; x: number } | null>(null);
@@ -972,11 +1071,11 @@ export function VideoPlayer({
       <PlayerSkipUpNext activeSkip={activeSkip} dismissUpNext={dismissUpNext} nextCountdown={nextCountdown} nextEpisode={nextEpisode} playNextNow={playNextNow} showSkip={showSkip} showUpNext={showUpNext} skipNow={skipNow} />
       <PlayerEndScreen item={item} onClose={onClose} onOpenDetails={onOpenDetails} showEndScreen={showEndScreen} title={title} togglePlay={togglePlay} />
 
-      <PlayerTopBar airPlayAllowed={airPlayAllowed} airPlayAvailable={airPlayAvailable} airPlayBlockedReason={airPlayBlockedReason} mediaMeta={mediaMeta} onClose={onClose} onToast={onToast} pauseOverview={pauseOverview} pipActive={pipActive} pipAvailable={pipAvailable} playing={playing} stream={stream} title={title} togglePip={togglePip} videoRef={videoRef} />
+      <PlayerTopBar airPlayAllowed={airPlayAllowed} airPlayAvailable={airPlayAvailable} airPlayBlockedReason={airPlayBlockedReason} castAvailable={castAvailable} castConnected={castConnected} toggleCast={toggleCast} mediaMeta={mediaMeta} onClose={onClose} onToast={onToast} pauseOverview={pauseOverview} pipActive={pipActive} pipAvailable={pipAvailable} playing={playing} stream={stream} title={title} togglePip={togglePip} videoRef={videoRef} />
 
       <PlayerSidePanel activePanel={activePanel} activeSubtitle={activeSubtitle} aiAvailable={aiAvailable} aiError={aiError} aiSubsActive={aiSubsActive} aiTargetName={aiTargetName} aiTranslating={aiTranslating} audioProbeState={audioProbeState} bufferAheadSec={bufferAheadSec} buffering={buffering} changeSubtitleDelay={changeSubtitleDelay} copyUrl={copyUrl} embeddedChoice={embeddedChoice} embeddedTracks={embeddedTracks} error={error} externalOptions={externalOptions} onSelectStream={onSelectStream} onToast={onToast} openExternalOption={openExternalOption} playbackRate={playbackRate} probeAudioTracks={probeAudioTracks} remuxAudioIndex={remuxAudioIndex} remuxTracks={remuxTracks} selectEmbedded={selectEmbedded} selectSubtitle={selectSubtitle} setActivePanel={setActivePanel} setAiSubsActive={setAiSubsActive} setPlaybackRate={setPlaybackRate} setSubtitleRetry={setSubtitleRetry} settings={settings} sourceGroups={sourceGroups} stream={stream} subtitleDelayMs={subtitleDelayMs} subtitleGroups={subtitleGroups} subtitleState={subtitleState} switchRemuxAudio={switchRemuxAudio} transportRef={transportRef} transportTracks={transportTracks} updateSettings={updateSettings} videoRef={videoRef} />
 
-      <PlayerControlsBar activePanel={activePanel} appleMobile={appleMobile} badges={badges} bufPct={bufPct} canAdvance={canAdvance} duration={duration} error={error} fullscreen={fullscreen} hoverPct={hoverPct} hoverTime={hoverTime} liveTv={liveTv} muted={muted} openPanel={openPanel} pct={pct} playing={playing} playNextNow={playNextNow} scrubDisplayTime={scrubDisplayTime} seekBy={seekBy} setHoverPct={setHoverPct} setHoverTime={setHoverTime} setScrubTo={setScrubTo} toggleFullscreen={toggleFullscreen} togglePlay={togglePlay} transportRef={transportRef} videoRef={videoRef} volume={volume} />
+      <PlayerControlsBar activePanel={activePanel} appleMobile={appleMobile} badges={badges} bufPct={bufPct} canAdvance={canAdvance} duration={duration} error={error} fullscreen={fullscreen} hoverPct={hoverPct} hoverTime={hoverTime} seekPreview={seekPreview} liveTv={liveTv} muted={muted} openPanel={openPanel} pct={pct} playing={playing} playNextNow={playNextNow} scrubDisplayTime={scrubDisplayTime} seekBy={seekBy} setHoverPct={setHoverPct} setHoverTime={setHoverTime} setScrubTo={setScrubTo} toggleFullscreen={toggleFullscreen} togglePlay={togglePlay} transportRef={transportRef} videoRef={videoRef} volume={volume} />
     </section>
   );
 }

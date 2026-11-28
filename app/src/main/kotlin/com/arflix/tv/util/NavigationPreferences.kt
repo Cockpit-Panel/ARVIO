@@ -6,7 +6,14 @@ import androidx.datastore.preferences.core.MutablePreferences
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 
-val OPTIONAL_NAVIGATION_SECTIONS = listOf("search", "watchlist", "tv")
+/**
+ * "music" is the Music tab on TV, "music_phone" the one on phones and tablets: one profile may want
+ * it on one kind of device and not the other.
+ */
+val OPTIONAL_NAVIGATION_SECTIONS = listOf("search", "watchlist", "tv", "news", "music", "music_phone")
+
+/** Unrated content (live channels, news, music) that a kids profile never gets a tab for. */
+val KIDS_HIDDEN_NAVIGATION_SECTIONS = setOf("tv", "news", "music", "music_phone")
 
 fun hiddenNavigationSectionsKey(profileId: String) =
     stringPreferencesKey("profile_${profileId}_hidden_navigation_sections")
@@ -33,4 +40,4 @@ fun restoreNavigationSections(prefs: MutablePreferences, profileId: String, hidd
 }
 
 fun isNavigationSectionVisible(section: String, hidden: Collection<String>, isKids: Boolean = false): Boolean =
-    !(section in OPTIONAL_NAVIGATION_SECTIONS && section in hidden) && !(isKids && section == "tv")
+    !(section in OPTIONAL_NAVIGATION_SECTIONS && section in hidden) && !(isKids && section in KIDS_HIDDEN_NAVIGATION_SECTIONS)

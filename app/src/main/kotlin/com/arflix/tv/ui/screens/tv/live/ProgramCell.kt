@@ -77,6 +77,7 @@ fun ProgramCell(
     focusable: Boolean = true,
     renderContent: Boolean = true,
     isCatchupSupported: Boolean = false,
+    isReminded: Boolean = false,
     onClick: () -> Unit,
     onFocused: () -> Unit = {},
     onMoveLeft: () -> Boolean = { false },
@@ -94,7 +95,9 @@ fun ProgramCell(
     if (!focusable && !isTouchDevice && rowHeight < 60.dp &&
         LocalLayoutDirection.current == LayoutDirection.Ltr) {
         ChannelProgrammeCanvas(program, width, rowHeight, isNow, isPast,
-            isCatchupSupported, contentStartOffsetPx, onClick, modifier)
+            isCatchupSupported, contentStartOffsetPx, onClick, modifier,
+            nowProgress = if (isNow) liveProgrammeProgress(program, clockTickMillis) else 0f,
+            isReminded = isReminded)
         return
     }
     val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
@@ -105,6 +108,8 @@ fun ProgramCell(
         else -> LiveColors.Panel
     }
     val bg = if (focused) Color.White else baseBg
+    val nowProgress = if (isNow) liveProgrammeProgress(program, clockTickMillis) else 0f
+    val progressColor = liveAccent()
     val foreground = if (focused) Color.Black else LiveColors.Fg
     val secondary = if (focused) Color.Black.copy(alpha = .7f) else LiveColors.FgDim
     val muted = if (focused) Color.Black.copy(alpha = .65f) else LiveColors.FgMute
@@ -145,6 +150,8 @@ fun ProgramCell(
             .drawBehind {
                 val radius = LiveDims.CellRadius.toPx()
                 drawRoundRect(bg, cornerRadius = CornerRadius(radius))
+                if (isNow && nowProgress > 0f) drawLiveProgress(nowProgress, if (focused) Color.Black else progressColor)
+                if (isReminded) drawReminderDot(if (focused) Color.Black else progressColor)
             }
             .then(if (focusable) Modifier.focusable() else Modifier)
             .then(
@@ -182,11 +189,9 @@ fun ProgramCell(
                     AnnotatedString(formatClock(program.startUtcMillis)),
                     program.description?.takeIf { it.isNotBlank() }?.let(::AnnotatedString),
                 )
-                if (isNow || (isPast && isCatchupSupported)) {
-                    onClick {
-                        currentOnClick()
-                        true
-                    }
+                onClick {
+                    currentOnClick()
+                    true
                 }
             }
             .padding(horizontal = 6.dp, vertical = 2.dp),

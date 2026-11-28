@@ -253,6 +253,8 @@ class AuthRepository @Inject constructor(
         }
     }
 
+    suspend fun getAccountSyncRevision(): Result<String?> = Result.success(null)
+
     suspend fun mutateAccountSyncPayload(mutator: (JSONObject) -> Unit): Result<Unit> {
         return try {
             val current = loadAccountSyncPayload().getOrNull().orEmpty()

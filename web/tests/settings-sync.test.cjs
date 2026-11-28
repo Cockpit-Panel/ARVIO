@@ -48,6 +48,21 @@ test('AI model and accent colour sync as the names Android understands', async (
   assert.equal(h.cloud.webAccent('Yellow'), 'gold');
   assert.equal(h.cloud.webAccent('gold'), 'gold');
   assert.equal(h.cloud.androidAccent('arctic'), 'White');
+  // The newer accent colours round-trip both ways instead of falling back to White.
+  for (const [web, android] of [['coral', 'Coral'], ['amber', 'Amber'], ['teal', 'Teal'], ['cyan', 'Cyan'], ['pink', 'Pink']]) {
+    assert.equal(h.cloud.androidAccent(web), android);
+    assert.equal(h.cloud.webAccent(android), web);
+  }
+});
+
+test('a newer Android accent colour survives a web save of an unrelated setting', async () => {
+  const h = cloudHarness({ accentColor: 'Teal', focusBorderColor: 'Teal', profileSettingsById: { p1: {} } });
+  const pulled = await h.cloud.pullCloudPayload(h.auth, 'p1');
+  assert.equal(pulled.settings.accentColor, 'teal');
+  const base = { ...webDefaults(), ...pulled.settings };
+  await h.cloud.saveCloudSettings(h.auth, { ...base, showBudget: !base.showBudget }, [], 'p1', [], base);
+  assert.equal(h.remote().accentColor, 'Teal');
+  assert.equal(h.remote().focusBorderColor, 'Teal');
 });
 
 test('Android-only profile settings are written only once chosen on the web', async () => {
@@ -157,6 +172,17 @@ test('longer language names win, and audio preferences match Android names', () 
   assert.equal(remux.preferredAudioIndex(tracks, 'Portuguese (Brazil)'), 3);
   assert.equal(remux.preferredAudioIndex(tracks, 'English'), 0);
   assert.equal(remux.preferredAudioIndex(tracks, ''), 0);
+});
+
+test('second audio language is used only when the first is missing', () => {
+  const remux = load('lib/remuxProtocol.ts');
+  const track = (index, language) => ({ index, codec: 'aac', label: language, language, browserPlayable: true, passthrough: true });
+  const tracks = [track(0, 'deu'), track(1, 'eng'), track(2, 'dan')];
+  assert.equal(remux.preferredAudioIndex(tracks, 'Danish,English'), 2);
+  assert.equal(remux.preferredAudioIndex(tracks, 'Finnish,English'), 1);
+  assert.equal(remux.preferredAudioIndex(tracks, 'Finnish,Swedish'), 0);
+  assert.equal(remux.preferredAudioIndex(tracks, ',English'), 0);
+  assert.equal(remux.preferredAudioIndex(tracks, 'None,English'), 0);
 });
 
 test('values older web builds wrote are rewritten for Android on the next save', async () => {

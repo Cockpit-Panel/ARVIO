@@ -211,6 +211,13 @@ fun providerMatches(channel: EnrichedChannel, providerId: String, config: IptvCo
     return chPlId == providerId || chPlId == targetId
 }
 
+/** The playlist (or portal) a channel came from, or null when it cannot be told. */
+fun playlistIdOf(channel: EnrichedChannel, config: IptvConfig): String? {
+    val knownIds = (config.playlists.filter { it.enabled && it.id.isNotBlank() }.map { it.id } +
+        config.stalkerPortals.filter { it.enabled && it.id.isNotBlank() }.map { it.id }).toHashSet()
+    return channelPlaylistId(channel, knownIds)
+}
+
 fun providerMatcher(providerId: String, config: IptvConfig): (EnrichedChannel) -> Boolean {
     if (providerId == "all") return { true }
     val targetId = providerId.removePrefix("source:")
@@ -660,7 +667,7 @@ fun VariantPickerOverlay(
                     .heightIn(max = 360.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                itemsIndexed(variants, key = { index, item -> "${item.id}#$index" }) { index, variant ->
+                itemsIndexed(variants, key = { index, item -> "${item.id}#$index" }, contentType = { _, _ -> "LiveTvEnhancements.variants" }) { index, variant ->
                     VariantRow(
                         channel = variant,
                         modifier = if (index == 0) Modifier.focusRequester(firstFocus) else Modifier,

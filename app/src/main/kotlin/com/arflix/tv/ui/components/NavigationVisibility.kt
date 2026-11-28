@@ -16,6 +16,24 @@ import com.arflix.tv.util.settingsDataStore
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
+/**
+ * Opens the News tab from any screen's top bar. Set by the navigation host, so the screens'
+ * key handlers need no extra callback parameter for a tab that may not even be shown.
+ */
+object NewsNavigation {
+    var open: () -> Unit = {}
+}
+
+/** Opens the Music tab from a TV top bar, like [NewsNavigation]. */
+object MusicNavigation {
+    var open: () -> Unit = {}
+}
+
+/** Brings the phone tab bar back after it slid away on scroll, e.g. when a page switches tab. */
+object MobileTabBar {
+    var reveal: () -> Unit = {}
+}
+
 /** Shared with the plain D-pad index helpers, like [KidsNavigation]. */
 object NavigationVisibility {
     var hiddenSections by mutableStateOf<Set<String>>(emptySet())
@@ -40,6 +58,8 @@ fun SidebarItem.navigationSection(): String = when (this) {
     SidebarItem.HOME -> "home"
     SidebarItem.WATCHLIST -> "watchlist"
     SidebarItem.TV -> "tv"
+    SidebarItem.NEWS -> "news"
+    SidebarItem.MUSIC -> "music"
     SidebarItem.SETTINGS -> "settings"
 }
 

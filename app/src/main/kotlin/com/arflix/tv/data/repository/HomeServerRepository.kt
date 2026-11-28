@@ -143,6 +143,18 @@ enum class HomeServerLibrarySort(
     RELEASE_DATE_OLDEST("originallyAvailableAt:asc", "PremiereDate", ascending = true)
 }
 
+/**
+ * Order of a home-server row on Home. Whole libraries (Plex, Emby, Jellyfin, Silo) show their
+ * newest additions first, the same default as the Library screen, so a big library's rail is not
+ * an endless A-Z list. Server collections (box sets) keep title order.
+ */
+internal fun homeServerHomeRowSort(sourceRef: String?): HomeServerLibrarySort {
+    val collectionId = HomeServerRepository.parseCatalogSourceRef(sourceRef)?.second
+        ?: return HomeServerLibrarySort.RECENTLY_ADDED
+    return if (collectionId.startsWith("collection:")) HomeServerLibrarySort.TITLE
+    else HomeServerLibrarySort.RECENTLY_ADDED
+}
+
 internal fun homeServerCatalogMediaType(
     collectionType: String,
     explicitMediaType: MediaType? = null
@@ -2371,8 +2383,11 @@ class HomeServerRepository @Inject constructor(
                             "UserId" to connection.userId,
                             "StartTimeTicks" to "0",
                             "IsPlayback" to "true",
-                            "AutoOpenLiveStream" to "true",
-                            "MaxStreamingBitrate" to "2147483647"
+                            "AutoOpenLiveStream" to "true"
+                            // No MaxStreamingBitrate: ARVIO has no client bitrate ceiling. Sending a huge
+                            // one still counts as a ceiling to Silo, which cannot show that a source of
+                            // unknown bitrate fits under it and so transcodes that title instead of
+                            // playing it directly. The server still applies the account's own limits.
                         )
                     ),
                     JsonObject(),

@@ -1477,6 +1477,10 @@
     <string name="settings_value_indigo">Índigo</string>
     <string name="settings_value_violet">Violeta</string>
     <string name="settings_value_cyan">Ciano</string>
+    <string name="settings_value_coral">Coral</string>
+    <string name="settings_value_amber">Âmbar</string>
+    <string name="settings_value_teal">Verde-azulado</string>
+    <string name="settings_value_pink">Rosa</string>
     <string name="settings_value_normal">Normal</string>
     <string name="settings_value_bold">Negrito</string>
     <string name="settings_value_background">Com fundo</string>
@@ -1580,4 +1584,6 @@
     <string name="phone_input_page_sent">Enviado ✓ — prima OK na TV.</string>
     <string name="phone_input_page_not_sent">Não enviado</string>
     <string name="phone_input_page_expired">Este código expirou — leia novamente o código QR na TV.</string>
+    <string name="seek_thumbnails">Miniaturas ao avançar</string>
+    <string name="seek_thumbnails_desc">Mostra pequenas imagens do vídeo enquanto avança ou recua. São criadas neste dispositivo em segundo plano durante a reprodução e pausam quando a reprodução precisa de rede ou memória.</string>
 </resources>

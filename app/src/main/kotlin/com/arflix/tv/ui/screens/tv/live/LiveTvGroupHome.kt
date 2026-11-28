@@ -157,7 +157,7 @@ fun LiveTvGroupHome(
             contentPadding = PaddingValues(bottom = 16.dp + LocalBottomBarInset.current),
         ) {
         // 1. Current live / Continue Watching mini-player card
-        item(key = "home_mini_player") {
+        item(key = "home_mini_player", contentType = "groupHome-home_mini_player") {
             Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { previewExpanded = !previewExpanded }.padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -202,7 +202,7 @@ fun LiveTvGroupHome(
         }
 
         // 2. Quick access 2x2 tile grid
-        item(key = "home_quick_access") {
+        item(key = "home_quick_access", contentType = "groupHome-home_quick_access") {
             QuickAccessGrid(
                 allChannelsCount = allChannelsCount,
                 sportsCount = sportsCount,
@@ -219,7 +219,7 @@ fun LiveTvGroupHome(
         }
 
         if (providers.size > 1) {
-            item(key = "home_playlist_tile") {
+            item(key = "home_playlist_tile", contentType = "groupHome-home_playlist_tile") {
                 PlaylistSubwayTile(
                     providers = providers,
                     selectedProviderId = selectedProviderId,
@@ -230,7 +230,7 @@ fun LiveTvGroupHome(
         }
 
         // 3. Playlists heading
-        item(key = "home_groups_heading") {
+        item(key = "home_groups_heading", contentType = "groupHome-home_groups_heading") {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -252,6 +252,7 @@ fun LiveTvGroupHome(
         items(
             items = groups,
             key = { group -> "group_plank_${group.id}" },
+            contentType = { "LiveTvGroupHome.items" },
         ) { group ->
             GroupPlankTile(
                 category = group,
@@ -287,7 +288,7 @@ private fun QuickAccessGrid(
         ) {
             QuickAccessTile(
                 title = stringResource(R.string.live_quick_all_channels),
-                subtitle = stringResource(R.string.live_channels_count, allChannelsCount),
+                subtitle = liveChannelsLabel(allChannelsCount),
                 icon = Icons.Default.GridView,
                 iconTint = liveAccent(),
                 onClick = onOpenAllChannels,
@@ -295,7 +296,7 @@ private fun QuickAccessGrid(
             )
             QuickAccessTile(
                 title = stringResource(R.string.live_quick_sports),
-                subtitle = if (sportsCount > 0) stringResource(R.string.live_channels_count, sportsCount) else stringResource(R.string.live_sports_live_and_upcoming),
+                subtitle = if (sportsCount > 0) liveChannelsLabel(sportsCount) else stringResource(R.string.live_sports_live_and_upcoming),
                 icon = Icons.Default.SportsSoccer,
                 iconTint = AccentGreen,
                 onClick = onOpenSports,
@@ -309,7 +310,7 @@ private fun QuickAccessGrid(
             val favEnabled = favoritesCount > 0
             QuickAccessTile(
                 title = stringResource(R.string.live_quick_favourites),
-                subtitle = stringResource(R.string.live_channels_count, favoritesCount),
+                subtitle = liveChannelsLabel(favoritesCount),
                 icon = Icons.Default.Star,
                 iconTint = Color(0xFFFBBF24),
                 onClick = onOpenFavorites,
@@ -319,7 +320,7 @@ private fun QuickAccessGrid(
             val recentsEnabled = recentsCount > 0
             QuickAccessTile(
                 title = stringResource(R.string.live_quick_recent),
-                subtitle = stringResource(R.string.live_channels_count, recentsCount),
+                subtitle = liveChannelsLabel(recentsCount),
                 icon = Icons.Default.History,
                 iconTint = Color(0xFF60A5FA),
                 onClick = onOpenRecents,
@@ -471,7 +472,7 @@ private fun PlaylistSubwayTile(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = currentProvider?.let { stringResource(R.string.live_channels_count, it.count) }
+                    text = currentProvider?.let { liveChannelsLabel(it.count) }
                         ?: stringResource(R.string.settings_fact_playlists),
                     style = LiveType.TimeMono.copy(
                         fontSize = 11.sp,
@@ -549,7 +550,7 @@ private fun PlaylistSubwayTile(
                                 .heightIn(max = 340.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            items(providers, key = { it.id }) { provider ->
+                            items(providers, key = { it.id }, contentType = { "groupHome" }) { provider ->
                                 val isSelected = provider.id == selectedProviderId ||
                                     provider.id == selectedProviderId.removePrefix("source:")
                                 Row(
@@ -622,7 +623,7 @@ private fun GroupPlankTile(
     modifier: Modifier = Modifier,
 ) {
     val displayLabel = liveCategoryDisplayLabel(category, category.playlistGroupName ?: category.label)
-    val channelsSubtitle = stringResource(R.string.live_channels_count, category.count)
+    val channelsSubtitle = liveChannelsLabel(category.count)
     val plankDescription = "$displayLabel, $channelsSubtitle"
 
     Row(

@@ -410,6 +410,13 @@ class MainActivity : ComponentActivity() {
                 val config = Configuration(this@MainActivity.resources.configuration)
                 config.setLocale(locale)
                 val localizedRes = this@MainActivity.createConfigurationContext(config).resources
+                // Dialogs and bottom sheets are windows of their own whose LocalContext is the
+                // Activity, not the wrapper below, so their strings kept the language the app
+                // started in until a restart. Bring the Activity's own resources along.
+                runCatching {
+                    @Suppress("DEPRECATION")
+                    this@MainActivity.resources.updateConfiguration(config, this@MainActivity.resources.displayMetrics)
+                }
                 object : android.content.ContextWrapper(this@MainActivity) {
                     override fun getResources() = localizedRes
                 }
@@ -536,6 +543,8 @@ class MainActivity : ComponentActivity() {
         // Before super.onResume(): screens observe ON_RESUME and must already see the
         // post-idle sync as running, or they would rebuild from stale state first.
         idleReturnCoordinator.onAppForeground()
+        // Compose may have rebuilt its view; keep it from tracking semantics for services that cannot read them.
+        window.decorView.post { com.arflix.tv.ui.ComposeAccessibilityGate.install(window.decorView) }
         super.onResume()
         // Signalled from here, not from a screen: the app can return to the
         // foreground on any destination — a TV woken in the morning resumes onto
@@ -920,6 +929,24 @@ fun ArflixApp(
         navigationInsetDp = navigationInset.value,
     )
     val barInset = barClearance.scrollInsetDp.dp
+    // Phones: the floating tab bar slides away while you scroll down and returns on the way
+    // back up, so content gets the whole screen. A new page always starts with it visible.
+    // One state for the whole session: the scroll connection below is remembered once and must
+    // keep writing to the same state, so a route change resets it rather than replacing it.
+    var barHiddenByScroll by remember { mutableStateOf(false) }
+    LaunchedEffect(currentRoute) { barHiddenByScroll = false }
+    androidx.compose.runtime.SideEffect { com.arflix.tv.ui.components.MobileTabBar.reveal = { barHiddenByScroll = false } }
+    val barScrollConnection = remember(isLandscapeRail) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (!isLandscapeRail) {
+                    if (consumed.y < -6f) barHiddenByScroll = true
+                    else if (consumed.y > 6f || available.y > 6f) barHiddenByScroll = false
+                }
+                return Offset.Zero
+            }
+        }
+    }
     val fullBarHeight = barClearance.fullHeightDp.dp
 
 
@@ -928,7 +955,10 @@ fun ArflixApp(
             .fillMaxSize()
             // Background fills edge-to-edge (including behind transparent bars).
             .background(
-                brush = if (oledBlackBackground) {
+                // Library and Live TV paint pure black; the status-bar strip above them matches,
+                // so there is no grey seam on phones.
+                brush = if (oledBlackBackground || (isMobile &&
+                        currentRoute?.substringBefore('?') in setOf(Screen.Watchlist.route, "tv"))) {
                     Brush.linearGradient(colors = listOf(Color.Black, Color.Black))
                 } else {
                     Brush.linearGradient(
@@ -961,6 +991,7 @@ fun ArflixApp(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
+                    .then(if (isMobile) Modifier.nestedScroll(barScrollConnection) else Modifier)
             ) {
                 AppNavigation(
                     navController = navController,
@@ -994,13 +1025,18 @@ fun ArflixApp(
         }
 
         androidx.compose.animation.AnimatedVisibility(
-            visible = showBottomBar,
-            enter = androidx.compose.animation.slideInVertically(
-                animationSpec = androidx.compose.animation.core.tween(220, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-            ) { it },
-            exit = androidx.compose.animation.slideOutVertically(
-                animationSpec = androidx.compose.animation.core.tween(220, easing = androidx.compose.animation.core.FastOutSlowInEasing)
-            ) { it },
+            visible = showBottomBar && !(barHiddenByScroll && !isLandscapeRail),
+            // The rail slides in from its own edge; the bottom bar rises. Both fade so it feels soft.
+            enter = (if (isLandscapeRail) androidx.compose.animation.slideInHorizontally(
+                animationSpec = androidx.compose.animation.core.tween(260, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            ) { -it } else androidx.compose.animation.slideInVertically(
+                animationSpec = androidx.compose.animation.core.tween(260, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            ) { it }) + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(200)),
+            exit = (if (isLandscapeRail) androidx.compose.animation.slideOutHorizontally(
+                animationSpec = androidx.compose.animation.core.tween(200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            ) { -it } else androidx.compose.animation.slideOutVertically(
+                animationSpec = androidx.compose.animation.core.tween(200, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+            ) { it }) + androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160)),
             modifier = Modifier
                 .align(if (isLandscapeRail) Alignment.CenterStart else Alignment.BottomCenter)
                 .then(if (isLandscapeRail) Modifier.padding(start = railCutoutInset) else Modifier)

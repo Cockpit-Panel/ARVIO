@@ -38,8 +38,12 @@ internal fun ChannelProgrammeCanvas(
     contentStartOffsetPx: () -> Int,
     onClick: () -> Unit,
     modifier: Modifier,
+    /** How much of an on-air programme has played (0..1); drawn as a thin bar. */
+    nowProgress: Float = 0f,
+    isReminded: Boolean = false,
 ) {
     val measurer = rememberTextMeasurer(cacheSize = 4)
+    val progressColor = liveAccent()
     val time = formatClock(program.startUtcMillis)
     val minutes = ((program.endUtcMillis - program.startUtcMillis) / 60_000L).coerceAtLeast(0)
     val duration = stringResource(R.string.live_label_duration_min, minutes)
@@ -54,7 +58,7 @@ internal fun ChannelProgrammeCanvas(
                 AnnotatedString(program.title), AnnotatedString(time),
                 program.description?.takeIf { it.isNotBlank() }?.let(::AnnotatedString),
             )
-            if (isNow || (isPast && isCatchupSupported)) onClick { onClick(); true }
+            onClick { onClick(); true }
         }
         .drawWithCache {
             val x = 7.dp.toPx() + contentStartOffsetPx()
@@ -80,6 +84,8 @@ internal fun ChannelProgrammeCanvas(
                 val cellSize = Size((size.width - 2.dp.toPx()).coerceAtLeast(0f), (size.height - 2.dp.toPx()).coerceAtLeast(0f))
                 val radius = CornerRadius(LiveDims.CellRadius.toPx())
                 drawRoundRect(if (isNow) LiveColors.FocusBg else LiveColors.Panel, origin, cellSize, radius)
+                if (isNow && nowProgress > 0f) drawLiveProgress(nowProgress, progressColor)
+                if (isReminded) drawReminderDot(progressColor)
                 if (badgeLayout != null) {
                     drawRoundRect(LiveColors.PanelRaised,
                         Offset(x, 5.dp.toPx()), Size(badgeWidth, badgeLayout.size.height + 1.dp.toPx()), CornerRadius(3.dp.toPx()))
@@ -90,4 +96,31 @@ internal fun ChannelProgrammeCanvas(
                 if (footer != null) drawText(footer, topLeft = Offset(x, size.height - 5.dp.toPx() - footer.size.height))
             }
         })
+}
+
+/**
+ * A thin bar along the bottom of an on-air cell showing how much has played,
+ * like TiviMate's guide. Drawn in the cell's own draw pass, so it adds no layout.
+ */
+internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawLiveProgress(progress: Float, color: androidx.compose.ui.graphics.Color) {
+    val inset = 4.dp.toPx()
+    val height = 2.dp.toPx()
+    val track = (size.width - inset * 2).coerceAtLeast(0f)
+    if (track <= 0f) return
+    val top = size.height - inset - height / 2f
+    drawRoundRect(color.copy(alpha = 0.18f), Offset(inset, top), Size(track, height), CornerRadius(height / 2f))
+    drawRoundRect(color.copy(alpha = 0.85f), Offset(inset, top), Size(track * progress.coerceIn(0f, 1f), height), CornerRadius(height / 2f))
+}
+
+/** A small dot in the top corner of a show that has a reminder. */
+internal fun androidx.compose.ui.graphics.drawscope.DrawScope.drawReminderDot(color: androidx.compose.ui.graphics.Color) {
+    val radius = 3.dp.toPx()
+    drawCircle(color, radius, Offset(size.width - 6.dp.toPx() - radius, 6.dp.toPx() + radius))
+}
+
+/** Share of [program] that has played at [nowMillis], or 0 when it isn't on air. */
+internal fun liveProgrammeProgress(program: IptvProgram, nowMillis: Long): Float {
+    val span = program.endUtcMillis - program.startUtcMillis
+    if (span <= 0L || nowMillis < program.startUtcMillis || nowMillis >= program.endUtcMillis) return 0f
+    return ((nowMillis - program.startUtcMillis).toFloat() / span).coerceIn(0f, 1f)
 }

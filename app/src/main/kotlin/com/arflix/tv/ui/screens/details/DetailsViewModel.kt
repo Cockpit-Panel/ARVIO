@@ -97,6 +97,9 @@ data class DetailsUiState(
     val imdbId: String? = null,  // Real IMDB ID for stream resolution
     val tvdbId: Int? = null,     // TVDB ID for Kitsu anime mapping
     val logoUrl: String? = null,
+    /** Poster/backdrop without printed title text, so the logo isn't shown twice on phones. */
+    val textlessPosterUrl: String? = null,
+    val textlessBackdropUrl: String? = null,
     val trailerKey: String? = null,
     val episodes: List<Episode> = emptyList(),
     val episodePlaybackProgress: Map<EpisodeIdentity, EpisodePlaybackProgress> = emptyMap(),
@@ -885,7 +888,13 @@ class DetailsViewModel @Inject constructor(
 
                 // Map genre IDs to names
                 val genreMap = if (mediaType == MediaType.TV) tvGenres else movieGenres
-                val genreNames = mergedItem.genreIds.mapNotNull { genreMap[it] }.take(4)
+                // In the app's language, as the Home hero shows them; the English map only for
+                // ids without a translated name.
+                val genreNames = mergedItem.genreIds.mapNotNull { id ->
+                    val res = if (mediaType == MediaType.TV) com.arflix.tv.ui.components.tvGenreNameRes(id)
+                        else com.arflix.tv.ui.components.movieGenreNameRes(id)
+                    res?.let { youTubeText(it) } ?: genreMap[id]
+                }.take(4)
 
                 // Get language name
                 val languageName = mergedItem.originalLanguage?.let { languages[it] ?: it.uppercase() }
@@ -1004,6 +1013,16 @@ class DetailsViewModel @Inject constructor(
                     val logoUrl = runCatching { logoDeferred.await() }.getOrNull()
                     if (logoUrl != null && logoUrl != _uiState.value.logoUrl) {
                         updateState { state -> state.copy(logoUrl = logoUrl) }
+                    }
+                    if (logoUrl != null) {
+                        // Same images request as the logo (cached), so this is free.
+                        val art = runCatching { mediaRepository.getTextlessArtwork(mediaType, mediaId) }.getOrNull()
+                        if (art != null) updateState { state ->
+                            state.copy(
+                                textlessPosterUrl = art.posterPath?.let { com.arflix.tv.util.Constants.IMAGE_BASE + it },
+                                textlessBackdropUrl = art.backdropPath?.let { com.arflix.tv.util.Constants.BACKDROP_BASE + it },
+                            )
+                        }
                     }
                 }
 

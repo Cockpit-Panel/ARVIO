@@ -40,6 +40,8 @@ function normalizeToken(token: TraktToken | null): TraktToken | null {
 
 export class TraktClient {
   token: TraktToken | null = null;
+  /** Trakt refresh tokens are single use, so a rotated pair must reach the other devices. */
+  onTokenRefreshed?: (profileId: string, token: TraktToken) => Promise<void> | void;
   private profileId: string | null = null;
   private refreshInFlight: { profileId: string | null; token: string; promise: Promise<TraktToken | null> } | null = null;
   private calendarMetadata = new Map<string, { at: number; promise: Promise<unknown> }>();
@@ -475,7 +477,14 @@ export class TraktClient {
         body: JSON.stringify({ ...media, progress: Number.isFinite(item.progress) ? Math.min(100, Math.max(0, item.progress)) : 0 })
       });
     } catch (error) {
-      if (action !== "stop" || (error as { status?: number }).status !== 409) throw error;
+      const status = (error as { status?: number }).status;
+      // Not failures of the connection: 409 = Trakt already has this scrobble
+      // (a repeat within its dedupe window), 422 = progress_too_low, which
+      // Trakt answers to any pause/stop in the first ~1 % of a title (every
+      // source switch and early pause). Reporting these toasted "A tracking
+      // service could not save playback" on nearly every web playback.
+      if (status === 409 || status === 422) return;
+      throw error;
     }
   }
 
@@ -687,6 +696,11 @@ export class TraktClient {
       refresh_token: response.refresh_token ?? token.refresh_token,
       expires_at: Date.now() + response.expires_in * 1000
     });
+    // The old refresh token is spent now. Publish the new pair without making the caller wait.
+    const rotated = this.token;
+    if (rotated && this.onTokenRefreshed) {
+      void Promise.resolve().then(() => this.onTokenRefreshed?.(profileId ?? "", rotated)).catch(() => undefined);
+    }
     return this.token;
   }
 

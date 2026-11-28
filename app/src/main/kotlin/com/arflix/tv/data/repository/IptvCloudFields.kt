@@ -8,7 +8,8 @@ import org.json.JSONObject
 internal object IptvCloudFields {
     private val fields = setOf("m3uUrl", "epgUrl", "playlists", "stalkerPortals", "stalkerPortalUrl",
         "stalkerMacAddress", "favoriteGroups", "favoriteChannels", "hiddenGroups", "lockedGroups",
-        "groupOrder", "groupOrderSchema", "sortOrder", "channelOrder", "groupNames")
+        "groupOrder", "groupOrderSchema", "sortOrder", "channelOrder", "groupNames",
+        "guideSources", "guideOffsets", "startLastChannel")
     private val timestampKey = stringPreferencesKey("cloud_sync_field_ts")
     private val baselineKey = stringPreferencesKey("cloud_sync_field_base")
 
@@ -57,6 +58,15 @@ internal object IptvCloudFields {
         }
         prefs[timestampKey] = timestamps.toString()
         prefs[baselineKey] = baseline.toString()
+    }
+
+    /** The synced fields whose value differs between two readings, with their new values, ready for [stamp]. */
+    fun changed(before: Map<String, Any>, after: Map<String, Any>): JSONObject {
+        val out = JSONObject()
+        for ((field, value) in after) {
+            if (field in fields && before[field]?.toString() != value.toString()) out.put(field, value)
+        }
+        return out
     }
 
     fun hasNewerLocalChange(prefs: MutablePreferences, profileId: String, incoming: JSONObject): Boolean {

@@ -1,4 +1,7 @@
 package com.arflix.tv.ui.screens.settings
+import com.arflix.tv.ui.screens.player.preview.SEEK_THUMBNAILS_PREF
+import com.arflix.tv.ui.screens.player.SECONDARY_AUDIO_LANGUAGE_PREF
+import com.arflix.tv.ui.screens.player.AUTO_SOURCE_FAILOVER_PREF
 import com.arflix.tv.data.model.AnimeStructuringStyle
 import com.arflix.tv.data.model.AutoplayLimits
 
@@ -97,6 +100,7 @@ import com.arflix.tv.updater.AppUpdate
 import com.arflix.tv.updater.AppUpdateRepository
 import com.arflix.tv.updater.UpdatePreferences
 import com.arflix.tv.updater.VersionUtils
+import com.arflix.tv.updater.installableApk
 import com.arflix.tv.util.AuthEmailValidator
 import com.arflix.tv.util.LAST_APP_LANGUAGE_KEY
 import com.arflix.tv.util.resolveAppLanguage
@@ -224,10 +228,14 @@ data class SettingsUiState(
     val defaultSubtitle: String = "Off",
     val subtitleOptions: List<String> = emptyList(),
     val defaultAudioLanguage: String = "Auto (Original)",
+    val secondaryAudioLanguage: String = "Off",
     val audioLanguageOptions: List<String> = emptyList(),
     val cardLayoutMode: String = CARD_LAYOUT_MODE_LANDSCAPE,
     val frameRateMatchingMode: String = "Off",
     val autoPlayNext: Boolean = true,
+    val seekThumbnailsEnabled: Boolean = true,
+    val autoSourceFailover: Boolean = true,
+    val externalPlayer: Boolean = false,
     val autoPlaySingleSource: Boolean = true,
     val autoPlayMinQuality: String = "Any",
     val autoPlayMaxQuality: String = "Unlimited",
@@ -260,6 +268,8 @@ data class SettingsUiState(
     val animeStructuringStyle: AnimeStructuringStyle = AnimeStructuringStyle.BROADCAST,
     /** Pin the IPTV "Favorite TV" row to the top of the home screen. */
     val iptvFavoritesOnHome: Boolean = true,
+    /** Open the app straight into the last watched channel (synced with the profile's Live TV settings). */
+    val iptvStartLastChannel: Boolean = false,
     // Volume boost in decibels (0 = off, up to 15 dB). Applied via system LoudnessEnhancer
     // attached to the ExoPlayer audio session. Issue #88.
     val volumeBoostDb: Int = 0,
@@ -547,6 +557,8 @@ class SettingsViewModel @Inject constructor(
      * (list and catalog approvals) for good. See [observeProfileChanges], which repairs it.
      */
     private val activeProfileIsKids = MutableStateFlow(false)
+    /** The active profile's hidden nav sections as stored; null until first read. */
+    private val storedHiddenNavigationSections = MutableStateFlow<Set<String>?>(null)
     private var kidsListApprovalJob: Job? = null
     private var kidsListApprovalSession: KidsListApprovalSession? = null
     private fun managedPermissions() = if (com.arflix.tv.BuildConfig.PARTNER_MANAGEMENT_ENABLED)
@@ -595,6 +607,10 @@ class SettingsViewModel @Inject constructor(
     private fun frameRateMatchingModeKey() = profileManager.profileStringKey("frame_rate_matching_mode")
     private fun frameRateMatchingModeKeyFor(profileId: String) = profileManager.profileStringKeyFor(profileId, "frame_rate_matching_mode")
     private fun autoPlayNextKey() = profileManager.profileBooleanKey("auto_play_next")
+    private fun seekThumbnailsKey() = profileManager.profileBooleanKey(SEEK_THUMBNAILS_PREF)
+    private fun secondaryAudioLanguageKey() = profileManager.profileStringKey(SECONDARY_AUDIO_LANGUAGE_PREF)
+    private fun autoSourceFailoverKey() = profileManager.profileBooleanKey(AUTO_SOURCE_FAILOVER_PREF)
+    private fun externalPlayerKey() = profileManager.profileBooleanKey(com.arflix.tv.ui.screens.player.EXTERNAL_PLAYER_PREF)
     private fun autoPlayNextKeyFor(profileId: String) = profileManager.profileBooleanKeyFor(profileId, "auto_play_next")
     private fun autoPlaySingleSourceKey() = profileManager.profileBooleanKey("auto_play_single_source")
     private fun autoPlaySingleSourceKeyFor(profileId: String) = profileManager.profileBooleanKeyFor(profileId, "auto_play_single_source")
@@ -840,6 +856,11 @@ class SettingsViewModel @Inject constructor(
             }
         }
         viewModelScope.launch {
+            iptvRepository.observeStartLastChannel().collect { enabled ->
+                _uiState.value = _uiState.value.copy(iptvStartLastChannel = enabled)
+            }
+        }
+        viewModelScope.launch {
             kotlinx.coroutines.flow.combine(
                 iptvRepository.observeHiddenStalkerCategories(StalkerCatalogKind.MOVIES),
                 iptvRepository.observeHiddenStalkerCategories(StalkerCatalogKind.SERIES)
@@ -921,6 +942,10 @@ class SettingsViewModel @Inject constructor(
             // Apply content language to MediaRepository immediately
             mediaRepository.contentLanguage = contentLang
             var autoPlay = prefs[autoPlayNextKey()] ?: true
+            val seekThumbnailsEnabled = prefs[seekThumbnailsKey()] ?: true
+            val secondaryAudio = prefs[secondaryAudioLanguageKey()]?.trim()?.takeIf { it.isNotBlank() } ?: "Off"
+            val autoSourceFailover = prefs[autoSourceFailoverKey()] ?: true
+            val externalPlayer = prefs[externalPlayerKey()] ?: false
             var autoPlaySingleSource = prefs[autoPlaySingleSourceKey()] ?: true
             // Ensure defaults are persisted on first launch so they're never ambiguous
             if (prefs[autoPlaySingleSourceKey()] == null) {
@@ -1055,6 +1080,10 @@ class SettingsViewModel @Inject constructor(
                 cardLayoutMode = cardLayoutMode,
                 frameRateMatchingMode = frameRateMode,
                 autoPlayNext = autoPlay,
+                seekThumbnailsEnabled = seekThumbnailsEnabled,
+                secondaryAudioLanguage = secondaryAudio,
+                autoSourceFailover = autoSourceFailover,
+                externalPlayer = externalPlayer,
                 autoPlaySingleSource = autoPlaySingleSource,
                 autoPlayMinQuality = autoPlayMinQuality,
                 autoPlayMaxQuality = autoPlayMaxQuality,
@@ -1258,7 +1287,17 @@ class SettingsViewModel @Inject constructor(
             kotlinx.coroutines.flow.combine(profileManager.activeProfileId, context.settingsDataStore.data) { profileId, prefs ->
                 com.arflix.tv.util.readHiddenNavigationSections(prefs[com.arflix.tv.util.hiddenNavigationSectionsKey(profileId)])
             }.distinctUntilChanged().collect { hidden ->
+                storedHiddenNavigationSections.value = hidden
                 _uiState.update { it.copy(hiddenNavigationSections = hidden) }
+            }
+        }
+        viewModelScope.launch {
+            // Same repair as the kids flag below: loadSettings and other updates build a state copy
+            // around a suspending call, and writing that back reset the toggles to "shown" (the
+            // default) while the nav bar kept hiding News, Search or Library.
+            _uiState.collect { state ->
+                val stored = storedHiddenNavigationSections.value ?: return@collect
+                if (state.hiddenNavigationSections != stored) _uiState.update { it.copy(hiddenNavigationSections = stored) }
             }
         }
         viewModelScope.launch {
@@ -1971,6 +2010,31 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setAutoSourceFailover(enabled: Boolean) {
+        if (!canManage("playback")) return
+        preferenceWriter.save(autoSourceFailoverKey(), enabled, { it.autoSourceFailover },
+            { state, value -> state.copy(autoSourceFailover = value) })
+    }
+
+    fun setExternalPlayer(enabled: Boolean) {
+        if (!canManage("playback")) return
+        preferenceWriter.save(externalPlayerKey(), enabled, { it.externalPlayer },
+            { state, value -> state.copy(externalPlayer = value) })
+    }
+
+    fun setSecondaryAudioLanguage(language: String) {
+        if (!canManage("playback")) return
+        val value = language.trim().ifBlank { "Off" }
+        preferenceWriter.save(secondaryAudioLanguageKey(), value, { it.secondaryAudioLanguage },
+            { state, saved -> state.copy(secondaryAudioLanguage = saved) })
+    }
+
+    fun setSeekThumbnailsEnabled(enabled: Boolean) {
+        if (!canManage("playback")) return
+        preferenceWriter.save(seekThumbnailsKey(), enabled, { it.seekThumbnailsEnabled },
+            { state, value -> state.copy(seekThumbnailsEnabled = value) })
+    }
+
     fun setAutoPlaySingleSource(enabled: Boolean) {
         if (!canManage("playback")) return
         preferenceWriter.save(autoPlaySingleSourceKey(), enabled, { it.autoPlaySingleSource }, { state, value -> state.copy(autoPlaySingleSource = value) })
@@ -2184,6 +2248,7 @@ class SettingsViewModel @Inject constructor(
         val hidden = _uiState.value.hiddenNavigationSections.toMutableSet().apply {
             if (visible) remove(section) else add(section)
         }
+        storedHiddenNavigationSections.value = com.arflix.tv.util.normalizeHiddenNavigationSections(hidden)
         preferenceWriter.save(
             com.arflix.tv.util.hiddenNavigationSectionsKey(profileManager.getProfileIdSync()),
             com.arflix.tv.util.encodeHiddenNavigationSections(hidden),
@@ -2293,11 +2358,11 @@ class SettingsViewModel @Inject constructor(
 
     /**
      * Cycle the accent color through the rainbow palette.
-     * Order: White → Red → Orange → Yellow → Green → Blue → Indigo → Violet → White
+     * Order: White → Red → Coral → Orange → Amber → Yellow → Green → Teal → Cyan → Blue → Indigo → Violet → Pink → White
      */
     fun cycleAccentColor() {
         if (!canManage("appearance")) return
-        val colors = listOf("White", "Red", "Orange", "Yellow", "Green", "Blue", "Indigo", "Violet")
+        val colors = listOf("White", "Red", "Coral", "Orange", "Amber", "Yellow", "Green", "Teal", "Cyan", "Blue", "Indigo", "Violet", "Pink")
         val current = _uiState.value.accentColor
         val nextIndex = (colors.indexOf(current) + 1) % colors.size
         val next = colors[nextIndex]
@@ -3173,7 +3238,7 @@ class SettingsViewModel @Inject constructor(
                 pendingPackManifest = null,
                 pendingPackUrl = null
             )
-            // Collections documents (e.g. a Nuvio collections export, by URL or pasted
+            // Collections documents (e.g. a collections export file, by URL or pasted
             // JSON) install directly; anything else continues as a catalog pack.
             val collectionsResult = catalogRepository.importCollections(url)
             if (collectionsResult != null) {
@@ -3851,7 +3916,8 @@ class SettingsViewModel @Inject constructor(
         }
         if (updated == _uiState.value.iptvStalkerPortals) return
         viewModelScope.launch {
-            iptvRepository.saveStalkerPortals(updated)
+            // Survives leaving Settings right after the tap (viewModelScope is cancelled then).
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { iptvRepository.saveStalkerPortals(updated) }
             _uiState.value = _uiState.value.copy(iptvStalkerPortals = updated)
             syncLocalStateToCloud(silent = true)
         }
@@ -3946,7 +4012,8 @@ class SettingsViewModel @Inject constructor(
     ) {
         val previous = _uiState.value.iptvStalkerPortals
         viewModelScope.launch {
-            iptvRepository.saveStalkerPortals(portals)
+            // Survives leaving Settings right after the tap (viewModelScope is cancelled then).
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { iptvRepository.saveStalkerPortals(portals) }
             // Compare what was actually stored: saving normalizes entries.
             val stored = iptvRepository.observePersonalConfig().first()
             saveNewSourceConnectionLimit(previous.map { it.id }, stored.stalkerPortals.map { it.id }, newSourceConnectionLimit)
@@ -4133,7 +4200,8 @@ class SettingsViewModel @Inject constructor(
         }
         val previous = _uiState.value.iptvPlaylists
         viewModelScope.launch {
-            iptvRepository.savePlaylists(playlists)
+            // Survives leaving Settings right after the tap (viewModelScope is cancelled then).
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { iptvRepository.savePlaylists(playlists) }
             // Compare what was actually stored: saving rewrites "host user pass"
             // into a get.php address, so the entry as typed never matches a row.
             val stored = iptvRepository.observePersonalConfig().first()
@@ -4297,11 +4365,21 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setIptvStartLastChannel(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(iptvStartLastChannel = enabled)
+        viewModelScope.launch {
+            // Survives leaving Settings right after the tap (viewModelScope is cancelled then).
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { iptvRepository.setStartLastChannel(enabled) }
+            syncLocalStateToCloud(silent = true)
+        }
+    }
+
     fun setIptvSortOrder(mode: String) {
         val normalized = normalizeIptvSortOrder(mode)
         _uiState.value = _uiState.value.copy(iptvSortOrder = normalized)
         viewModelScope.launch {
-            iptvRepository.saveSortOrder(normalized)
+            // Survives leaving Settings right after the tap (viewModelScope is cancelled then).
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { iptvRepository.saveSortOrder(normalized) }
             syncLocalStateToCloud(silent = true)
         }
     }
@@ -5316,11 +5394,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun installAppUpdateOrRequestPermission() {
-        val currentStatus = updateStatusManager.status.value
-        if (currentStatus !is com.arflix.tv.updater.UpdateStatus.ReadyToInstall && currentStatus !is com.arflix.tv.updater.UpdateStatus.Failure) return
-
-        val apkPath = if (currentStatus is com.arflix.tv.updater.UpdateStatus.ReadyToInstall) currentStatus.apkPath else return
-        val update = currentStatus.update
+        val (apkPath, update) = updateStatusManager.status.value.installableApk() ?: return
         val apkFile = File(apkPath)
 
         if (!apkFile.exists()) {
@@ -5333,24 +5407,39 @@ class SettingsViewModel @Inject constructor(
             return
         }
 
-        val conflictMsg = ApkInstaller.checkSignatureConflict(context, apkFile)
-        if (conflictMsg != null) {
-            updateStatusManager.updateStatus(com.arflix.tv.updater.UpdateStatus.Failure(conflictMsg, update))
-            return
-        }
-
-        ApkInstaller.launchInstall(context, apkFile)
-        updateStatusManager.updateStatus(com.arflix.tv.updater.UpdateStatus.Installing(update))
-
+        // Shows at once; checking the APK's signature reads the whole file, off the main thread.
+        updateStatusManager.updateStatus(
+            com.arflix.tv.updater.UpdateStatus.Installing(update, preparing = 0f, apkPath = apkPath)
+        )
         viewModelScope.launch {
+            val conflictMsg = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                ApkInstaller.checkSignatureConflict(context, apkFile)
+            }
+            if (conflictMsg != null) {
+                updateStatusManager.updateStatus(com.arflix.tv.updater.UpdateStatus.Failure(conflictMsg, update))
+                return@launch
+            }
+            ApkInstaller.launchInstall(context, apkFile)
             updatePreferences.setIgnoredTag(update.tag)
         }
     }
 
     fun openUnknownSourcesSettings() {
         ApkInstaller.buildUnknownSourcesSettingsIntent(context)?.let { intent ->
+            updateStatusManager.awaitInstallPermission()
             context.startActivity(intent)
         }
+    }
+
+    /**
+     * Settings is back on screen: once ARVIO may install apps, continue the install instead of
+     * leaving the permission dialog up for a second Install press.
+     */
+    fun continueInstallAfterPermission() {
+        if (!updateStatusManager.takeInstallAfterPermission()) return
+        if (!ApkInstaller.canRequestPackageInstalls(context)) return
+        _uiState.value = _uiState.value.copy(showUnknownSourcesDialog = false, showAppUpdateDialog = true)
+        installAppUpdateOrRequestPermission()
     }
 
     // ========== Trakt Authentication ==========

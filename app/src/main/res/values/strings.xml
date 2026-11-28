@@ -411,7 +411,7 @@
     <string name="settings_edit_tv_playlist">Edit TV Playlist</string>
     <string name="settings_add_tv_playlist">Add TV Playlist</string>
     <string name="settings_catalog_pack_import_title">Import Catalog Pack / Collections</string>
-    <string name="settings_catalog_pack_import_desc">Import a catalog pack or a collections file (e.g. a Nuvio collections export) from a URL or pasted JSON</string>
+    <string name="settings_catalog_pack_import_desc">Import a catalog pack or a collections file (e.g. a collections export) from a URL or pasted JSON</string>
     <string name="settings_catalog_pack_import_badge">IMPORT</string>
     <string name="settings_catalog_pack_url_label">Pack / collections URL or JSON</string>
     <string name="settings_catalog_pack_loading">Loading catalog pack details...</string>
@@ -1121,8 +1121,6 @@
     <string name="home_sports_opening">Opening live event...</string>
     <string name="home_sports_playback_failed">Could not play this live event</string>
     <string name="home_sports_event_not_live">This event is not live yet</string>
-    <string name="home_optimizing_notice">Still optimizing ARVIO for this device. Scrolling may be slow for now.</string>
-    <string name="settings_optimizing_notice">Still optimizing for this device. Scrolling may be slow for now.</string>
     <string name="home_cd_primary_provider">Primary streaming provider</string>
     <string name="home_cd_rank">Rank #%1$d</string>
     <string name="search_filter_all">All</string>
@@ -1189,6 +1187,14 @@
     <string name="player_ai_translating">AI Translating</string>
     <string name="player_cd_stop_casting">Stop casting</string>
     <string name="player_cd_cast_to_tv">Cast to TV</string>
+    <string name="cast_chooser_title">Cast to device</string>
+    <string name="cast_chooser_search_again">Search again</string>
+    <string name="cast_chooser_searching">Searching for TVs on this Wi-Fi…</string>
+    <string name="cast_chooser_none_found">No TV found. Make sure the phone and TV are on the same Wi-Fi and the TV\'s casting (DLNA / Chromecast) is turned on.</string>
+    <string name="cast_chooser_cancel">Cancel</string>
+    <string name="cast_error_local_source">This source plays through the phone and can\'t be cast. Pick a direct or debrid source.</string>
+    <string name="cast_error_format_refused">The TV refused this video format</string>
+    <string name="cast_error_no_playback">The TV accepted the video but did not start playback</string>
     <string name="player_muted">Muted</string>
     <string name="player_cd_setup">Setup</string>
     <string name="player_cd_error">Error</string>
@@ -1496,6 +1502,8 @@
     <string name="update_msg_downloading">Downloading update...</string>
     <string name="update_msg_ready_subtitle">%1$s is ready to install.</string>
     <string name="update_msg_installing">Installing update... Please follow the system prompt.</string>
+    <string name="update_msg_preparing_install">Handing the update to Android. This can take up to a minute on some TVs.</string>
+    <string name="update_msg_android_installing">Android is installing the update. ARVIO will close when it\'s done.</string>
     <string name="update_msg_failed">Update failed.</string>
     <string name="update_msg_uptodate">You already have the latest version installed.</string>
     <string name="update_msg_no_info">No release information available.</string>
@@ -1950,6 +1958,10 @@
     <string name="settings_value_indigo">Indigo</string>
     <string name="settings_value_violet">Violet</string>
     <string name="settings_value_cyan">Cyan</string>
+    <string name="settings_value_coral">Coral</string>
+    <string name="settings_value_amber">Amber</string>
+    <string name="settings_value_teal">Teal</string>
+    <string name="settings_value_pink">Pink</string>
     <string name="settings_value_normal">Normal</string>
     <string name="settings_value_bold">Bold</string>
     <string name="settings_value_background">Background</string>
@@ -2059,7 +2071,7 @@
     <string name="settings_builtin_collections_title">Built-in Collections</string>
     <string name="settings_builtin_collections_desc">Show the built-in ARVIO Services / Genres / Franchises rails. Turn off to use only your own imported collections</string>
     <string name="settings_collections_installed">Installed collections: %1$s (%2$d rails)</string>
-    <string name="catalog_collections_invalid">This is not a valid collections file (Nuvio collections export JSON expected)</string>
+    <string name="catalog_collections_invalid">This is not a valid collections file (collections export JSON expected)</string>
     <string name="catalog_tmdb_title">TMDB catalog</string>
     <string name="catalog_url_tmdb_hint">Use a TMDB list, collection, company, network, person, keyword or genre page URL</string>
     <string name="catalog_url_simkl_hint">Use a SIMKL custom-list URL, e.g. simkl.com/5/list/14462.</string>
@@ -2113,6 +2125,9 @@
     <string name="clear_playback_cache_desc">Delete all cached video data. Anything playing simply downloads again.</string>
     <string name="playback_cache_cleared">Playback cache cleared</string>
     <string name="settings_help_playback_cache_desc">Cache-enabled playback saves video for local rewinds. Large or remote streams may bypass this cache for performance. The size adapts to available storage, aiming to leave 1 GB free.</string>
+    <!-- Mobile player: pill shown while the screen is held for 3x playback. -->
+    <string name="player_hold_speed">3x speed · slide up to lock</string>
+    <string name="player_hold_speed_locked">3x speed locked · slide down to unlock</string>
 
     <!-- Live TV AI subtitles -->
     <string name="live_ai_subtitles">AI subtitles</string>
@@ -2141,7 +2156,7 @@
     <string name="youtube_search_row_title">YouTube</string>
     <string name="youtube_search_button">Search YouTube</string>
     <string name="youtube_kids_search_button">Search YouTube Kids</string>
-    <string name="youtube_search_for">for "%1$s"</string>
+    <string name="youtube_search_for">for \"%1$s\"</string>
     <string name="youtube_search_loading">Searching YouTube…</string>
     <string name="youtube_search_no_results">No YouTube videos</string>
     <string name="youtube_search_failed">YouTube didn\'t answer</string>
@@ -2184,4 +2199,54 @@
     <string name="playback_compatibility_copy">Copy report</string>
     <string name="playback_compatibility_test">Run format test</string>
     <string name="playback_compatibility_test_failed">Could not run the format test.</string>
+    <string name="nav_news">News</string>
+    <string name="navigation_show_music_phone">Show Music on phones and tablets</string>
+    <string name="navigation_show_music_tv">Show Music on TV</string>
+    <string name="navigation_show_news">Show News</string>
+    <string name="news_all">All</string>
+    <string name="news_refresh">Refresh</string>
+    <string name="news_sources_desc">Pick the providers shown on the News page. Tabs follow the order you pick them in.</string>
+    <string name="news_add_feed">Add RSS feed</string>
+    <string name="news_add_feed_hint">https://example.com/feed.xml</string>
+    <string name="news_add_feed_checking">Checking feed…</string>
+    <string name="news_add_feed_failed">That address is not a readable RSS or Atom feed</string>
+    <string name="news_custom_feed">Your feed</string>
+    <string name="news_remove">Remove</string>
+    <string name="news_done">Done</string>
+    <string name="news_no_sources">No news sources yet</string>
+    <string name="news_no_sources_desc">Pick providers or add an RSS feed in Settings, News.</string>
+    <string name="news_no_articles">No headlines right now</string>
+    <string name="news_load_failed">Could not load %1$s</string>
+    <string name="news_read_hint">Press OK for the summary and a link to the full story</string>
+    <string name="settings_desc_news">The News tab, its sources and topics</string>
+    <string name="settings_desc_music">The Music tab on phones and tablets, your music sources and the song cache</string>
+    <string name="news_topics_section">Topics</string>
+    <string name="news_topics_desc">Show every topic, or only the ones you pick. Feeds you added yourself always appear.</string>
+    <string name="news_change_providers_hint">Providers can be changed in Settings → News</string>
+    <string name="news_open_article">Open full article</string>
+    <string name="news_scan_to_read">Scan to read the full article on your phone</string>
+    <string name="news_saved_on_device">Sources and topics are saved on this device only and are not synced.</string>
+    <string name="news_sources_section">Sources</string>
+    <string name="news_topic_all">All topics</string>
+    <string name="news_topic_world">World</string>
+    <string name="news_topic_politics">Politics</string>
+    <string name="news_topic_business">Economy</string>
+    <string name="news_topic_tech">Technology</string>
+    <string name="news_topic_sports">Sports</string>
+    <string name="news_topic_health">Health</string>
+    <string name="news_topic_science">Science</string>
+    <string name="news_topic_entertainment">Entertainment</string>
+    <string name="news_topics_active">Topics: %1$s</string>
+    <string name="news_topics_uncovered">No feed for these topics: %1$s</string>
+    <string name="news_no_topic_sources">None of your sources covers these topics</string>
+    <string name="news_no_topic_sources_desc">Pick more topics or other sources in Settings, News.</string>
+    <string name="seek_thumbnails">Seek thumbnails</string>
+    <string name="seek_thumbnails_desc">Show small pictures of the video while you seek. Made on this device in the background during playback; pauses when playback needs the network or memory.</string>
+    <string name="secondary_audio">Secondary audio</string>
+    <string name="secondary_audio_desc">Used when your preferred audio language is not on the stream.</string>
+    <string name="external_player">External player</string>
+    <string name="external_player_desc">Open films and episodes in another video app, such as VLC or MX Player. ARVIO then cannot save your progress or scrobble to Trakt. Live TV keeps ARVIO\'s player.</string>
+    <string name="external_player_missing">No video app found to open this stream. Playing it here.</string>
+    <string name="auto_source_failover">Switch source automatically</string>
+    <string name="auto_source_failover_desc">When a source fails to start or stops, try the next one. Off: stay on the source and show the error, so you can retry or pick another.</string>
 </resources>

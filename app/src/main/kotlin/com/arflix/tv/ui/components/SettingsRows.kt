@@ -74,6 +74,10 @@ internal fun localizeSettingValue(value: String?): String {
     "Indigo" -> stringResource(R.string.settings_value_indigo)
     "Violet" -> stringResource(R.string.settings_value_violet)
     "Cyan" -> stringResource(R.string.settings_value_cyan)
+    "Coral" -> stringResource(R.string.settings_value_coral)
+    "Amber" -> stringResource(R.string.settings_value_amber)
+    "Teal" -> stringResource(R.string.settings_value_teal)
+    "Pink" -> stringResource(R.string.settings_value_pink)
     "Normal" -> stringResource(R.string.settings_value_normal)
     "Bold" -> stringResource(R.string.settings_value_bold)
     "Background" -> stringResource(R.string.settings_value_background)
@@ -263,11 +267,15 @@ fun MobileSettingsCategory(
             text = title,
             style = ArflixTypography.caption.copy(fontSize = 13.sp, letterSpacing = 0.sp),
             color = TextSecondary,
-            modifier = Modifier.padding(bottom = 8.dp)
+            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
         )
+        // Grouped card, as in the phone's own settings: one rounded surface per section.
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                .background(Color.White.copy(alpha = 0.045f))
+                .padding(horizontal = 12.dp, vertical = 4.dp)
         ) {
             content()
         }

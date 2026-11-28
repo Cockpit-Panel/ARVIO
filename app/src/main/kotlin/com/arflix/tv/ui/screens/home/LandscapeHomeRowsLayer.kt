@@ -71,6 +71,7 @@ fun LandscapeHomeRowsLayer(
     categories: List<Category>,
     cardLogoUrls: Map<String, String>,
     cardImdbRatings: Map<String, String> = emptyMap(),
+    heroTextlessArt: Map<String, String> = emptyMap(),
     onPreloadHeroImdbRatings: (List<MediaItem>) -> Unit = {},
     contentStartPadding: Dp,
     onNavigateToDetails: (MediaType, Int, Int?, Int?) -> Unit = { _, _, _, _ -> },
@@ -241,7 +242,7 @@ fun LandscapeHomeRowsLayer(
                         ),
                         horizontalArrangement = Arrangement.spacedBy(landscapeItemSpacing)
                     ) {
-                        items(8, key = { "skeleton_ls_${category.id}_$it" }) {
+                        items(8, key = { "skeleton_ls_${category.id}_$it" }, contentType = { "LandscapeHomeRowsLayer.rows" }) {
                             if (isRowPortrait) {
                                 SkeletonPosterCard(width = rowCardWidth)
                             } else {

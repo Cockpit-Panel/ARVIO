@@ -63,7 +63,7 @@ enum class CollectionSourceKind {
     MDBLIST_PUBLIC,
     // Generic TMDB /discover query built from `discoverParams` (raw TMDB query
     // keys such as with_companies / with_networks / primary_release_date.gte).
-    // Lets imported collections (e.g. Nuvio exports) describe any discover
+    // Lets imported collections (e.g. exported collection files) describe any discover
     // filter without a dedicated source kind per filter.
     TMDB_DISCOVER,
     // Public TMDB v3 list (`/list/{id}`), mixed movies and series in list order.
@@ -95,7 +95,12 @@ data class CollectionSourceConfig(
     val mdblistSlug: String? = null,
     val discoverParams: Map<String, String>? = null,
     val tmdbListId: Int? = null,
-    val traktListId: String? = null
+    val traktListId: String? = null,
+    /**
+     * The catalog's own name inside an imported folder ("Latest Telugu Movies"). A folder
+     * with several named catalogs shows one row per catalog instead of one merged grid.
+     */
+    val title: String? = null
 ) : Serializable
 
 data class CatalogConfig(
@@ -206,3 +211,17 @@ data class CatalogPackItem(
     val name: String?,
     val url: String?
 ) : Serializable
+
+/** Values an exported collection writes for "no value" ("None" from Python, "null" from JS). */
+private val EMPTY_LABEL_VALUES = setOf("none", "null", "undefined", "n/a")
+
+/** [value] trimmed, or null when it is blank or one of the exported "no value" spellings. */
+fun meaningfulLabel(value: String?): String? =
+    value?.trim()?.takeIf { it.isNotEmpty() && it.lowercase() !in EMPTY_LABEL_VALUES }
+
+/**
+ * A catalog title without the empty parts an exported collection may join into it,
+ * so "Latest · None" reads "Latest".
+ */
+fun cleanCatalogTitle(title: String?): String? =
+    title?.split('·')?.mapNotNull { meaningfulLabel(it) }?.joinToString(" · ")?.takeIf { it.isNotEmpty() }
